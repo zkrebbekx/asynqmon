@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, lazy, Suspense } from "react";
 import { useDispatch, useSelector } from "react-redux";
 import { useNavigate } from "react-router-dom";
 import { Info, AlertTriangle } from "lucide-react";
@@ -11,8 +11,8 @@ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "../com
 import { Alert, AlertDescription, AlertTitle } from "../components/ui/alert";
 import { AlertCircle } from "lucide-react";
 
-// QueueMetricsChart - lazy import to avoid loading if Prometheus not configured
-import QueueMetricsChart from "../components/QueueMetricsChart";
+// QueueMetricsChart pulls in recharts; load it lazily.
+const QueueMetricsChart = lazy(() => import("../components/QueueMetricsChart"));
 import MetricsFetchControls from "../components/MetricsFetchControls";
 
 export default function MetricsView() {
@@ -57,7 +57,11 @@ export default function MetricsView() {
         </div>
       )}
 
-      {metrics && <QueueMetricsChart metrics={metrics} queues={queues} />}
+      {metrics && (
+        <Suspense fallback={<div className="h-64 animate-pulse rounded-md bg-[hsl(var(--muted))]/40" />}>
+          <QueueMetricsChart metrics={metrics} queues={queues} />
+        </Suspense>
+      )}
     </div>
   );
 }

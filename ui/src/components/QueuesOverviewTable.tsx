@@ -11,6 +11,7 @@ import { Input } from "./ui/input";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "./ui/tooltip";
 import DeleteQueueConfirmationDialog from "./DeleteQueueConfirmationDialog";
 import { cn } from "../lib/utils";
+import { matchesQuery } from "../lib/filter";
 
 interface QueueWithMetadata extends Queue {
   requestPending: boolean;
@@ -105,9 +106,7 @@ export default function QueuesOverviewTable({ queues, onPauseClick, onResumeClic
   const [queueToDelete, setQueueToDelete] = useState<Queue | null>(null);
   const [filter, setFilter] = useState("");
 
-  const filtered = filter.trim()
-    ? queues.filter((q) => q.queue.toLowerCase().includes(filter.trim().toLowerCase()))
-    : queues;
+  const filtered = queues.filter((q) => matchesQuery(q.queue, filter));
 
   const header = (
     <div className="flex items-center justify-between px-4 py-3 border-b border-[hsl(var(--border))]">

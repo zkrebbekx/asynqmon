@@ -11,6 +11,7 @@ require (
 	github.com/prometheus/client_golang v1.11.1
 	github.com/redis/go-redis/v9 v9.0.4
 	github.com/rs/cors v1.7.0
+	github.com/smartystreets/goconvey v1.8.1
 	github.com/spf13/cast v1.5.0 // indirect
 	golang.org/x/sys v0.7.0 // indirect
 	golang.org/x/time v0.3.0 // indirect

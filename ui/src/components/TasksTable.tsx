@@ -3,6 +3,7 @@ import { useNavigate } from "react-router-dom";
 import { Trash2, Play, Archive, X, ChevronLeft, ChevronRight, Filter } from "lucide-react";
 import { usePolling } from "../hooks";
 import { prettifyPayload } from "../utils";
+import { matchesQuery } from "../lib/filter";
 import { Input } from "./ui/input";
 import { TaskInfoExtended } from "../reducers/tasksReducer";
 import { TableColumn } from "../types/table";
@@ -66,12 +67,10 @@ export default function TasksTable(props: Props) {
   usePolling(fetchTasks, pollInterval);
 
   // Filter the current page by task type or (decoded) payload contents.
-  const needle = filter.trim().toLowerCase();
+  const needle = filter.trim();
   const visibleTasks = needle
     ? props.tasks.filter(
-        (t) =>
-          t.type.toLowerCase().includes(needle) ||
-          prettifyPayload(t.payload).toLowerCase().includes(needle)
+        (t) => matchesQuery(t.type, needle) || matchesQuery(prettifyPayload(t.payload), needle)
       )
     : props.tasks;
 

@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, lazy, Suspense } from "react";
 import { useSelector, useDispatch } from "react-redux";
 import { Info, AlertCircle } from "lucide-react";
 import { AppState } from "../store";
@@ -7,10 +7,19 @@ import { listQueueStatsAsync } from "../actions/queueStatsActions";
 import { dailyStatsKeyChange } from "../actions/settingsActions";
 import { DailyStatsKey } from "../constants";
 import { usePolling } from "../hooks";
-import QueueSizeChart from "../components/QueueSizeChart";
-import ProcessedTasksChart from "../components/ProcessedTasksChart";
-import DailyStatsChart from "../components/DailyStatsChart";
+// Charts pull in recharts; load them after the dashboard shell + table paint.
+const QueueSizeChart = lazy(() => import("../components/QueueSizeChart"));
+const ProcessedTasksChart = lazy(() => import("../components/ProcessedTasksChart"));
+const DailyStatsChart = lazy(() => import("../components/DailyStatsChart"));
 import QueuesOverviewTable from "../components/QueuesOverviewTable";
+
+function ChartSkeleton() {
+  return (
+    <div className="flex h-full w-full items-center justify-center">
+      <div className="h-full w-full animate-pulse rounded-md bg-[hsl(var(--muted))]/40" />
+    </div>
+  );
+}
 import { Card, CardContent, CardHeader, CardTitle } from "../components/ui/card";
 import { Alert, AlertDescription, AlertTitle } from "../components/ui/alert";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "../components/ui/tooltip";
@@ -72,7 +81,9 @@ export default function DashboardView() {
             </div>
           </CardHeader>
           <CardContent className="h-72 pb-4">
-            <QueueSizeChart data={queues} />
+            <Suspense fallback={<ChartSkeleton />}>
+              <QueueSizeChart data={queues} />
+            </Suspense>
           </CardContent>
         </Card>
 
@@ -109,10 +120,12 @@ export default function DashboardView() {
             </div>
           </CardHeader>
           <CardContent className="h-72 pb-4">
-            {dailyStatsKey === "today" && <ProcessedTasksChart data={processedStats} />}
-            {dailyStatsKey === "last-7d" && <DailyStatsChart data={queueStats} numDays={7} />}
-            {dailyStatsKey === "last-30d" && <DailyStatsChart data={queueStats} numDays={30} />}
-            {dailyStatsKey === "last-90d" && <DailyStatsChart data={queueStats} numDays={90} />}
+            <Suspense fallback={<ChartSkeleton />}>
+              {dailyStatsKey === "today" && <ProcessedTasksChart data={processedStats} />}
+              {dailyStatsKey === "last-7d" && <DailyStatsChart data={queueStats} numDays={7} />}
+              {dailyStatsKey === "last-30d" && <DailyStatsChart data={queueStats} numDays={30} />}
+              {dailyStatsKey === "last-90d" && <DailyStatsChart data={queueStats} numDays={90} />}
+            </Suspense>
           </CardContent>
         </Card>
       </div>
