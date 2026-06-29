@@ -1,89 +1,95 @@
-import * as SelectPrimitive from "@radix-ui/react-select";
-import { Check, ChevronDown, ChevronUp } from "lucide-react";
+import React from "react";
+import { ChevronDown } from "lucide-react";
 import { cn } from "@/lib/utils";
 
-export const Select = SelectPrimitive.Root;
-export const SelectGroup = SelectPrimitive.Group;
-export const SelectValue = SelectPrimitive.Value;
-
-export function SelectTrigger({ className, children, ...props }: React.ComponentPropsWithoutRef<typeof SelectPrimitive.Trigger>) {
-  return (
-    <SelectPrimitive.Trigger
-      className={cn(
-        "flex h-9 w-full items-center justify-between whitespace-nowrap rounded-md border border-[hsl(var(--input))] bg-transparent px-3 py-2 text-sm shadow-sm ring-offset-[hsl(var(--background))] placeholder:text-[hsl(var(--muted-foreground))] focus:outline-none focus:ring-1 focus:ring-[hsl(var(--ring))] disabled:cursor-not-allowed disabled:opacity-50 [&>span]:line-clamp-1",
-        className
-      )}
-      {...props}
-    >
-      {children}
-      <SelectPrimitive.Icon asChild>
-        <ChevronDown className="h-4 w-4 opacity-50" />
-      </SelectPrimitive.Icon>
-    </SelectPrimitive.Trigger>
-  );
+interface SelectProps {
+  value?: string;
+  defaultValue?: string;
+  onValueChange?: (value: string) => void;
+  disabled?: boolean;
+  open?: boolean;
+  onOpenChange?: (open: boolean) => void;
+  children?: React.ReactNode;
 }
 
-export function SelectScrollUpButton({ className, ...props }: React.ComponentPropsWithoutRef<typeof SelectPrimitive.ScrollUpButton>) {
-  return (
-    <SelectPrimitive.ScrollUpButton className={cn("flex cursor-default items-center justify-center py-1", className)} {...props}>
-      <ChevronUp className="h-4 w-4" />
-    </SelectPrimitive.ScrollUpButton>
-  );
+// Pull className off SelectTrigger child so callers keep styling the control.
+function findTriggerClassName(children: React.ReactNode): string | undefined {
+  let cls: string | undefined;
+  React.Children.forEach(children, (child) => {
+    if (React.isValidElement(child) && child.type === SelectTrigger) {
+      cls = (child.props as any).className;
+    }
+  });
+  return cls;
 }
 
-export function SelectScrollDownButton({ className, ...props }: React.ComponentPropsWithoutRef<typeof SelectPrimitive.ScrollDownButton>) {
-  return (
-    <SelectPrimitive.ScrollDownButton className={cn("flex cursor-default items-center justify-center py-1", className)} {...props}>
-      <ChevronDown className="h-4 w-4" />
-    </SelectPrimitive.ScrollDownButton>
-  );
+// Collect options by traversing SelectContent > SelectItem (and SelectGroup > SelectItem).
+function collectOptions(children: React.ReactNode): { value: string; label: React.ReactNode; disabled?: boolean }[] {
+  const opts: { value: string; label: React.ReactNode; disabled?: boolean }[] = [];
+  React.Children.forEach(children, (child) => {
+    if (!React.isValidElement(child)) return;
+    const type = child.type;
+    if (type === SelectContent || type === SelectGroup) {
+      opts.push(...collectOptions((child.props as any).children));
+    } else if (type === SelectItem) {
+      const p = child.props as any;
+      opts.push({ value: p.value, label: p.children, disabled: p.disabled });
+    }
+  });
+  return opts;
 }
 
-export function SelectContent({ className, children, position = "popper", ...props }: React.ComponentPropsWithoutRef<typeof SelectPrimitive.Content>) {
+// Native <select> implementation — avoids @radix-ui/react-select setRef infinite-loop bug.
+export function Select({ value, defaultValue, onValueChange, disabled, children }: SelectProps) {
+  const opts = collectOptions(children);
+  const triggerClassName = findTriggerClassName(children);
   return (
-    <SelectPrimitive.Portal>
-      <SelectPrimitive.Content
+    <div className="relative inline-flex items-center">
+      <select
+        value={value ?? defaultValue ?? ""}
+        onChange={(e) => onValueChange?.(e.target.value)}
+        disabled={disabled}
         className={cn(
-          "relative z-50 max-h-96 min-w-[8rem] overflow-hidden rounded-md border border-[hsl(var(--border))] bg-[hsl(var(--popover))] text-[hsl(var(--popover-foreground))] shadow-md data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95 data-[side=bottom]:slide-in-from-top-2 data-[side=left]:slide-in-from-right-2 data-[side=right]:slide-in-from-left-2 data-[side=top]:slide-in-from-bottom-2",
-          position === "popper" && "data-[side=bottom]:translate-y-1 data-[side=left]:-translate-x-1 data-[side=right]:translate-x-1 data-[side=top]:-translate-y-1",
-          className
+          "appearance-none h-9 w-full rounded-md border border-[hsl(var(--input))] bg-[hsl(var(--background))] text-[hsl(var(--foreground))] px-3 py-2 pr-8 text-sm shadow-sm focus:outline-none focus:ring-1 focus:ring-[hsl(var(--ring))] disabled:cursor-not-allowed disabled:opacity-50 cursor-pointer",
+          triggerClassName
         )}
-        position={position}
-        {...props}
       >
-        <SelectScrollUpButton />
-        <SelectPrimitive.Viewport className={cn("p-1", position === "popper" && "h-[var(--radix-select-trigger-height)] w-full min-w-[var(--radix-select-trigger-width)]")}>
-          {children}
-        </SelectPrimitive.Viewport>
-        <SelectScrollDownButton />
-      </SelectPrimitive.Content>
-    </SelectPrimitive.Portal>
+        {opts.map((opt) => (
+          <option key={opt.value} value={opt.value} disabled={opt.disabled}>
+            {typeof opt.label === "string" ? opt.label : opt.value}
+          </option>
+        ))}
+      </select>
+      <ChevronDown className="pointer-events-none absolute right-2 h-4 w-4 opacity-50" />
+    </div>
   );
 }
 
-export function SelectLabel({ className, ...props }: React.ComponentPropsWithoutRef<typeof SelectPrimitive.Label>) {
-  return <SelectPrimitive.Label className={cn("px-2 py-1.5 text-xs font-semibold", className)} {...props} />;
+// Sub-components return null — Select renders everything from the traversal above.
+export function SelectTrigger(_props: { children?: React.ReactNode; className?: string }) {
+  return null;
 }
-
-export function SelectItem({ className, children, ...props }: React.ComponentPropsWithoutRef<typeof SelectPrimitive.Item>) {
-  return (
-    <SelectPrimitive.Item
-      className={cn(
-        "relative flex w-full cursor-default select-none items-center rounded-sm py-1.5 pl-2 pr-8 text-sm outline-none focus:bg-[hsl(var(--accent))] focus:text-[hsl(var(--accent-foreground))] data-[disabled]:pointer-events-none data-[disabled]:opacity-50",
-        className
-      )}
-      {...props}
-    >
-      <span className="absolute right-2 flex h-3.5 w-3.5 items-center justify-center">
-        <SelectPrimitive.ItemIndicator>
-          <Check className="h-4 w-4" />
-        </SelectPrimitive.ItemIndicator>
-      </span>
-      <SelectPrimitive.ItemText>{children}</SelectPrimitive.ItemText>
-    </SelectPrimitive.Item>
-  );
+export function SelectValue(_props: { placeholder?: string }) {
+  return null;
 }
-
-export function SelectSeparator({ className, ...props }: React.ComponentPropsWithoutRef<typeof SelectPrimitive.Separator>) {
-  return <SelectPrimitive.Separator className={cn("-mx-1 my-1 h-px bg-[hsl(var(--muted))]", className)} {...props} />;
+export function SelectContent(_props: { children?: React.ReactNode; position?: string; className?: string }) {
+  return null;
+}
+export function SelectItem(_props: { children?: React.ReactNode; value: string; disabled?: boolean; className?: string }) {
+  return null;
+}
+export function SelectGroup(_props: { children?: React.ReactNode }) {
+  return null;
+}
+export function SelectLabel(_props: { children?: React.ReactNode; className?: string }) {
+  return null;
+}
+export function SelectSeparator(_props: { className?: string }) {
+  return null;
+}
+export function SelectScrollUpButton(_props: { className?: string }) {
+  return null;
+}
+export function SelectScrollDownButton(_props: { className?: string }) {
+  return null;
 }

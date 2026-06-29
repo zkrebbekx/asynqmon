@@ -56,7 +56,7 @@ function MetricChart({ title, metrics, queues, formatter }: {
             />
             <Legend />
             {queues.map((q, i) => (
-              <Line key={q} type="monotone" dataKey={q} stroke={COLORS[i % COLORS.length]} dot={false} strokeWidth={1.5} />
+              <Line key={q} type="monotone" dataKey={q} stroke={COLORS[i % COLORS.length]} dot={false} strokeWidth={1.5} isAnimationActive={false} />
             ))}
           </LineChart>
         </ResponsiveContainer>

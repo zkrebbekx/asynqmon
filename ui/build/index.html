@@ -7,11 +7,13 @@
     <title>Asynqmon</title>
     <script>
       window.ROOT_PATH = "/[[.RootPath]]".replace(/^\/\//, "/").replace(/\/$/, "");
+      if (window.ROOT_PATH.includes("[[")) window.ROOT_PATH = "";
       window.PROMETHEUS_SERVER_ADDRESS = "/[[.PrometheusAddr]]";
-      window.READ_ONLY = /[[.ReadOnly]]/;
+      if (window.PROMETHEUS_SERVER_ADDRESS.includes("[[")) window.PROMETHEUS_SERVER_ADDRESS = "";
+      window.READ_ONLY = "/[[.ReadOnly]]" === "true";
     </script>
-    <script type="module" crossorigin src="/assets/index-DKBaqhVg.js"></script>
-    <link rel="stylesheet" crossorigin href="/assets/index-DFZ6siij.css">
+    <script type="module" crossorigin src="/assets/index-DhRVrYVT.js"></script>
+    <link rel="stylesheet" crossorigin href="/assets/index-gPWU63jw.css">
   </head>
   <body>
     <div id="root"></div>

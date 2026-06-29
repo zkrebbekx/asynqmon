@@ -7,8 +7,10 @@
     <title>Asynqmon</title>
     <script>
       window.ROOT_PATH = "/[[.RootPath]]".replace(/^\/\//, "/").replace(/\/$/, "");
+      if (window.ROOT_PATH.includes("[[")) window.ROOT_PATH = "";
       window.PROMETHEUS_SERVER_ADDRESS = "/[[.PrometheusAddr]]";
-      window.READ_ONLY = /[[.ReadOnly]]/;
+      if (window.PROMETHEUS_SERVER_ADDRESS.includes("[[")) window.PROMETHEUS_SERVER_ADDRESS = "";
+      window.READ_ONLY = "/[[.ReadOnly]]" === "true";
     </script>
   </head>
   <body>

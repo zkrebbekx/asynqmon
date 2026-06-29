@@ -38,8 +38,8 @@ export default function DailyStatsChart({ data, numDays }: Props) {
         <YAxis stroke="hsl(var(--muted-foreground))" tick={{ fontSize: 11 }} />
         <Tooltip contentStyle={{ backgroundColor: "hsl(var(--popover))", border: "1px solid hsl(var(--border))", borderRadius: "6px" }} />
         <Legend />
-        <Line type="monotone" dataKey="succeeded" stroke="#81c995" strokeWidth={2} dot={false} />
-        <Line type="monotone" dataKey="failed" stroke="#f28b82" strokeWidth={2} dot={false} />
+        <Line type="monotone" dataKey="succeeded" stroke="#81c995" strokeWidth={2} dot={false} isAnimationActive={false} />
+        <Line type="monotone" dataKey="failed" stroke="#f28b82" strokeWidth={2} dot={false} isAnimationActive={false} />
       </LineChart>
     </ResponsiveContainer>
   );

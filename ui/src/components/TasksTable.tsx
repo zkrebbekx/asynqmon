@@ -1,7 +1,9 @@
 import { useState, useCallback, type ReactElement } from "react";
 import { useNavigate } from "react-router-dom";
-import { Trash2, Play, Archive, X, ChevronLeft, ChevronRight } from "lucide-react";
+import { Trash2, Play, Archive, X, ChevronLeft, ChevronRight, Filter } from "lucide-react";
 import { usePolling } from "../hooks";
+import { prettifyPayload } from "../utils";
+import { Input } from "./ui/input";
 import { TaskInfoExtended } from "../reducers/tasksReducer";
 import { TableColumn } from "../types/table";
 import { PaginationOptions } from "../api";
@@ -55,6 +57,7 @@ export default function TasksTable(props: Props) {
   const { pollInterval, listTasks, queue, pageSize } = props;
   const [page, setPage] = useState(0);
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
+  const [filter, setFilter] = useState("");
 
   const fetchTasks = useCallback(() => {
     listTasks(queue, { size: pageSize, page: page + 1 });
@@ -62,8 +65,18 @@ export default function TasksTable(props: Props) {
 
   usePolling(fetchTasks, pollInterval);
 
+  // Filter the current page by task type or (decoded) payload contents.
+  const needle = filter.trim().toLowerCase();
+  const visibleTasks = needle
+    ? props.tasks.filter(
+        (t) =>
+          t.type.toLowerCase().includes(needle) ||
+          prettifyPayload(t.payload).toLowerCase().includes(needle)
+      )
+    : props.tasks;
+
   const handleSelectAll = (checked: boolean) => {
-    setSelectedIds(checked ? props.tasks.map((t) => t.id) : []);
+    setSelectedIds(checked ? visibleTasks.map((t) => t.id) : []);
   };
 
   const handleSelectOne = (id: string, checked: boolean) => {
@@ -73,7 +86,7 @@ export default function TasksTable(props: Props) {
   };
 
   const totalPages = Math.ceil(props.totalTaskCount / pageSize);
-  const allSelected = props.tasks.length > 0 && selectedIds.length === props.tasks.length;
+  const allSelected = visibleTasks.length > 0 && selectedIds.length === visibleTasks.length;
   const someSelected = selectedIds.length > 0 && !allSelected;
 
   if (props.error) {
@@ -203,6 +216,26 @@ export default function TasksTable(props: Props) {
         </div>
       )}
 
+      {/* Filter current page by type / payload */}
+      {props.tasks.length > 0 && (
+        <div className="flex items-center justify-between px-4 py-2 border-b border-[hsl(var(--border))]">
+          <div className="relative">
+            <Filter size={13} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-[hsl(var(--muted-foreground))]" />
+            <Input
+              placeholder="Filter by type or payload"
+              value={filter}
+              onChange={(e) => setFilter(e.target.value)}
+              className="pl-7 h-8 w-64 text-xs"
+            />
+          </div>
+          {needle && (
+            <span className="text-xs text-[hsl(var(--muted-foreground))]">
+              {visibleTasks.length} of {props.tasks.length} on this page
+            </span>
+          )}
+        </div>
+      )}
+
       <Table>
         <TableHeader>
           <TableRow>
@@ -225,17 +258,17 @@ export default function TasksTable(props: Props) {
           </TableRow>
         </TableHeader>
         <TableBody>
-          {props.tasks.length === 0 ? (
+          {visibleTasks.length === 0 ? (
             <TableRow>
               <TableCell
                 colSpan={props.columns.length + (window.READ_ONLY ? 0 : 1)}
                 className="text-center py-8 text-[hsl(var(--muted-foreground))]"
               >
-                No tasks
+                {needle ? `No tasks match "${filter}" on this page` : "No tasks"}
               </TableCell>
             </TableRow>
           ) : (
-            props.tasks.map((task) =>
+            visibleTasks.map((task) =>
               props.renderRow({
                 task,
                 isSelected: selectedIds.includes(task.id),

@@ -19,6 +19,7 @@ import { toggleDrawer } from "./actions/settingsActions";
 import { closeSnackbar } from "./actions/snackbarActions";
 import { ThemePreference } from "./reducers/settingsReducer";
 import { cn } from "./lib/utils";
+import HeaderBar from "./components/HeaderBar";
 import DashboardView from "./views/DashboardView";
 import TasksView from "./views/TasksView";
 import TaskDetailsView from "./views/TaskDetailsView";
@@ -162,6 +163,7 @@ function AppContent() {
 
       {/* Main content */}
       <main className="flex-1 overflow-y-auto">
+        <HeaderBar />
         <Routes>
           <Route path={appPaths.TASK_DETAILS} element={<TaskDetailsView />} />
           <Route path={appPaths.QUEUE_DETAILS} element={<TasksView />} />

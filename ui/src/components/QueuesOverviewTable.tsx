@@ -1,12 +1,13 @@
 import { useState } from "react";
 import { Link } from "react-router-dom";
 import prettyBytes from "pretty-bytes";
-import { Pause, Play, Trash2, MoreHorizontal } from "lucide-react";
+import { Pause, Play, Trash2, MoreHorizontal, Search } from "lucide-react";
 import { Queue } from "../api";
 import { queueDetailsPath } from "../paths";
 import { percentage } from "../utils";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "./ui/table";
 import { Button } from "./ui/button";
+import { Input } from "./ui/input";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "./ui/tooltip";
 import DeleteQueueConfirmationDialog from "./DeleteQueueConfirmationDialog";
 import { cn } from "../lib/utils";
@@ -44,7 +45,8 @@ function QueueRow({ queue: q, onPauseClick, onResumeClick, onDeleteClick }: {
         </Link>
       </TableCell>
       <TableCell>
-        <span className={cn("text-xs font-medium", q.paused ? "text-red-500" : "text-emerald-600")}>
+        <span className={cn("inline-flex items-center gap-1.5 text-xs font-medium", q.paused ? "text-amber-500" : "text-emerald-600")}>
+          <span className={cn("h-1.5 w-1.5 rounded-full", q.paused ? "bg-amber-500" : "bg-emerald-500 animate-pulse")} />
           {q.paused ? "paused" : "running"}
         </span>
       </TableCell>
@@ -101,17 +103,59 @@ function QueueRow({ queue: q, onPauseClick, onResumeClick, onDeleteClick }: {
 
 export default function QueuesOverviewTable({ queues, onPauseClick, onResumeClick, onDeleteClick }: Props) {
   const [queueToDelete, setQueueToDelete] = useState<Queue | null>(null);
+  const [filter, setFilter] = useState("");
+
+  const filtered = filter.trim()
+    ? queues.filter((q) => q.queue.toLowerCase().includes(filter.trim().toLowerCase()))
+    : queues;
+
+  const header = (
+    <div className="flex items-center justify-between px-4 py-3 border-b border-[hsl(var(--border))]">
+      <h2 className="text-base font-semibold text-[hsl(var(--foreground))]">
+        Queues
+        <span className="ml-2 text-xs font-normal text-[hsl(var(--muted-foreground))]">
+          {filter.trim() ? `${filtered.length} of ${queues.length}` : queues.length}
+        </span>
+      </h2>
+      {queues.length > 0 && (
+        <div className="relative">
+          <Search size={13} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-[hsl(var(--muted-foreground))]" />
+          <Input
+            placeholder="Filter queues"
+            value={filter}
+            onChange={(e) => setFilter(e.target.value)}
+            className="pl-7 h-8 w-48 text-xs"
+          />
+        </div>
+      )}
+    </div>
+  );
 
   if (queues.length === 0) {
     return (
-      <div className="px-6 py-8 text-center text-sm text-[hsl(var(--muted-foreground))]">
-        No queues found
-      </div>
+      <>
+        {header}
+        <div className="px-6 py-8 text-center text-sm text-[hsl(var(--muted-foreground))]">
+          No queues found
+        </div>
+      </>
+    );
+  }
+
+  if (filtered.length === 0) {
+    return (
+      <>
+        {header}
+        <div className="px-6 py-8 text-center text-sm text-[hsl(var(--muted-foreground))]">
+          No queues match "{filter}"
+        </div>
+      </>
     );
   }
 
   return (
     <>
+      {header}
       <Table>
         <TableHeader>
           <TableRow>
@@ -127,7 +171,7 @@ export default function QueuesOverviewTable({ queues, onPauseClick, onResumeClic
           </TableRow>
         </TableHeader>
         <TableBody>
-          {queues.map((q) => (
+          {filtered.map((q) => (
             <QueueRow
               key={q.queue}
               queue={q}

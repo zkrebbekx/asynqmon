@@ -34,13 +34,13 @@ export default function QueueSizeChart({ data }: Props) {
         <YAxis stroke="hsl(var(--muted-foreground))" tick={{ fontSize: 12 }} />
         <Tooltip contentStyle={{ backgroundColor: "hsl(var(--popover))", border: "1px solid hsl(var(--border))", borderRadius: "6px" }} />
         <Legend />
-        <Bar dataKey="active" stackId="a" fill="#1967d2" />
-        <Bar dataKey="pending" stackId="a" fill="#669df6" />
-        <Bar dataKey="aggregating" stackId="a" fill="#e69138" />
-        <Bar dataKey="scheduled" stackId="a" fill="#fdd663" />
-        <Bar dataKey="retry" stackId="a" fill="#f28b82" />
-        <Bar dataKey="archived" stackId="a" fill="#9aa0a6" />
-        <Bar dataKey="completed" stackId="a" fill="#81c995" />
+        <Bar dataKey="active" stackId="a" fill="#1967d2" isAnimationActive={false} />
+        <Bar dataKey="pending" stackId="a" fill="#669df6" isAnimationActive={false} />
+        <Bar dataKey="aggregating" stackId="a" fill="#e69138" isAnimationActive={false} />
+        <Bar dataKey="scheduled" stackId="a" fill="#fdd663" isAnimationActive={false} />
+        <Bar dataKey="retry" stackId="a" fill="#f28b82" isAnimationActive={false} />
+        <Bar dataKey="archived" stackId="a" fill="#9aa0a6" isAnimationActive={false} />
+        <Bar dataKey="completed" stackId="a" fill="#81c995" isAnimationActive={false} />
       </BarChart>
     </ResponsiveContainer>
   );

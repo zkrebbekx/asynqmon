@@ -19,8 +19,8 @@ export default function ProcessedTasksChart({ data }: Props) {
         <YAxis stroke="hsl(var(--muted-foreground))" tick={{ fontSize: 12 }} />
         <Tooltip contentStyle={{ backgroundColor: "hsl(var(--popover))", border: "1px solid hsl(var(--border))", borderRadius: "6px" }} />
         <Legend />
-        <Bar dataKey="succeeded" stackId="a" fill="#81c995" />
-        <Bar dataKey="failed" stackId="a" fill="#f28b82" />
+        <Bar dataKey="succeeded" stackId="a" fill="#81c995" isAnimationActive={false} />
+        <Bar dataKey="failed" stackId="a" fill="#f28b82" isAnimationActive={false} />
       </BarChart>
     </ResponsiveContainer>
   );
