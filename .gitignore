@@ -36,3 +36,8 @@ dist/
 
 # examples
 examples/
+
+# backup artifacts
+*.bak
+*_backup.*
+*_backup/

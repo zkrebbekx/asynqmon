@@ -33,6 +33,20 @@ describe("Select (native wrapper)", () => {
     expect(select.value).toBe("last-7d");
   });
 
+  it("flattens non-string SelectItem children into the option label", () => {
+    render(
+      <Select value="a">
+        <SelectContent>
+          <SelectItem value="a">
+            <span>Wrapped Label</span>
+          </SelectItem>
+        </SelectContent>
+      </Select>
+    );
+    const option = screen.getByRole("option") as HTMLOptionElement;
+    expect(option.textContent).toBe("Wrapped Label");
+  });
+
   it("calls onValueChange with the selected value", async () => {
     const onChange = vi.fn();
     render(<Sample onChange={onChange} />);

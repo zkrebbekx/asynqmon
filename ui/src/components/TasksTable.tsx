@@ -223,7 +223,12 @@ export default function TasksTable(props: Props) {
             <Input
               placeholder="Filter by type or payload"
               value={filter}
-              onChange={(e) => setFilter(e.target.value)}
+              onChange={(e) => {
+                setFilter(e.target.value);
+                // Drop any selection that may no longer be visible so bulk
+                // actions never act on filtered-out rows.
+                setSelectedIds([]);
+              }}
               className="pl-7 h-8 w-64 text-xs"
             />
           </div>

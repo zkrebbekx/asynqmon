@@ -23,6 +23,16 @@ function findTriggerClassName(children: React.ReactNode): string | undefined {
   return cls;
 }
 
+// Flatten React children (strings, numbers, nested fragments) into plain text,
+// since a native <option> can only render a text label.
+function childrenToText(node: React.ReactNode): string {
+  if (node === null || node === undefined || typeof node === "boolean") return "";
+  if (typeof node === "string" || typeof node === "number") return String(node);
+  if (Array.isArray(node)) return node.map(childrenToText).join("");
+  if (React.isValidElement(node)) return childrenToText((node.props as any).children);
+  return "";
+}
+
 // Collect options by traversing SelectContent > SelectItem (and SelectGroup > SelectItem).
 function collectOptions(children: React.ReactNode): { value: string; label: React.ReactNode; disabled?: boolean }[] {
   const opts: { value: string; label: React.ReactNode; disabled?: boolean }[] = [];
@@ -56,7 +66,7 @@ export function Select({ value, defaultValue, onValueChange, disabled, children 
       >
         {opts.map((opt) => (
           <option key={opt.value} value={opt.value} disabled={opt.disabled}>
-            {typeof opt.label === "string" ? opt.label : opt.value}
+            {childrenToText(opt.label) || opt.value}
           </option>
         ))}
       </select>

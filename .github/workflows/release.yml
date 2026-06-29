@@ -18,14 +18,14 @@ jobs:
           fetch-depth: 0
 
       - name: Set up Go
-        uses: actions/setup-go@v2
+        uses: actions/setup-go@v5
         with:
-          go-version: 1.16
+          go-version: "1.21"
 
       - name: Set up Node
-        uses: actions/setup-node@v2
+        uses: actions/setup-node@v4
         with:
-          node-version: "12"
+          node-version: "20"
 
       - name: Get release
         id: release
@@ -34,7 +34,7 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
 
       - name: Install NPM packages
-        run: cd ui && rm yarn.lock && yarn install
+        run: cd ui && npm ci
 
       - name: Build Release Binary
         run: |
