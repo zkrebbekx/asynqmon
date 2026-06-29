@@ -1,0 +1,1 @@
+import{u as e}from"./vendor-Bbxo_Yxk.js";var t=e();function n(){return(0,t.jsxs)(`div`,{className:`flex flex-col items-center justify-center h-full min-h-[400px] text-[hsl(var(--muted-foreground))]`,children:[(0,t.jsx)(`h1`,{className:`text-6xl font-bold mb-4`,children:`404`}),(0,t.jsx)(`p`,{className:`text-xl`,children:`Page not found`})]})}export{n as default};

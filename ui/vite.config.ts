@@ -12,6 +12,18 @@ export default defineConfig({
   },
   build: {
     outDir: 'build',
+    // recharts is intentionally isolated as its own cacheable vendor chunk.
+    chunkSizeWarningLimit: 600,
+    rollupOptions: {
+      output: {
+        manualChunks(id: string) {
+          if (id.includes('node_modules')) {
+            if (id.includes('recharts') || id.includes('d3-') || id.includes('victory')) return 'recharts';
+            if (/[\\/](react|react-dom|react-router|react-router-dom|react-redux|redux)[\\/]/.test(id)) return 'vendor';
+          }
+        },
+      },
+    },
   },
   server: {
     proxy: {

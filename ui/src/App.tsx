@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, lazy, Suspense } from "react";
 import { useSelector, useDispatch } from "react-redux";
 import { BrowserRouter, Routes, Route, NavLink, useLocation } from "react-router-dom";
 import { Toaster, toast } from "sonner";
@@ -20,15 +20,18 @@ import { closeSnackbar } from "./actions/snackbarActions";
 import { ThemePreference } from "./reducers/settingsReducer";
 import { cn } from "./lib/utils";
 import HeaderBar from "./components/HeaderBar";
-import DashboardView from "./views/DashboardView";
-import TasksView from "./views/TasksView";
-import TaskDetailsView from "./views/TaskDetailsView";
-import SchedulersView from "./views/SchedulersView";
-import ServersView from "./views/ServersView";
-import RedisInfoView from "./views/RedisInfoView";
-import MetricsView from "./views/MetricsView";
-import SettingsView from "./views/SettingsView";
-import PageNotFoundView from "./views/PageNotFoundView";
+
+// Route-level code splitting: each view (and its heavy deps like recharts)
+// loads on demand instead of in the initial bundle.
+const DashboardView = lazy(() => import("./views/DashboardView"));
+const TasksView = lazy(() => import("./views/TasksView"));
+const TaskDetailsView = lazy(() => import("./views/TaskDetailsView"));
+const SchedulersView = lazy(() => import("./views/SchedulersView"));
+const ServersView = lazy(() => import("./views/ServersView"));
+const RedisInfoView = lazy(() => import("./views/RedisInfoView"));
+const MetricsView = lazy(() => import("./views/MetricsView"));
+const SettingsView = lazy(() => import("./views/SettingsView"));
+const PageNotFoundView = lazy(() => import("./views/PageNotFoundView"));
 
 // Import logo SVGs as URLs
 import logoColor from "./images/logo-color.svg";
@@ -164,17 +167,25 @@ function AppContent() {
       {/* Main content */}
       <main className="flex-1 overflow-y-auto">
         <HeaderBar />
-        <Routes>
-          <Route path={appPaths.TASK_DETAILS} element={<TaskDetailsView />} />
-          <Route path={appPaths.QUEUE_DETAILS} element={<TasksView />} />
-          <Route path={appPaths.SCHEDULERS} element={<SchedulersView />} />
-          <Route path={appPaths.SERVERS} element={<ServersView />} />
-          <Route path={appPaths.REDIS} element={<RedisInfoView />} />
-          <Route path={appPaths.SETTINGS} element={<SettingsView />} />
-          <Route path={appPaths.QUEUE_METRICS} element={<MetricsView />} />
-          <Route path={appPaths.HOME} element={<DashboardView />} />
-          <Route path="*" element={<PageNotFoundView />} />
-        </Routes>
+        <Suspense
+          fallback={
+            <div className="flex h-64 items-center justify-center text-sm text-[hsl(var(--muted-foreground))]">
+              Loading…
+            </div>
+          }
+        >
+          <Routes>
+            <Route path={appPaths.TASK_DETAILS} element={<TaskDetailsView />} />
+            <Route path={appPaths.QUEUE_DETAILS} element={<TasksView />} />
+            <Route path={appPaths.SCHEDULERS} element={<SchedulersView />} />
+            <Route path={appPaths.SERVERS} element={<ServersView />} />
+            <Route path={appPaths.REDIS} element={<RedisInfoView />} />
+            <Route path={appPaths.SETTINGS} element={<SettingsView />} />
+            <Route path={appPaths.QUEUE_METRICS} element={<MetricsView />} />
+            <Route path={appPaths.HOME} element={<DashboardView />} />
+            <Route path="*" element={<PageNotFoundView />} />
+          </Routes>
+        </Suspense>
       </main>
 
       <Toaster position="bottom-left" />
