@@ -1,119 +1,39 @@
-import React, { useEffect } from "react";
-import { connect, ConnectedProps } from "react-redux";
-import Container from "@material-ui/core/Container";
-import { makeStyles } from "@material-ui/core/styles";
-import Grid from "@material-ui/core/Grid";
-import Paper from "@material-ui/core/Paper";
-import Typography from "@material-ui/core/Typography";
-import InfoIcon from "@material-ui/icons/Info";
-import Alert from "@material-ui/lab/Alert";
-import AlertTitle from "@material-ui/lab/AlertTitle";
-import {
-  listQueuesAsync,
-  pauseQueueAsync,
-  resumeQueueAsync,
-  deleteQueueAsync,
-} from "../actions/queuesActions";
+import { useEffect } from "react";
+import { useSelector, useDispatch } from "react-redux";
+import { Info, AlertCircle } from "lucide-react";
+import { AppState } from "../store";
+import { listQueuesAsync, pauseQueueAsync, resumeQueueAsync, deleteQueueAsync } from "../actions/queuesActions";
 import { listQueueStatsAsync } from "../actions/queueStatsActions";
 import { dailyStatsKeyChange } from "../actions/settingsActions";
-import { AppState } from "../store";
+import { DailyStatsKey } from "../constants";
+import { usePolling } from "../hooks";
 import QueueSizeChart from "../components/QueueSizeChart";
 import ProcessedTasksChart from "../components/ProcessedTasksChart";
-import QueuesOverviewTable from "../components/QueuesOverviewTable";
-import Tooltip from "../components/Tooltip";
-import SplitButton from "../components/SplitButton";
-import { usePolling } from "../hooks";
 import DailyStatsChart from "../components/DailyStatsChart";
+import QueuesOverviewTable from "../components/QueuesOverviewTable";
+import { Card, CardContent, CardHeader, CardTitle } from "../components/ui/card";
+import { Alert, AlertDescription, AlertTitle } from "../components/ui/alert";
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "../components/ui/tooltip";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../components/ui/select";
 
-const useStyles = makeStyles((theme) => ({
-  container: {
-    paddingTop: theme.spacing(4),
-    paddingBottom: theme.spacing(4),
-  },
-  paper: {
-    padding: theme.spacing(2),
-    display: "flex",
-    overflow: "auto",
-    flexDirection: "column",
-  },
-  chartHeader: {
-    display: "flex",
-    alignItems: "center",
-    justifyContent: "space-between",
-    marginBottom: theme.spacing(2),
-  },
-  chartHeaderTitle: {
-    display: "flex",
-    alignItems: "center",
-  },
-  chartContainer: {
-    width: "100%",
-    height: "300px",
-  },
-  infoIcon: {
-    marginLeft: theme.spacing(1),
-    color: theme.palette.grey[500],
-    cursor: "pointer",
-  },
-  tooltipSection: {
-    marginBottom: "4px",
-  },
-  tableContainer: {
-    marginBottom: theme.spacing(2),
-  },
-}));
+export default function DashboardView() {
+  const dispatch = useDispatch();
+  const { loading, data: queueData, error } = useSelector((s: AppState) => s.queues);
+  const queueStats = useSelector((s: AppState) => s.queueStats.data);
+  const pollInterval = useSelector((s: AppState) => s.settings.pollInterval);
+  const dailyStatsKey = useSelector((s: AppState) => s.settings.dailyStatsChartType);
 
-function mapStateToProps(state: AppState) {
-  return {
-    loading: state.queues.loading,
-    queues: state.queues.data.map((q) => ({
-      ...q.currentStats,
-      requestPending: q.requestPending,
-    })),
-    error: state.queues.error,
-    pollInterval: state.settings.pollInterval,
-    queueStats: state.queueStats.data,
-    dailyStatsKey: state.settings.dailyStatsChartType,
-  };
-}
+  const queues = queueData.map((q) => ({
+    ...q.currentStats,
+    requestPending: q.requestPending,
+  }));
 
-const mapDispatchToProps = {
-  listQueuesAsync,
-  pauseQueueAsync,
-  resumeQueueAsync,
-  deleteQueueAsync,
-  listQueueStatsAsync,
-  dailyStatsKeyChange,
-};
+  usePolling(() => dispatch(listQueuesAsync() as any), pollInterval);
 
-const connector = connect(mapStateToProps, mapDispatchToProps);
-
-type Props = ConnectedProps<typeof connector>;
-
-export type DailyStatsKey = "today" | "last-7d" | "last-30d" | "last-90d";
-export const defaultDailyStatsKey = "last-7d";
-
-function DashboardView(props: Props) {
-  const {
-    pollInterval,
-    listQueuesAsync,
-    queues,
-    listQueueStatsAsync,
-    dailyStatsKey,
-  } = props;
-  const classes = useStyles();
-
-  usePolling(listQueuesAsync, pollInterval);
-
-  // Refetch queue stats if a queue is added or deleted.
-  const qnames = queues
-    .map((q) => q.queue)
-    .sort()
-    .join(",");
-
+  const qnames = queues.map((q) => q.queue).sort().join(",");
   useEffect(() => {
-    listQueueStatsAsync();
-  }, [listQueueStatsAsync, qnames]);
+    dispatch(listQueueStatsAsync() as any);
+  }, [dispatch, qnames]);
 
   const processedStats = queues.map((q) => ({
     queue: q.queue,
@@ -122,132 +42,90 @@ function DashboardView(props: Props) {
   }));
 
   return (
-    <Container maxWidth="lg" className={classes.container}>
-      <Grid container spacing={3}>
-        {props.error.length > 0 && (
-          <Grid item xs={12}>
-            <Alert severity="error">
-              <AlertTitle>Error</AlertTitle>
-              Could not retrieve queues live data —{" "}
-              <strong>See the logs for details</strong>
-            </Alert>
-          </Grid>
-        )}
-        <Grid item xs={6}>
-          <Paper className={classes.paper} variant="outlined">
-            <div className={classes.chartHeader}>
-              <div className={classes.chartHeaderTitle}>
-                <Typography variant="h6">Queue Size</Typography>
-                <Tooltip
-                  title={
-                    <div>
-                      <div className={classes.tooltipSection}>
-                        Total number of tasks in the queue
-                      </div>
-                      <div className={classes.tooltipSection}>
-                        <strong>Active</strong>: number of tasks currently being
-                        processed
-                      </div>
-                      <div className={classes.tooltipSection}>
-                        <strong>Pending</strong>: number of tasks ready to be
-                        processed
-                      </div>
-                      <div className={classes.tooltipSection}>
-                        <strong>Scheduled</strong>: number of tasks scheduled to
-                        be processed in the future
-                      </div>
-                      <div className={classes.tooltipSection}>
-                        <strong>Retry</strong>: number of tasks scheduled to be
-                        retried in the future
-                      </div>
-                      <div>
-                        <strong>Archived</strong>: number of tasks exhausted
-                        their retries
-                      </div>
-                    </div>
-                  }
-                >
-                  <InfoIcon fontSize="small" className={classes.infoIcon} />
-                </Tooltip>
-              </div>
-            </div>
-            <div className={classes.chartContainer}>
-              <QueueSizeChart data={queues} />
-            </div>
-          </Paper>
-        </Grid>
+    <div className="max-w-7xl mx-auto px-4 py-8 space-y-6">
+      {error.length > 0 && (
+        <Alert variant="destructive">
+          <AlertCircle className="h-4 w-4" />
+          <AlertTitle>Error</AlertTitle>
+          <AlertDescription>Could not retrieve queues live data — see the logs for details.</AlertDescription>
+        </Alert>
+      )}
 
-        <Grid item xs={6}>
-          <Paper className={classes.paper} variant="outlined">
-            <div className={classes.chartHeader}>
-              <div className={classes.chartHeaderTitle}>
-                <Typography variant="h6">Tasks Processed</Typography>
-                <Tooltip
-                  title={
-                    <div>
-                      <div className={classes.tooltipSection}>
-                        Total number of tasks processed in a given day (UTC)
-                      </div>
-                      <div className={classes.tooltipSection}>
-                        <strong>Succeeded</strong>: number of tasks successfully
-                        processed
-                      </div>
-                      <div>
-                        <strong>Failed</strong>: number of tasks failed to be
-                        processed
-                      </div>
-                    </div>
-                  }
-                >
-                  <InfoIcon fontSize="small" className={classes.infoIcon} />
-                </Tooltip>
-              </div>
-              <div>
-                <SplitButton
-                  options={[
-                    { label: "Today", key: "today" },
-                    { label: "Last 7d", key: "last-7d" },
-                    { label: "Last 30d", key: "last-30d" },
-                    { label: "Last 90d", key: "last-90d" },
-                  ]}
-                  initialSelectedKey={dailyStatsKey}
-                  onSelect={(key) =>
-                    props.dailyStatsKeyChange(key as DailyStatsKey)
-                  }
-                />
+      {/* Charts row */}
+      <div className="grid grid-cols-2 gap-4">
+        <Card>
+          <CardHeader className="pb-2">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-1.5">
+                <CardTitle className="text-sm font-semibold text-[hsl(var(--foreground))]">Queue Size</CardTitle>
+                <TooltipProvider>
+                  <Tooltip>
+                    <TooltipTrigger>
+                      <Info size={14} className="text-[hsl(var(--muted-foreground))]" />
+                    </TooltipTrigger>
+                    <TooltipContent className="max-w-xs">
+                      <p>Total number of tasks in each queue broken down by state.</p>
+                    </TooltipContent>
+                  </Tooltip>
+                </TooltipProvider>
               </div>
             </div>
-            <div className={classes.chartContainer}>
-              {dailyStatsKey === "today" && (
-                <ProcessedTasksChart data={processedStats} />
-              )}
-              {dailyStatsKey === "last-7d" && (
-                <DailyStatsChart data={props.queueStats} numDays={7} />
-              )}
-              {dailyStatsKey === "last-30d" && (
-                <DailyStatsChart data={props.queueStats} numDays={30} />
-              )}
-              {dailyStatsKey === "last-90d" && (
-                <DailyStatsChart data={props.queueStats} numDays={90} />
-              )}
-            </div>
-          </Paper>
-        </Grid>
+          </CardHeader>
+          <CardContent className="h-72 pb-4">
+            <QueueSizeChart data={queues} />
+          </CardContent>
+        </Card>
 
-        <Grid item xs={12} className={classes.tableContainer}>
-          <Paper className={classes.paper} variant="outlined">
-            {/* TODO: Add loading indicator  */}
-            <QueuesOverviewTable
-              queues={queues}
-              onPauseClick={props.pauseQueueAsync}
-              onResumeClick={props.resumeQueueAsync}
-              onDeleteClick={props.deleteQueueAsync}
-            />
-          </Paper>
-        </Grid>
-      </Grid>
-    </Container>
+        <Card>
+          <CardHeader className="pb-2">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-1.5">
+                <CardTitle className="text-sm font-semibold text-[hsl(var(--foreground))]">Tasks Processed</CardTitle>
+                <TooltipProvider>
+                  <Tooltip>
+                    <TooltipTrigger>
+                      <Info size={14} className="text-[hsl(var(--muted-foreground))]" />
+                    </TooltipTrigger>
+                    <TooltipContent className="max-w-xs">
+                      <p>Total number of tasks processed over time.</p>
+                    </TooltipContent>
+                  </Tooltip>
+                </TooltipProvider>
+              </div>
+              <Select
+                value={dailyStatsKey}
+                onValueChange={(v) => dispatch(dailyStatsKeyChange(v as DailyStatsKey))}
+              >
+                <SelectTrigger className="w-32 h-7 text-xs">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="today">Today</SelectItem>
+                  <SelectItem value="last-7d">Last 7d</SelectItem>
+                  <SelectItem value="last-30d">Last 30d</SelectItem>
+                  <SelectItem value="last-90d">Last 90d</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+          </CardHeader>
+          <CardContent className="h-72 pb-4">
+            {dailyStatsKey === "today" && <ProcessedTasksChart data={processedStats} />}
+            {dailyStatsKey === "last-7d" && <DailyStatsChart data={queueStats} numDays={7} />}
+            {dailyStatsKey === "last-30d" && <DailyStatsChart data={queueStats} numDays={30} />}
+            {dailyStatsKey === "last-90d" && <DailyStatsChart data={queueStats} numDays={90} />}
+          </CardContent>
+        </Card>
+      </div>
+
+      {/* Queues table */}
+      <Card>
+        <QueuesOverviewTable
+          queues={queues}
+          onPauseClick={(qname) => dispatch(pauseQueueAsync(qname) as any)}
+          onResumeClick={(qname) => dispatch(resumeQueueAsync(qname) as any)}
+          onDeleteClick={(qname) => dispatch(deleteQueueAsync(qname) as any)}
+        />
+      </Card>
+    </div>
   );
 }
-
-export default connector(DashboardView);

@@ -1,176 +1,83 @@
-import Checkbox from "@material-ui/core/Checkbox";
-import IconButton from "@material-ui/core/IconButton";
-import TableCell from "@material-ui/core/TableCell";
-import TableRow from "@material-ui/core/TableRow";
-import Tooltip from "@material-ui/core/Tooltip";
-import DeleteIcon from "@material-ui/icons/Delete";
-import FileCopyOutlinedIcon from "@material-ui/icons/FileCopyOutlined";
-import MoreHorizIcon from "@material-ui/icons/MoreHoriz";
-import React from "react";
-import { connect, ConnectedProps } from "react-redux";
-import { useHistory } from "react-router-dom";
-import { taskRowsPerPageChange } from "../actions/settingsActions";
-import {
-  batchDeleteCompletedTasksAsync,
-  deleteAllCompletedTasksAsync,
-  deleteCompletedTaskAsync,
-  listCompletedTasksAsync,
-} from "../actions/tasksActions";
-import { taskDetailsPath } from "../paths";
+import { useDispatch, useSelector } from "react-redux";
+import { useNavigate } from "react-router-dom";
+import { Trash2 } from "lucide-react";
 import { AppState } from "../store";
-import { TableColumn } from "../types/table";
 import {
-  durationFromSeconds,
-  prettifyPayload,
-  stringifyDuration,
-  timeAgo,
-  uuidPrefix,
-} from "../utils";
+  listCompletedTasksAsync, deleteCompletedTaskAsync,
+  batchDeleteCompletedTasksAsync, deleteAllCompletedTasksAsync,
+} from "../actions/tasksActions";
+import { taskRowsPerPageChange } from "../actions/settingsActions";
+import { taskDetailsPath } from "../paths";
+import { prettifyPayload, timeAgo, uuidPrefix, stringifyDuration, durationFromSeconds } from "../utils";
+import TasksTable, { RowProps } from "./TasksTable";
+import { TableCell, TableRow } from "./ui/table";
+import { Button } from "./ui/button";
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "./ui/tooltip";
 import SyntaxHighlighter from "./SyntaxHighlighter";
-import TasksTable, { RowProps, useRowStyles } from "./TasksTable";
 
-function mapStateToProps(state: AppState) {
-  return {
-    loading: state.tasks.completedTasks.loading,
-    error: state.tasks.completedTasks.error,
-    tasks: state.tasks.completedTasks.data,
-    batchActionPending: state.tasks.completedTasks.batchActionPending,
-    allActionPending: state.tasks.completedTasks.allActionPending,
-    pollInterval: state.settings.pollInterval,
-    pageSize: state.settings.taskRowsPerPage,
-  };
-}
+interface Props { queue: string; totalTaskCount: number }
 
-const mapDispatchToProps = {
-  listTasks: listCompletedTasksAsync,
-  deleteTask: deleteCompletedTaskAsync,
-  deleteAllTasks: deleteAllCompletedTasksAsync,
-  batchDeleteTasks: batchDeleteCompletedTasksAsync,
-  taskRowsPerPageChange,
-};
-
-const connector = connect(mapStateToProps, mapDispatchToProps);
-
-type ReduxProps = ConnectedProps<typeof connector>;
-
-interface Props {
-  queue: string; // name of the queue.
-  totalTaskCount: number; // totoal number of completed tasks.
-}
-
-const columns: TableColumn[] = [
-  { key: "id", label: "ID", align: "left" },
-  { key: "type", label: "Type", align: "left" },
-  { key: "payload", label: "Payload", align: "left" },
-  { key: "completed_at", label: "Completed", align: "left" },
-  { key: "result", label: "Result", align: "left" },
-  { key: "ttl", label: "TTL", align: "left" },
-  { key: "actions", label: "Actions", align: "center" },
+const columns = [
+  { key: "id", label: "ID", align: "left" as const },
+  { key: "type", label: "Type", align: "left" as const },
+  { key: "payload", label: "Payload", align: "left" as const },
+  { key: "completed-at", label: "Completed At", align: "left" as const },
+  { key: "ttl", label: "Expires In", align: "left" as const },
+  ...(!window.READ_ONLY ? [{ key: "actions", label: "Actions", align: "center" as const }] : []),
 ];
 
-function Row(props: RowProps) {
-  const { task } = props;
-  const classes = useRowStyles();
-  const history = useHistory();
+function Row({ task, isSelected, onSelectChange }: RowProps) {
+  const dispatch = useDispatch();
+  const navigate = useNavigate();
   return (
-    <TableRow
-      key={task.id}
-      className={classes.root}
-      selected={props.isSelected}
-      onClick={() => history.push(taskDetailsPath(task.queue, task.id))}
-    >
+    <TableRow className="cursor-pointer" onClick={() => navigate(taskDetailsPath(task.queue, task.id))}>
       {!window.READ_ONLY && (
-        <TableCell padding="checkbox" onClick={(e) => e.stopPropagation()}>
-          <IconButton>
-            <Checkbox
-              onChange={(event: React.ChangeEvent<HTMLInputElement>) =>
-                props.onSelectChange(event.target.checked)
-              }
-              checked={props.isSelected}
-            />
-          </IconButton>
+        <TableCell className="w-10 pr-0" onClick={(e) => e.stopPropagation()}>
+          <input type="checkbox" checked={isSelected} onChange={(e) => onSelectChange(e.target.checked)} className="h-4 w-4 accent-[hsl(var(--primary))]" />
         </TableCell>
       )}
-      <TableCell component="th" scope="row" className={classes.idCell}>
-        <div className={classes.IdGroup}>
-          {uuidPrefix(task.id)}
-          <Tooltip title="Copy full ID to clipboard">
-            <IconButton
-              onClick={(e) => {
-                e.stopPropagation();
-                navigator.clipboard.writeText(task.id);
-              }}
-              size="small"
-              className={classes.copyButton}
-            >
-              <FileCopyOutlinedIcon fontSize="small" />
-            </IconButton>
-          </Tooltip>
+      <TableCell className="font-mono text-xs">{uuidPrefix(task.id)}</TableCell>
+      <TableCell className="text-xs font-medium">{task.type}</TableCell>
+      <TableCell className="max-w-sm">
+        <div className="max-h-16 overflow-hidden text-xs">
+          <SyntaxHighlighter>{prettifyPayload(task.payload)}</SyntaxHighlighter>
         </div>
       </TableCell>
-      <TableCell>{task.type}</TableCell>
-      <TableCell>
-        <SyntaxHighlighter
-          language="json"
-          customStyle={{ margin: 0, maxWidth: 400 }}
-        >
-          {prettifyPayload(task.payload)}
-        </SyntaxHighlighter>
-      </TableCell>
-      <TableCell>{timeAgo(task.completed_at)}</TableCell>
-      <TableCell>
-        <SyntaxHighlighter
-          language="json"
-          customStyle={{ margin: 0, maxWidth: 400 }}
-        >
-          {prettifyPayload(task.result)}
-        </SyntaxHighlighter>
-      </TableCell>
-      <TableCell>
-        {task.ttl_seconds > 0
-          ? `${stringifyDuration(durationFromSeconds(task.ttl_seconds))} left`
-          : `expired`}
+      <TableCell className="text-xs text-[hsl(var(--muted-foreground))]">{timeAgo(task.completed_at)}</TableCell>
+      <TableCell className="text-xs text-[hsl(var(--muted-foreground))]">
+        {task.ttl_seconds > 0 ? stringifyDuration(durationFromSeconds(task.ttl_seconds)) : "–"}
       </TableCell>
       {!window.READ_ONLY && (
-        <TableCell
-          align="center"
-          className={classes.actionCell}
-          onMouseEnter={props.onActionCellEnter}
-          onMouseLeave={props.onActionCellLeave}
-          onClick={(e) => e.stopPropagation()}
-        >
-          {props.showActions ? (
-            <React.Fragment>
-              <Tooltip title="Delete">
-                <IconButton
-                  className={classes.actionButton}
-                  onClick={props.onDeleteClick}
-                  disabled={task.requestPending || props.allActionPending}
-                  size="small"
-                >
-                  <DeleteIcon fontSize="small" />
-                </IconButton>
-              </Tooltip>
-            </React.Fragment>
-          ) : (
-            <IconButton size="small" onClick={props.onActionCellEnter}>
-              <MoreHorizIcon fontSize="small" />
-            </IconButton>
-          )}
+        <TableCell className="text-center" onClick={(e) => e.stopPropagation()}>
+          <TooltipProvider>
+            <Tooltip><TooltipTrigger asChild>
+              <Button size="icon" variant="ghost" className="h-7 w-7 text-red-500" onClick={() => dispatch(deleteCompletedTaskAsync(task.queue, task.id) as any)}>
+                <Trash2 size={13} />
+              </Button>
+            </TooltipTrigger><TooltipContent>Delete</TooltipContent></Tooltip>
+          </TooltipProvider>
         </TableCell>
       )}
     </TableRow>
   );
 }
 
-function CompletedTasksTable(props: Props & ReduxProps) {
+export default function CompletedTasksTable({ queue, totalTaskCount }: Props) {
+  const dispatch = useDispatch();
+  const { loading, error, data: tasks, batchActionPending, allActionPending } = useSelector((s: AppState) => s.tasks.completedTasks);
+  const pollInterval = useSelector((s: AppState) => s.settings.pollInterval);
+  const pageSize = useSelector((s: AppState) => s.settings.taskRowsPerPage);
   return (
     <TasksTable
-      taskState="completed"
-      columns={columns}
-      renderRow={(rowProps: RowProps) => <Row {...rowProps} />}
-      {...props}
+      queue={queue} totalTaskCount={totalTaskCount} taskState="completed"
+      loading={loading} error={error} tasks={tasks}
+      batchActionPending={batchActionPending} allActionPending={allActionPending}
+      pollInterval={pollInterval} pageSize={pageSize} columns={columns}
+      listTasks={(q, pgn) => dispatch(listCompletedTasksAsync(q, pgn) as any)}
+      batchDeleteTasks={(q, ids) => dispatch(batchDeleteCompletedTasksAsync(q, ids) as any)}
+      deleteAllTasks={(q) => dispatch(deleteAllCompletedTasksAsync(q) as any)}
+      taskRowsPerPageChange={(n) => dispatch(taskRowsPerPageChange(n))}
+      renderRow={(rp) => <Row key={rp.task.id} {...rp} />}
     />
   );
 }
-export default connector(CompletedTasksTable);

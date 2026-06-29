@@ -31,7 +31,7 @@ export type AppState = ReturnType<typeof rootReducer>;
 
 const store = configureStore({
   reducer: rootReducer,
-  preloadedState,
+  preloadedState: preloadedState as any,
 });
 
 export default store;

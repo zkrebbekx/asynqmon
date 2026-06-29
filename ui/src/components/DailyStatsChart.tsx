@@ -1,15 +1,4 @@
-import React from "react";
-import {
-  LineChart,
-  Line,
-  XAxis,
-  YAxis,
-  CartesianGrid,
-  Tooltip,
-  Legend,
-  ResponsiveContainer,
-} from "recharts";
-import { useTheme, Theme } from "@material-ui/core/styles";
+import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from "recharts";
 import { DailyStat } from "../api";
 
 interface Props {
@@ -23,53 +12,35 @@ interface ChartData {
   date: string;
 }
 
-export default function DailyStatsChart(props: Props) {
-  const data = makeChartData(props.data, props.numDays);
-  const theme = useTheme<Theme>();
+function makeChartData(queueStats: { [qname: string]: DailyStat[] }, numDays: number): ChartData[] {
+  const byDate: { [date: string]: ChartData } = {};
+  for (const qname in queueStats) {
+    for (const stat of queueStats[qname]) {
+      if (!byDate[stat.date]) {
+        byDate[stat.date] = { succeeded: 0, failed: 0, date: stat.date };
+      }
+      byDate[stat.date].succeeded += stat.processed - stat.failed;
+      byDate[stat.date].failed += stat.failed;
+    }
+  }
+  return Object.values(byDate)
+    .sort((a, b) => Date.parse(a.date) - Date.parse(b.date))
+    .slice(-numDays);
+}
+
+export default function DailyStatsChart({ data, numDays }: Props) {
+  const chartData = makeChartData(data, numDays);
   return (
-    <ResponsiveContainer>
-      <LineChart data={data}>
-        <CartesianGrid strokeDasharray="3 3" />
-        <XAxis
-          dataKey="date"
-          minTickGap={10}
-          stroke={theme.palette.text.secondary}
-        />
-        <YAxis stroke={theme.palette.text.secondary} />
-        <Tooltip />
+    <ResponsiveContainer width="100%" height="100%">
+      <LineChart data={chartData}>
+        <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" />
+        <XAxis dataKey="date" minTickGap={10} stroke="hsl(var(--muted-foreground))" tick={{ fontSize: 11 }} />
+        <YAxis stroke="hsl(var(--muted-foreground))" tick={{ fontSize: 11 }} />
+        <Tooltip contentStyle={{ backgroundColor: "hsl(var(--popover))", border: "1px solid hsl(var(--border))", borderRadius: "6px" }} />
         <Legend />
-        <Line
-          type="monotone"
-          dataKey="succeeded"
-          stroke={theme.palette.success.main}
-        />
-        <Line
-          type="monotone"
-          dataKey="failed"
-          stroke={theme.palette.error.main}
-        />
+        <Line type="monotone" dataKey="succeeded" stroke="#81c995" strokeWidth={2} dot={false} />
+        <Line type="monotone" dataKey="failed" stroke="#f28b82" strokeWidth={2} dot={false} />
       </LineChart>
     </ResponsiveContainer>
   );
-}
-
-function makeChartData(
-  queueStats: { [qname: string]: DailyStat[] },
-  numDays: number
-): ChartData[] {
-  const dataByDate: { [date: string]: ChartData } = {};
-  for (const qname in queueStats) {
-    for (const stat of queueStats[qname]) {
-      if (!dataByDate.hasOwnProperty(stat.date)) {
-        dataByDate[stat.date] = { succeeded: 0, failed: 0, date: stat.date };
-      }
-      dataByDate[stat.date].succeeded += stat.processed - stat.failed;
-      dataByDate[stat.date].failed += stat.failed;
-    }
-  }
-  return Object.values(dataByDate).sort(sortByDate).slice(-numDays);
-}
-
-function sortByDate(x: ChartData, y: ChartData): number {
-  return Date.parse(x.date) - Date.parse(y.date);
 }

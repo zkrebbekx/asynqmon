@@ -1,174 +1,121 @@
-import Checkbox from "@material-ui/core/Checkbox";
-import IconButton from "@material-ui/core/IconButton";
-import TableCell from "@material-ui/core/TableCell";
-import TableRow from "@material-ui/core/TableRow";
-import Tooltip from "@material-ui/core/Tooltip";
-import CancelIcon from "@material-ui/icons/Cancel";
-import FileCopyOutlinedIcon from "@material-ui/icons/FileCopyOutlined";
-import MoreHorizIcon from "@material-ui/icons/MoreHoriz";
-import React from "react";
-import { connect, ConnectedProps } from "react-redux";
-import { useHistory } from "react-router-dom";
-import { taskRowsPerPageChange } from "../actions/settingsActions";
-import {
-  batchCancelActiveTasksAsync,
-  cancelActiveTaskAsync,
-  cancelAllActiveTasksAsync,
-  listActiveTasksAsync,
-} from "../actions/tasksActions";
-import { taskDetailsPath } from "../paths";
+import { useDispatch, useSelector } from "react-redux";
+import { useNavigate } from "react-router-dom";
+import { X, Copy } from "lucide-react";
 import { AppState } from "../store";
-import { TableColumn } from "../types/table";
-import { durationBefore, prettifyPayload, timeAgo, uuidPrefix } from "../utils";
+import {
+  listActiveTasksAsync, cancelActiveTaskAsync,
+  batchCancelActiveTasksAsync, cancelAllActiveTasksAsync,
+} from "../actions/tasksActions";
+import { taskRowsPerPageChange } from "../actions/settingsActions";
+import { taskDetailsPath } from "../paths";
+import { prettifyPayload, timeAgo, uuidPrefix, durationBefore } from "../utils";
+import TasksTable, { RowProps } from "./TasksTable";
+import { TableCell, TableRow } from "./ui/table";
+import { Button } from "./ui/button";
+import { Badge } from "./ui/badge";
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "./ui/tooltip";
 import SyntaxHighlighter from "./SyntaxHighlighter";
-import TasksTable, { RowProps, useRowStyles } from "./TasksTable";
-
-function mapStateToProps(state: AppState) {
-  return {
-    loading: state.tasks.activeTasks.loading,
-    error: state.tasks.activeTasks.error,
-    tasks: state.tasks.activeTasks.data,
-    batchActionPending: state.tasks.activeTasks.batchActionPending,
-    allActionPending: state.tasks.activeTasks.allActionPending,
-    pollInterval: state.settings.pollInterval,
-    pageSize: state.settings.taskRowsPerPage,
-  };
-}
-
-const mapDispatchToProps = {
-  listTasks: listActiveTasksAsync,
-  cancelTask: cancelActiveTaskAsync,
-  batchCancelTasks: batchCancelActiveTasksAsync,
-  cancelAllTasks: cancelAllActiveTasksAsync,
-  taskRowsPerPageChange,
-};
-
-const columns: TableColumn[] = [
-  { key: "id", label: "ID", align: "left" },
-  { key: "type", label: "Type", align: "left" },
-  { key: "payload", label: "Payload", align: "left" },
-  { key: "status", label: "Status", align: "left" },
-  { key: "start-time", label: "Started", align: "left" },
-  { key: "deadline", label: "Deadline", align: "left" },
-  { key: "actions", label: "Actions", align: "center" },
-];
-
-const connector = connect(mapStateToProps, mapDispatchToProps);
-
-type ReduxProps = ConnectedProps<typeof connector>;
 
 interface Props {
-  queue: string; // name of the queue
-  totalTaskCount: number; // total number of active tasks
+  queue: string;
+  totalTaskCount: number;
 }
 
-function Row(props: RowProps) {
-  const { task } = props;
-  const classes = useRowStyles();
-  const history = useHistory();
+const columns = [
+  { key: "id", label: "ID", align: "left" as const },
+  { key: "type", label: "Type", align: "left" as const },
+  { key: "payload", label: "Payload", align: "left" as const },
+  { key: "status", label: "Status", align: "left" as const },
+  { key: "started", label: "Started", align: "left" as const },
+  { key: "deadline", label: "Deadline", align: "left" as const },
+  ...(!window.READ_ONLY ? [{ key: "actions", label: "Actions", align: "center" as const }] : []),
+];
+
+function Row({ task, isSelected, onSelectChange, onActionComplete }: RowProps) {
+  const dispatch = useDispatch();
+  const navigate = useNavigate();
   return (
     <TableRow
-      key={task.id}
-      className={classes.root}
-      selected={props.isSelected}
-      onClick={() => history.push(taskDetailsPath(task.queue, task.id))}
+      className={`cursor-pointer ${isSelected ? "bg-[hsl(var(--muted))]/60" : ""}`}
+      onClick={() => navigate(taskDetailsPath(task.queue, task.id))}
     >
       {!window.READ_ONLY && (
-        <TableCell padding="checkbox" onClick={(e) => e.stopPropagation()}>
-          <IconButton>
-            <Checkbox
-              onChange={(event: React.ChangeEvent<HTMLInputElement>) =>
-                props.onSelectChange(event.target.checked)
-              }
-              checked={props.isSelected}
-            />
-          </IconButton>
+        <TableCell className="w-10 pr-0" onClick={(e) => e.stopPropagation()}>
+          <input
+            type="checkbox"
+            checked={isSelected}
+            onChange={(e) => onSelectChange(e.target.checked)}
+            className="h-4 w-4 accent-[hsl(var(--primary))]"
+          />
         </TableCell>
       )}
-      <TableCell component="th" scope="row" className={classes.idCell}>
-        <div className={classes.IdGroup}>
-          {uuidPrefix(task.id)}
-          <Tooltip title="Copy full ID to clipboard">
-            <IconButton
-              onClick={(e) => {
-                e.stopPropagation();
-                navigator.clipboard.writeText(task.id);
-              }}
-              size="small"
-              className={classes.copyButton}
-            >
-              <FileCopyOutlinedIcon fontSize="small" />
-            </IconButton>
-          </Tooltip>
+      <TableCell className="font-mono text-xs">{uuidPrefix(task.id)}</TableCell>
+      <TableCell className="max-w-xs">
+        <span className="font-medium text-xs">{task.type}</span>
+      </TableCell>
+      <TableCell className="max-w-sm">
+        <div className="max-h-16 overflow-hidden text-xs">
+          <SyntaxHighlighter>{prettifyPayload(task.payload)}</SyntaxHighlighter>
         </div>
       </TableCell>
-      <TableCell>{task.type}</TableCell>
       <TableCell>
-        <SyntaxHighlighter
-          language="json"
-          customStyle={{ margin: 0, maxWidth: 400 }}
-        >
-          {prettifyPayload(task.payload)}
-        </SyntaxHighlighter>
+        {task.is_orphaned ? (
+          <Badge variant="warning">orphaned</Badge>
+        ) : (
+          <Badge variant="info">active</Badge>
+        )}
       </TableCell>
-      <TableCell>
-        {task.canceling
-          ? "Canceling"
-          : task.is_orphaned
-          ? "Orphaned"
-          : "Running"}
-      </TableCell>
-      <TableCell>
-        {task.is_orphaned
-          ? "-"
-          : task.start_time === "-"
-          ? "just now"
-          : timeAgo(task.start_time)}
-      </TableCell>
-      <TableCell>
-        {task.deadline === "-" ? "-" : durationBefore(task.deadline)}
-      </TableCell>
+      <TableCell className="text-xs text-[hsl(var(--muted-foreground))]">{timeAgo(task.start_time)}</TableCell>
+      <TableCell className="text-xs text-[hsl(var(--muted-foreground))]">{durationBefore(task.deadline)}</TableCell>
       {!window.READ_ONLY && (
-        <TableCell
-          align="center"
-          onMouseEnter={props.onActionCellEnter}
-          onMouseLeave={props.onActionCellLeave}
-          onClick={(e) => e.stopPropagation()}
-        >
-          {props.showActions ? (
-            <React.Fragment>
-              <Tooltip title="Cancel">
-                <IconButton
-                  onClick={props.onCancelClick}
-                  disabled={
-                    task.requestPending || task.canceling || task.is_orphaned
-                  }
-                  size="small"
+        <TableCell className="text-center" onClick={(e) => e.stopPropagation()}>
+          <TooltipProvider>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  size="icon"
+                  variant="ghost"
+                  className="h-7 w-7"
+                  onClick={() => dispatch(cancelActiveTaskAsync(task.queue, task.id) as any)}
                 >
-                  <CancelIcon fontSize="small" />
-                </IconButton>
-              </Tooltip>
-            </React.Fragment>
-          ) : (
-            <IconButton size="small" onClick={props.onActionCellEnter}>
-              <MoreHorizIcon fontSize="small" />
-            </IconButton>
-          )}
+                  <X size={14} />
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>Cancel</TooltipContent>
+            </Tooltip>
+          </TooltipProvider>
         </TableCell>
       )}
     </TableRow>
   );
 }
 
-function ActiveTasksTable(props: Props & ReduxProps) {
+export default function ActiveTasksTable({ queue, totalTaskCount }: Props) {
+  const dispatch = useDispatch();
+  const { loading, error, data: tasks, batchActionPending, allActionPending } = useSelector(
+    (s: AppState) => s.tasks.activeTasks
+  );
+  const pollInterval = useSelector((s: AppState) => s.settings.pollInterval);
+  const pageSize = useSelector((s: AppState) => s.settings.taskRowsPerPage);
+
   return (
     <TasksTable
+      queue={queue}
+      totalTaskCount={totalTaskCount}
       taskState="active"
+      loading={loading}
+      error={error}
+      tasks={tasks}
+      batchActionPending={batchActionPending}
+      allActionPending={allActionPending}
+      pollInterval={pollInterval}
+      pageSize={pageSize}
       columns={columns}
-      renderRow={(rowProps: RowProps) => <Row {...rowProps} />}
-      {...props}
+      listTasks={(q, pgn) => dispatch(listActiveTasksAsync(q, pgn) as any)}
+      batchCancelTasks={(q, ids) => dispatch(batchCancelActiveTasksAsync(q, ids) as any)}
+      cancelAllTasks={(q) => dispatch(cancelAllActiveTasksAsync(q) as any)}
+      taskRowsPerPageChange={(n) => dispatch(taskRowsPerPageChange(n))}
+      renderRow={(rp) => <Row key={rp.task.id} {...rp} />}
     />
   );
 }
-
-export default connector(ActiveTasksTable);

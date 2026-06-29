@@ -1,5 +1,5 @@
 import { ThemePreference } from "../reducers/settingsReducer";
-import { DailyStatsKey } from "../views/DashboardView";
+import { DailyStatsKey } from "../constants";
 // List of settings related action types.
 export const POLL_INTERVAL_CHANGE = "POLL_INTERVAL_CHANGE";
 export const THEME_PREFERENCE_CHANGE = "THEME_PREFERENCE_CHANGE";

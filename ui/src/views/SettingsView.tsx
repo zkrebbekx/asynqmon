@@ -1,135 +1,73 @@
-import React, { useState } from "react";
-import { connect, ConnectedProps } from "react-redux";
-import Container from "@material-ui/core/Container";
-import { makeStyles } from "@material-ui/core/styles";
-import Grid from "@material-ui/core/Grid";
-import Paper from "@material-ui/core/Paper";
-import Typography from "@material-ui/core/Typography";
-import Slider from "@material-ui/core/Slider";
-import { pollIntervalChange, selectTheme } from "../actions/settingsActions";
+import { useState } from "react";
+import { useSelector, useDispatch } from "react-redux";
 import { AppState } from "../store";
-import FormControl from "@material-ui/core/FormControl/FormControl";
-import Select from "@material-ui/core/Select";
-import MenuItem from "@material-ui/core/MenuItem";
+import { pollIntervalChange, selectTheme } from "../actions/settingsActions";
 import { ThemePreference } from "../reducers/settingsReducer";
+import { Card, CardContent, CardHeader, CardTitle } from "../components/ui/card";
+import { Label } from "../components/ui/label";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../components/ui/select";
 
-const useStyles = makeStyles((theme) => ({
-  container: {
-    paddingTop: theme.spacing(4),
-    paddingBottom: theme.spacing(4),
-  },
-  paper: {
-    padding: theme.spacing(2),
-    display: "flex",
-    overflow: "auto",
-    flexDirection: "column",
-  },
-  formControl: {
-    margin: theme.spacing(1),
-    display: "flex",
-    justifyContent: "space-between",
-    flexDirection: "row",
-    alignItems: "center",
-  },
-  selectEmpty: {
-    marginTop: theme.spacing(2),
-  },
-  select: {
-    width: "200px",
-  },
-}));
+export default function SettingsView() {
+  const dispatch = useDispatch();
+  const { pollInterval, themePreference } = useSelector((s: AppState) => s.settings);
+  const [sliderValue, setSliderValue] = useState(pollInterval);
 
-function mapStateToProps(state: AppState) {
-  return {
-    pollInterval: state.settings.pollInterval,
-    themePreference: state.settings.themePreference,
-  };
-}
-
-const mapDispatchToProps = { pollIntervalChange, selectTheme };
-
-const connector = connect(mapStateToProps, mapDispatchToProps);
-
-type PropsFromRedux = ConnectedProps<typeof connector>;
-
-function SettingsView(props: PropsFromRedux) {
-  const classes = useStyles();
-
-  const [sliderValue, setSliderValue] = useState(props.pollInterval);
-  const handleSliderValueChange = (event: any, val: number | number[]) => {
-    setSliderValue(val as number);
-  };
-
-  const handleSliderValueCommited = (event: any, val: number | number[]) => {
-    props.pollIntervalChange(val as number);
-  };
-
-  const handleThemeChange = (event: React.ChangeEvent<{ value: unknown }>) => {
-    props.selectTheme(event.target.value as ThemePreference);
-  };
   return (
-    <Container maxWidth="lg" className={classes.container}>
-      <Grid container spacing={3} justify="center">
-        <Grid item xs={1} />
-        <Grid item xs={6}>
-          <Typography variant="h5" color="textPrimary">
-            Settings
-          </Typography>
-        </Grid>
-        <Grid item xs={5} />
+    <div className="max-w-2xl mx-auto px-4 py-8">
+      <h1 className="text-2xl font-semibold mb-6 text-[hsl(var(--foreground))]">Settings</h1>
 
-        <Grid item xs={1} />
-        <Grid item xs={6}>
-          <Paper className={classes.paper} variant="outlined">
-            <Typography color="textPrimary">Polling Interval</Typography>
-            <Typography gutterBottom color="textSecondary" variant="subtitle1">
-              Web UI will fetch live data with the specified interval
-            </Typography>
-            <Typography gutterBottom color="textSecondary" variant="subtitle1">
-              Currently: Every{" "}
-              {sliderValue === 1 ? "second" : `${sliderValue} seconds`}
-            </Typography>
-            <Slider
-              value={sliderValue}
-              onChange={handleSliderValueChange}
-              onChangeCommitted={handleSliderValueCommited}
-              aria-labelledby="continuous-slider"
-              valueLabelDisplay="auto"
-              step={1}
-              marks={true}
+      <div className="space-y-4">
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-base font-medium text-[hsl(var(--foreground))]">Polling Interval</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <p className="text-sm text-[hsl(var(--muted-foreground))] mb-4">
+              Web UI fetches live data every{" "}
+              <strong>{sliderValue === 1 ? "1 second" : `${sliderValue} seconds`}</strong>
+            </p>
+            <input
+              type="range"
               min={2}
               max={20}
+              step={1}
+              value={sliderValue}
+              onChange={(e) => setSliderValue(Number(e.target.value))}
+              onMouseUp={(e) => dispatch(pollIntervalChange(Number((e.target as HTMLInputElement).value)))}
+              onTouchEnd={(e) => dispatch(pollIntervalChange(Number((e.target as HTMLInputElement).value)))}
+              className="w-full accent-[hsl(var(--primary))]"
             />
-          </Paper>
-        </Grid>
-        <Grid xs={5} />
+            <div className="flex justify-between text-xs text-[hsl(var(--muted-foreground))] mt-1">
+              <span>2s</span>
+              <span>20s</span>
+            </div>
+          </CardContent>
+        </Card>
 
-        <Grid item xs={1} />
-        <Grid item xs={6}>
-          <Paper className={classes.paper} variant="outlined">
-            <FormControl variant="outlined" className={classes.formControl}>
-              <Typography color="textPrimary">Dark Theme</Typography>
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-base font-medium text-[hsl(var(--foreground))]">Dark Theme</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <div className="flex items-center justify-between">
+              <Label className="text-sm text-[hsl(var(--muted-foreground))]">Theme preference</Label>
               <Select
-                labelId="theme-label"
-                id="theme-selected"
-                value={props.themePreference}
-                onChange={handleThemeChange}
-                label="theme preference"
-                className={classes.select}
+                value={String(themePreference)}
+                onValueChange={(v) => dispatch(selectTheme(Number(v) as ThemePreference))}
               >
-                <MenuItem value={ThemePreference.SystemDefault}>
-                  System Default
-                </MenuItem>
-                <MenuItem value={ThemePreference.Always}>Always</MenuItem>
-                <MenuItem value={ThemePreference.Never}>Never</MenuItem>
+                <SelectTrigger className="w-48">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value={String(ThemePreference.SystemDefault)}>System Default</SelectItem>
+                  <SelectItem value={String(ThemePreference.Always)}>Always Dark</SelectItem>
+                  <SelectItem value={String(ThemePreference.Never)}>Always Light</SelectItem>
+                </SelectContent>
               </Select>
-            </FormControl>
-          </Paper>
-        </Grid>
-        <Grid item xs={5} />
-      </Grid>
-    </Container>
+            </div>
+          </CardContent>
+        </Card>
+      </div>
+    </div>
   );
 }
-
-export default connector(SettingsView);
