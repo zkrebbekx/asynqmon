@@ -3,6 +3,7 @@ package asynqmon
 import (
 	"encoding/json"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -168,6 +169,60 @@ func listTasksByState(inspector *asynq.Inspector, qname, state string, page, siz
 	}
 }
 
+// resolveQueues maps the queue query param ("" or "all" -> every queue) to a
+// concrete list of queue names.
+func resolveQueues(inspector *asynq.Inspector, queueParam string) ([]string, error) {
+	if queueParam != "" && queueParam != "all" {
+		return []string{queueParam}, nil
+	}
+	return inspector.Queues()
+}
+
+// scanMatchingTasks scans the given queues/state in batches, applies the search
+// and metadata filters, and returns all matches found within the per-queue
+// max_scan cap (along with how many tasks were examined and whether the cap was
+// hit). Shared by the search and facet endpoints.
+func scanMatchingTasks(
+	inspector *asynq.Inspector,
+	queues []string,
+	state, search string,
+	metaFilters []metaFilter,
+	maxScan int,
+	pf PayloadFormatter,
+) (matches []*searchTask, scanned int, truncated bool) {
+	matches = make([]*searchTask, 0)
+	for _, qname := range queues {
+		qScanned := 0
+		pageNum := 1
+		for qScanned < maxScan {
+			batch, err := listTasksByState(inspector, qname, state, pageNum, searchBatchSize)
+			if err != nil {
+				// Skip queues that error (e.g. removed mid-scan) rather than failing the whole request.
+				break
+			}
+			if len(batch) == 0 {
+				break
+			}
+			for _, ti := range batch {
+				st := toSearchTask(ti, pf)
+				if taskMatchesSearch(st, search) && taskMatchesMeta(st.Payload, metaFilters) {
+					matches = append(matches, st)
+				}
+			}
+			scanned += len(batch)
+			qScanned += len(batch)
+			if len(batch) < searchBatchSize {
+				break // reached the end of this queue/state
+			}
+			pageNum++
+		}
+		if qScanned >= maxScan {
+			truncated = true
+		}
+	}
+	return matches, scanned, truncated
+}
+
 func newSearchTasksHandlerFunc(inspector *asynq.Inspector, pf PayloadFormatter) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		q := r.URL.Query()
@@ -191,53 +246,13 @@ func newSearchTasksHandlerFunc(inspector *asynq.Inspector, pf PayloadFormatter) 
 			maxScan = defaultMaxScan
 		}
 
-		// Resolve target queues.
-		var queues []string
-		if qn := q.Get("queue"); qn != "" && qn != "all" {
-			queues = []string{qn}
-		} else {
-			qs, err := inspector.Queues()
-			if err != nil {
-				http.Error(w, err.Error(), http.StatusInternalServerError)
-				return
-			}
-			queues = qs
+		queues, err := resolveQueues(inspector, q.Get("queue"))
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
 		}
 
-		matches := make([]*searchTask, 0)
-		scanned := 0
-		truncated := false
-
-		for _, qname := range queues {
-			qScanned := 0
-			pageNum := 1
-			for qScanned < maxScan {
-				batch, err := listTasksByState(inspector, qname, state, pageNum, searchBatchSize)
-				if err != nil {
-					// Skip queues that error (e.g. removed mid-scan) rather than failing the whole request.
-					break
-				}
-				if len(batch) == 0 {
-					break
-				}
-				for _, ti := range batch {
-					st := toSearchTask(ti, pf)
-					if taskMatchesSearch(st, search) && taskMatchesMeta(st.Payload, metaFilters) {
-						matches = append(matches, st)
-					}
-				}
-				scanned += len(batch)
-				qScanned += len(batch)
-				if len(batch) < searchBatchSize {
-					break // reached the end of this queue/state
-				}
-				pageNum++
-			}
-			// If we stopped because of the cap but there were likely more, flag it.
-			if qScanned >= maxScan {
-				truncated = true
-			}
-		}
+		matches, scanned, truncated := scanMatchingTasks(inspector, queues, state, search, metaFilters, maxScan, pf)
 
 		total := len(matches)
 		start := (page - 1) * size
@@ -260,6 +275,113 @@ func newSearchTasksHandlerFunc(inspector *asynq.Inspector, pf PayloadFormatter) 
 			Truncated: truncated,
 			Page:      page,
 			Size:      size,
+		})
+	}
+}
+
+type metaFacet struct {
+	Key   string `json:"key"`
+	Value string `json:"value"`
+	Count int    `json:"count"`
+}
+
+type taskMetadataResponse struct {
+	Facets    []metaFacet `json:"facets"`
+	Scanned   int         `json:"scanned"`
+	Truncated bool        `json:"truncated"`
+}
+
+const defaultFacetLimit = 50
+
+// collectFacets aggregates distinct top-level scalar key=value pairs across the
+// matched tasks, most frequent first, capped at limit.
+func collectFacets(matches []*searchTask, limit int) []metaFacet {
+	type agg struct {
+		facet metaFacet
+		n     int
+	}
+	counts := make(map[string]*agg)
+	for _, t := range matches {
+		var obj map[string]interface{}
+		if err := json.Unmarshal([]byte(t.Payload), &obj); err != nil {
+			continue
+		}
+		for k, v := range obj {
+			val := scalarString(v)
+			if v == nil {
+				continue
+			}
+			// Skip nested/complex values (scalarString returns "" for them).
+			if _, isObj := v.(map[string]interface{}); isObj {
+				continue
+			}
+			if _, isArr := v.([]interface{}); isArr {
+				continue
+			}
+			id := k + "\x00" + val
+			if a, ok := counts[id]; ok {
+				a.n++
+			} else {
+				counts[id] = &agg{facet: metaFacet{Key: k, Value: val}, n: 1}
+			}
+		}
+	}
+	out := make([]metaFacet, 0, len(counts))
+	for _, a := range counts {
+		f := a.facet
+		f.Count = a.n
+		out = append(out, f)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Count != out[j].Count {
+			return out[i].Count > out[j].Count
+		}
+		if out[i].Key != out[j].Key {
+			return out[i].Key < out[j].Key
+		}
+		return out[i].Value < out[j].Value
+	})
+	if len(out) > limit {
+		out = out[:limit]
+	}
+	return out
+}
+
+// newTaskMetadataHandlerFunc returns metadata facets (distinct key=value pairs
+// with counts) across the whole filtered result set, so the UI can offer global
+// drill-down chips rather than ones limited to the current page.
+//
+//	GET /api/task_metadata?queue=&state=&q=&meta=key:val&max_scan=&limit=
+func newTaskMetadataHandlerFunc(inspector *asynq.Inspector, pf PayloadFormatter) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		state := q.Get("state")
+		if state == "" {
+			state = "pending"
+		}
+		search := q.Get("q")
+		metaFilters := parseMetaFilters(q["meta"])
+		maxScan := atoiDefault(q.Get("max_scan"), defaultMaxScan)
+		if maxScan < 1 {
+			maxScan = defaultMaxScan
+		}
+		limit := atoiDefault(q.Get("limit"), defaultFacetLimit)
+		if limit < 1 {
+			limit = defaultFacetLimit
+		}
+
+		queues, err := resolveQueues(inspector, q.Get("queue"))
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		matches, scanned, truncated := scanMatchingTasks(inspector, queues, state, search, metaFilters, maxScan, pf)
+
+		writeResponseJSON(w, taskMetadataResponse{
+			Facets:    collectFacets(matches, limit),
+			Scanned:   scanned,
+			Truncated: truncated,
 		})
 	}
 }

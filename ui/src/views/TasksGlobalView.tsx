@@ -9,7 +9,7 @@ import * as api from "../api";
 import { TaskInfo } from "../api";
 import { taskDetailsPath } from "../paths";
 import { prettifyPayload, uuidPrefix } from "../utils";
-import { collectMetadata, metaId, MetaPair } from "../lib/metadata";
+import { metaId, MetaPair } from "../lib/metadata";
 import { cn } from "../lib/utils";
 import { Input } from "../components/ui/input";
 import { Button } from "../components/ui/button";
@@ -49,6 +49,7 @@ export default function TasksGlobalView() {
   const [tasks, setTasks] = useState<TaskInfo[]>([]);
   const [total, setTotal] = useState(0);
   const [truncated, setTruncated] = useState(false);
+  const [facets, setFacets] = useState<{ key: string; value: string; count: number }[]>([]);
   const [error, setError] = useState("");
   const [page, setPage] = useState(0);
 
@@ -93,17 +94,37 @@ export default function TasksGlobalView() {
     return () => clearInterval(id);
   }, [fetchTasks, pollingActive, pollInterval]);
 
+  // Global metadata facets (across the whole filtered set, not just this page).
+  const fetchFacets = useCallback(async () => {
+    try {
+      const resp = await api.taskMetadata({
+        queue: selectedQueue,
+        state: selectedState,
+        q: debouncedSearch,
+        meta: metaParam,
+      });
+      setFacets(resp.facets);
+    } catch {
+      setFacets([]);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedQueue, selectedState, debouncedSearch, metaKey]);
+
+  useEffect(() => {
+    fetchFacets();
+  }, [fetchFacets]);
+
   // Reset to first page when filters change (page itself is excluded).
   useEffect(() => {
     setPage(0);
   }, [selectedQueue, selectedState, debouncedSearch, metaKey]);
 
-  // Discover metadata chips from the current page, minus active filters.
+  // Chips = global facets minus already-active filters.
   const activeIds = new Set(metaFilters.map(metaId));
   const chips = useMemo(
-    () => collectMetadata(tasks.map((t) => t.payload)).filter((p) => !activeIds.has(metaId(p))),
+    () => facets.filter((p) => !activeIds.has(metaId(p))),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [tasks, metaKey]
+    [facets, metaKey]
   );
 
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
@@ -182,10 +203,11 @@ export default function TasksGlobalView() {
         {chips.map((p) => (
           <button
             key={metaId(p)}
-            onClick={() => addFilter(p)}
+            onClick={() => addFilter({ key: p.key, value: p.value })}
             className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs border border-[hsl(var(--border))] text-[hsl(var(--muted-foreground))] hover:border-[hsl(var(--primary))] hover:text-[hsl(var(--foreground))] transition-colors"
           >
             {p.key}: {p.value}
+            <span className="opacity-60">{p.count}</span>
           </button>
         ))}
         {metaFilters.length === 0 && chips.length === 0 && (

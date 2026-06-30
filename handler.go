@@ -188,6 +188,8 @@ func muxRouter(opts Options, rc redis.UniversalClient, inspector *asynq.Inspecto
 
 	// Cross-queue server-side task search / filter / pagination.
 	api.HandleFunc("/tasks", newSearchTasksHandlerFunc(inspector, payloadFmt)).Methods("GET")
+	// Global metadata facets (distinct key=value chips) for the filtered set.
+	api.HandleFunc("/task_metadata", newTaskMetadataHandlerFunc(inspector, payloadFmt)).Methods("GET")
 
 	// Groups endponts
 	api.HandleFunc("/queues/{qname}/groups", newListGroupsHandlerFunc(inspector)).Methods("GET")
