@@ -183,6 +183,15 @@ Next, go to [localhost:8080](http://localhost:8080) and see Asynqmon dashboard:
 
 ![Web UI Tasks View](./docs/screenshots/tasks.png)
 
+**Browse and filter tasks across queues**
+
+The **Tasks** view lets you browse tasks without first selecting a queue — the
+queue becomes a filter. Search by task id, type, queue name, or payload, and
+click the dynamically-generated metadata chips (parsed from each task's JSON
+payload) to drill down with `key=value` filters.
+
+![Web UI global Tasks view](./docs/screenshots/tasks-global.png)
+
 **Settings and adaptive dark mode**
 
 ![Web UI Settings and adaptive dark mode](./docs/screenshots/settings-dark.png)
