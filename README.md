@@ -177,15 +177,15 @@ docker run --rm \
 
 Next, go to [localhost:8080](http://localhost:8080) and see Asynqmon dashboard:
 
-![Web UI Queues View](https://user-images.githubusercontent.com/11155743/114697016-07327f00-9d26-11eb-808c-0ac841dc888e.png)
+![Web UI Queues View](./docs/screenshots/dashboard.png)
 
 **Tasks view**
 
-![Web UI TasksView](https://user-images.githubusercontent.com/11155743/114697070-1f0a0300-9d26-11eb-855c-d3ec263865b7.png)
+![Web UI Tasks View](./docs/screenshots/tasks.png)
 
 **Settings and adaptive dark mode**
 
-![Web UI Settings and adaptive dark mode](https://user-images.githubusercontent.com/11155743/114697149-3517c380-9d26-11eb-9f7a-ae2dd00aad5b.png)
+![Web UI Settings and adaptive dark mode](./docs/screenshots/settings-dark.png)
 
 ## Import as a Library
 
