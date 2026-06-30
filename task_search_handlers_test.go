@@ -93,6 +93,38 @@ func TestCollectFacets(t *testing.T) {
 	})
 }
 
+func TestAggregateBy(t *testing.T) {
+	Convey("Given matched tasks", t, func() {
+		matches := []*searchTask{
+			{Type: "email:welcome", LastError: "timeout", Queue: "default"},
+			{Type: "email:welcome", LastError: "timeout", Queue: "critical"},
+			{Type: "image:resize", LastError: "boom", Queue: "default"},
+			{Type: "image:resize", LastError: "", Queue: "default"},
+		}
+
+		Convey("by=type groups and ranks by count", func() {
+			g := aggregateBy(matches, "type", 50)
+			So(g[0], ShouldResemble, aggregateGroup{Label: "email:welcome", Count: 2})
+			So(g, ShouldContain, aggregateGroup{Label: "image:resize", Count: 2})
+		})
+		Convey("by=error groups by error message and skips empty errors", func() {
+			g := aggregateBy(matches, "error", 50)
+			So(g[0], ShouldResemble, aggregateGroup{Label: "timeout", Count: 2})
+			So(g, ShouldContain, aggregateGroup{Label: "boom", Count: 1})
+			for _, x := range g {
+				So(x.Label, ShouldNotEqual, "")
+			}
+		})
+		Convey("by=queue groups by queue", func() {
+			g := aggregateBy(matches, "queue", 50)
+			So(g[0], ShouldResemble, aggregateGroup{Label: "default", Count: 3})
+		})
+		Convey("respects the limit", func() {
+			So(aggregateBy(matches, "type", 1), ShouldHaveLength, 1)
+		})
+	})
+}
+
 func TestParseMetaFilters(t *testing.T) {
 	Convey("parseMetaFilters splits key:value on the first colon", t, func() {
 		got := parseMetaFilters([]string{"region:eu", "url:http://x:8080", "bad", ":novalue"})

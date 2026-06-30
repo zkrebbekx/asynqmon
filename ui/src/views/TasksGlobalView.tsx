@@ -52,6 +52,12 @@ export default function TasksGlobalView() {
   const [facets, setFacets] = useState<{ key: string; value: string; count: number }[]>([]);
   const [error, setError] = useState("");
   const [page, setPage] = useState(0);
+  // Failure-analytics groupings (only for retry/archived).
+  const [errorGroups, setErrorGroups] = useState<{ label: string; count: number }[]>([]);
+  const [typeGroups, setTypeGroups] = useState<{ label: string; count: number }[]>([]);
+  // Two-step confirm for bulk-on-filter actions.
+  const [confirmAction, setConfirmAction] = useState<"run" | "archive" | "delete" | "cancel" | null>(null);
+  const [bulkBusy, setBulkBusy] = useState(false);
 
   useEffect(() => {
     dispatch(listQueuesAsync() as any);
@@ -114,6 +120,32 @@ export default function TasksGlobalView() {
     fetchFacets();
   }, [fetchFacets]);
 
+  // Failure analytics: group retry/archived tasks by error + type.
+  const isFailureState = selectedState === "retry" || selectedState === "archived";
+  const fetchAnalytics = useCallback(async () => {
+    if (!isFailureState) {
+      setErrorGroups([]);
+      setTypeGroups([]);
+      return;
+    }
+    try {
+      const [byError, byType] = await Promise.all([
+        api.taskAggregate({ queue: selectedQueue, state: selectedState, q: debouncedSearch, meta: metaParam, by: "error", limit: 8 }),
+        api.taskAggregate({ queue: selectedQueue, state: selectedState, q: debouncedSearch, meta: metaParam, by: "type", limit: 8 }),
+      ]);
+      setErrorGroups(byError.groups);
+      setTypeGroups(byType.groups);
+    } catch {
+      setErrorGroups([]);
+      setTypeGroups([]);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isFailureState, selectedQueue, selectedState, debouncedSearch, metaKey]);
+
+  useEffect(() => {
+    fetchAnalytics();
+  }, [fetchAnalytics]);
+
   // Reset to first page when filters change (page itself is excluded).
   useEffect(() => {
     setPage(0);
@@ -137,6 +169,34 @@ export default function TasksGlobalView() {
     await fn(queue, id);
     fetchTasks();
   };
+
+  const applyBulk = async (action: "run" | "archive" | "delete" | "cancel") => {
+    setBulkBusy(true);
+    try {
+      await api.bulkFilteredTasks({
+        queue: selectedQueue,
+        state: selectedState,
+        q: debouncedSearch,
+        meta: metaParam,
+        action,
+      });
+      setError("");
+    } catch (e) {
+      setError(String(e));
+    }
+    setBulkBusy(false);
+    setConfirmAction(null);
+    fetchTasks();
+    fetchFacets();
+    fetchAnalytics();
+  };
+
+  // Which bulk actions are valid for the current state (mirrors per-row actions).
+  const bulkActions: { action: "run" | "archive" | "delete" | "cancel"; label: string }[] = [];
+  if (acts.run) bulkActions.push({ action: "run", label: "Run" });
+  if (acts.cancel) bulkActions.push({ action: "cancel", label: "Cancel" });
+  if (acts.archive) bulkActions.push({ action: "archive", label: "Archive" });
+  if (acts.delete) bulkActions.push({ action: "delete", label: "Delete" });
 
   return (
     <div className="max-w-7xl mx-auto px-4 py-6 space-y-4">
@@ -214,6 +274,75 @@ export default function TasksGlobalView() {
           <span className="text-xs text-[hsl(var(--muted-foreground))]">No metadata to filter on</span>
         )}
       </div>
+
+      {/* Failure analytics (retry/archived) */}
+      {isFailureState && (errorGroups.length > 0 || typeGroups.length > 0) && (
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+          <div className="rounded-lg border border-[hsl(var(--border))] bg-[hsl(var(--card))] p-4">
+            <h3 className="mb-2 text-sm font-semibold">Top errors</h3>
+            <div className="space-y-1">
+              {errorGroups.length === 0 && <span className="text-xs text-[hsl(var(--muted-foreground))]">None</span>}
+              {errorGroups.map((g) => (
+                <div key={g.label} className="flex items-center justify-between gap-3 text-xs">
+                  <span className="truncate text-red-500" title={g.label}>{g.label}</span>
+                  <span className="shrink-0 tabular-nums text-[hsl(var(--muted-foreground))]">{g.count}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+          <div className="rounded-lg border border-[hsl(var(--border))] bg-[hsl(var(--card))] p-4">
+            <h3 className="mb-2 text-sm font-semibold">Top failing types</h3>
+            <div className="space-y-1">
+              {typeGroups.length === 0 && <span className="text-xs text-[hsl(var(--muted-foreground))]">None</span>}
+              {typeGroups.map((g) => (
+                <button
+                  key={g.label}
+                  onClick={() => setSearch(g.label)}
+                  className="flex w-full items-center justify-between gap-3 text-xs hover:text-[hsl(var(--primary))]"
+                  title={`Filter by ${g.label}`}
+                >
+                  <span className="truncate font-medium">{g.label}</span>
+                  <span className="shrink-0 tabular-nums text-[hsl(var(--muted-foreground))]">{g.count}</span>
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Bulk-on-filter toolbar */}
+      {!window.READ_ONLY && total > 0 && bulkActions.length > 0 && (
+        <div className="flex flex-wrap items-center gap-2 rounded-lg border border-[hsl(var(--border))] bg-[hsl(var(--muted))]/30 px-4 py-2">
+          <span className="text-xs text-[hsl(var(--muted-foreground))]">
+            Apply to all <span className="font-semibold text-[hsl(var(--foreground))]">{truncated ? `${total}+` : total}</span> matching:
+          </span>
+          {bulkActions.map((b) => (
+            <Button
+              key={b.action}
+              size="sm"
+              variant={b.action === "delete" ? "outline" : "ghost"}
+              className={cn("h-7 text-xs", b.action === "delete" && "text-red-500 hover:text-red-600")}
+              disabled={bulkBusy}
+              onClick={() => setConfirmAction(b.action)}
+            >
+              {b.label} all
+            </Button>
+          ))}
+          {confirmAction && (
+            <div className="flex items-center gap-2 ml-2 pl-2 border-l border-[hsl(var(--border))]">
+              <span className="text-xs text-[hsl(var(--foreground))]">
+                {confirmAction} {truncated ? `${total}+` : total} task(s)?
+              </span>
+              <Button size="sm" className="h-7 text-xs" disabled={bulkBusy} onClick={() => applyBulk(confirmAction)}>
+                Confirm
+              </Button>
+              <Button size="sm" variant="ghost" className="h-7 text-xs" disabled={bulkBusy} onClick={() => setConfirmAction(null)}>
+                Cancel
+              </Button>
+            </div>
+          )}
+        </div>
+      )}
 
       {error && (
         <Alert variant="destructive">

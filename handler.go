@@ -190,6 +190,10 @@ func muxRouter(opts Options, rc redis.UniversalClient, inspector *asynq.Inspecto
 	api.HandleFunc("/tasks", newSearchTasksHandlerFunc(inspector, payloadFmt)).Methods("GET")
 	// Global metadata facets (distinct key=value chips) for the filtered set.
 	api.HandleFunc("/task_metadata", newTaskMetadataHandlerFunc(inspector, payloadFmt)).Methods("GET")
+	// Failure/usage analytics: group the filtered set by type/error/queue.
+	api.HandleFunc("/task_aggregate", newTaskAggregateHandlerFunc(inspector, payloadFmt)).Methods("GET")
+	// Apply an action to every task matching a filter (not just the current page).
+	api.HandleFunc("/tasks:batch_filtered", newBulkFilteredTasksHandlerFunc(inspector, payloadFmt)).Methods("POST")
 
 	// Groups endponts
 	api.HandleFunc("/queues/{qname}/groups", newListGroupsHandlerFunc(inspector)).Methods("GET")
