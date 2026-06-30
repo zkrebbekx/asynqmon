@@ -1,0 +1,121 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "asynqmon.fullname" . }}
+  labels:
+    {{- include "asynqmon.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "asynqmon.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "asynqmon.selectorLabels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      serviceAccountName: {{ include "asynqmon.serviceAccountName" . }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: {{ .Chart.Name }}
+          image: {{ include "asynqmon.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - "--port=8080"
+            {{- if .Values.redis.url }}
+            - "--redis-url=$(REDIS_URL)"
+            {{- end }}
+            {{- if .Values.redis.clusterNodes }}
+            - "--redis-cluster-nodes=$(REDIS_CLUSTER_NODES)"
+            {{- end }}
+            {{- if and (not .Values.redis.url) (not .Values.redis.clusterNodes) .Values.redis.addr }}
+            - "--redis-addr=$(REDIS_ADDR)"
+            - "--redis-db={{ .Values.redis.db }}"
+            {{- end }}
+            {{- if .Values.redis.tls }}
+            - "--redis-tls={{ .Values.redis.tls }}"
+            {{- end }}
+            {{- if .Values.redis.insecureTLS }}
+            - "--redis-insecure-tls"
+            {{- end }}
+            {{- if .Values.readOnly }}
+            - "--read-only"
+            {{- end }}
+            {{- if .Values.prometheus.enableExporter }}
+            - "--enable-metrics-exporter"
+            {{- end }}
+            {{- if .Values.prometheus.address }}
+            - "--prometheus-addr={{ .Values.prometheus.address }}"
+            {{- end }}
+            {{- with .Values.extraArgs }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          env:
+            {{- if .Values.redis.url }}
+            - name: REDIS_URL
+              value: {{ .Values.redis.url | quote }}
+            {{- end }}
+            {{- if .Values.redis.addr }}
+            - name: REDIS_ADDR
+              value: {{ .Values.redis.addr | quote }}
+            {{- end }}
+            {{- if .Values.redis.clusterNodes }}
+            - name: REDIS_CLUSTER_NODES
+              value: {{ .Values.redis.clusterNodes | quote }}
+            {{- end }}
+            {{- if or .Values.redis.password .Values.redis.existingSecret }}
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.redis.existingSecret | default (printf "%s-redis" (include "asynqmon.fullname" .)) }}
+                  key: {{ .Values.redis.existingSecretPasswordKey }}
+            {{- end }}
+            {{- with .Values.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          {{- with .Values.livenessProbe }}
+          livenessProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.readinessProbe }}
+          readinessProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

@@ -1,0 +1,31 @@
+asynqmon has been deployed.
+
+{{- if .Values.ingress.enabled }}
+
+Reach the Web UI via the configured Ingress host(s):
+{{- range .Values.ingress.hosts }}
+  http{{ if $.Values.ingress.tls }}s{{ end }}://{{ .host }}
+{{- end }}
+{{- else if contains "NodePort" .Values.service.type }}
+
+Get the URL:
+  export NODE_PORT=$(kubectl get svc -n {{ .Release.Namespace }} {{ include "asynqmon.fullname" . }} -o jsonpath="{.spec.ports[0].nodePort}")
+  export NODE_IP=$(kubectl get nodes -o jsonpath="{.items[0].status.addresses[0].address}")
+  echo "http://$NODE_IP:$NODE_PORT"
+{{- else if contains "LoadBalancer" .Values.service.type }}
+
+Wait for the LoadBalancer IP:
+  kubectl get svc -n {{ .Release.Namespace }} {{ include "asynqmon.fullname" . }} -w
+{{- else }}
+
+Port-forward to access the Web UI locally:
+  kubectl port-forward -n {{ .Release.Namespace }} svc/{{ include "asynqmon.fullname" . }} 8080:{{ .Values.service.port }}
+  open http://localhost:8080
+{{- end }}
+
+{{- if and (not .Values.redis.url) (not .Values.redis.addr) (not .Values.redis.clusterNodes) }}
+
+WARNING: no Redis connection configured. Set one of redis.url, redis.addr, or
+redis.clusterNodes. asynqmon defaults to 127.0.0.1:6379 which will not resolve
+inside the pod.
+{{- end }}
