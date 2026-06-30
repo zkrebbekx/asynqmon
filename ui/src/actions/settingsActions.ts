@@ -1,11 +1,13 @@
 import { ThemePreference } from "../reducers/settingsReducer";
-import { DailyStatsKey } from "../views/DashboardView";
+import { DailyStatsKey } from "../constants";
 // List of settings related action types.
 export const POLL_INTERVAL_CHANGE = "POLL_INTERVAL_CHANGE";
 export const THEME_PREFERENCE_CHANGE = "THEME_PREFERENCE_CHANGE";
 export const TOGGLE_DRAWER = "TOGGLE_DRAWER";
 export const TASK_ROWS_PER_PAGE_CHANGE = "TASK_ROWS_PER_PAGE_CHANGE";
 export const DAILY_STATS_KEY_CHANGE = "DAILY_STATS_KEY_CHANGE";
+export const TOGGLE_POLLING = "TOGGLE_POLLING";
+export const POLL_TICK = "POLL_TICK";
 
 interface PollIntervalChangeAction {
   type: typeof POLL_INTERVAL_CHANGE;
@@ -31,13 +33,24 @@ interface DailyStatsKeyChange {
   value: DailyStatsKey;
 }
 
+interface TogglePollingAction {
+  type: typeof TOGGLE_POLLING;
+}
+
+interface PollTickAction {
+  type: typeof POLL_TICK;
+  value: number; // epoch milliseconds of the refresh
+}
+
 // Union of all settings related action types.
 export type SettingsActionTypes =
   | PollIntervalChangeAction
   | ThemePreferenceChangeAction
   | ToggleDrawerAction
   | TaskRowsPerPageChange
-  | DailyStatsKeyChange;
+  | DailyStatsKeyChange
+  | TogglePollingAction
+  | PollTickAction;
 
 export function pollIntervalChange(value: number) {
   return {
@@ -69,4 +82,12 @@ export function dailyStatsKeyChange(value: DailyStatsKey) {
     type: DAILY_STATS_KEY_CHANGE,
     value,
   }
+}
+
+export function togglePolling() {
+  return { type: TOGGLE_POLLING };
+}
+
+export function pollTick() {
+  return { type: POLL_TICK, value: Date.now() };
 }

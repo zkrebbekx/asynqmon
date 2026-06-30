@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/[[.RootPath]]/favicon.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Asynqmon</title>
+    <script>
+      window.ROOT_PATH = "/[[.RootPath]]".replace(/^\/\//, "/").replace(/\/$/, "");
+      if (window.ROOT_PATH.includes("[[")) window.ROOT_PATH = "";
+      window.PROMETHEUS_SERVER_ADDRESS = "/[[.PrometheusAddr]]";
+      if (window.PROMETHEUS_SERVER_ADDRESS.includes("[[")) window.PROMETHEUS_SERVER_ADDRESS = "";
+      window.READ_ONLY = "/[[.ReadOnly]]" === "true";
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

@@ -106,7 +106,9 @@ func TestMakeRedisConnOpt(t *testing.T) {
 				MasterName: "mymaster",
 				SentinelAddrs: []string{
 					"localhost:5000", "localhost:5001", "localhost:5002"},
-				Password: "secretpassword", // FIXME: Shouldn't this be SentinelPassword instead?
+				// The userinfo password in a redis-sentinel:// URL authenticates
+				// to the sentinel nodes, so asynq maps it to SentinelPassword.
+				SentinelPassword: "secretpassword",
 			},
 		},
 		{

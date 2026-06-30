@@ -1,30 +1,33 @@
-import React from "react";
-import { useTheme, Theme } from "@material-ui/core/styles";
-import { Light as ReactSyntaxHighlighter } from "react-syntax-highlighter";
+import { Light as SHL } from "react-syntax-highlighter";
+import { atomOneLight, atomOneDark } from "react-syntax-highlighter/dist/esm/styles/hljs";
 import json from "react-syntax-highlighter/dist/esm/languages/hljs/json";
-import styleDark from "react-syntax-highlighter/dist/esm/styles/hljs/atom-one-dark";
-import styleLight from "react-syntax-highlighter/dist/esm/styles/hljs/atom-one-light";
-import { isDarkTheme } from "../theme";
+import yaml from "react-syntax-highlighter/dist/esm/languages/hljs/yaml";
+import { useSelector } from "react-redux";
+import { AppState } from "../store";
+import { ThemePreference } from "../reducers/settingsReducer";
+
+SHL.registerLanguage("json", json);
+SHL.registerLanguage("yaml", yaml);
 
 interface Props {
-  language: string;
+  language?: string;
   children: string;
-  customStyle?: object;
 }
 
-ReactSyntaxHighlighter.registerLanguage("json", json);
+export default function SyntaxHighlighter({ language = "json", children }: Props) {
+  const themePreference = useSelector((s: AppState) => s.settings.themePreference);
+  const prefersDark = window.matchMedia("(prefers-color-scheme: dark)").matches;
+  const isDark =
+    themePreference === ThemePreference.Always ||
+    (themePreference === ThemePreference.SystemDefault && prefersDark);
 
-// Theme aware syntax-highlighter component.
-export default function SyntaxHighlighter(props: Props) {
-  const theme = useTheme<Theme>();
-  const style = isDarkTheme(theme) ? styleDark : styleLight;
   return (
-    <ReactSyntaxHighlighter
-      language={props.language}
-      style={style}
-      customStyle={props.customStyle}
+    <SHL
+      language={language}
+      style={isDark ? atomOneDark : atomOneLight}
+      customStyle={{ borderRadius: "0.5rem", fontSize: "13px", margin: 0 }}
     >
-      {props.children}
-    </ReactSyntaxHighlighter>
+      {children}
+    </SHL>
   );
 }

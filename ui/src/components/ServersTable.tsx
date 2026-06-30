@@ -1,343 +1,106 @@
-import React, { useState } from "react";
+import { useState } from "react";
 import { Link } from "react-router-dom";
-import clsx from "clsx";
-import { makeStyles } from "@material-ui/core/styles";
-import Grid from "@material-ui/core/Grid";
-import Box from "@material-ui/core/Box";
-import Collapse from "@material-ui/core/Collapse";
-import IconButton from "@material-ui/core/IconButton";
-import Table from "@material-ui/core/Table";
-import TableBody from "@material-ui/core/TableBody";
-import TableCell from "@material-ui/core/TableCell";
-import TableContainer from "@material-ui/core/TableContainer";
-import TableHead from "@material-ui/core/TableHead";
-import TableRow from "@material-ui/core/TableRow";
-import TableSortLabel from "@material-ui/core/TableSortLabel";
-import Tooltip from "@material-ui/core/Tooltip";
-import KeyboardArrowDownIcon from "@material-ui/icons/KeyboardArrowDown";
-import KeyboardArrowUpIcon from "@material-ui/icons/KeyboardArrowUp";
-import Alert from "@material-ui/lab/Alert";
-import AlertTitle from "@material-ui/lab/AlertTitle";
-import SyntaxHighlighter from "./SyntaxHighlighter";
+import { ChevronDown, ChevronUp } from "lucide-react";
 import { ServerInfo } from "../api";
-import { SortDirection, SortableTableColumn } from "../types/table";
-import { timeAgo, uuidPrefix, prettifyPayload } from "../utils";
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "./ui/table";
+import { Badge } from "./ui/badge";
+import { Button } from "./ui/button";
+import { timeAgo, prettifyPayload } from "../utils";
 import { queueDetailsPath } from "../paths";
-import Typography from "@material-ui/core/Typography";
-
-const useStyles = makeStyles((theme) => ({
-  table: {
-    minWidth: 650,
-  },
-  fixedCell: {
-    position: "sticky",
-    zIndex: 1,
-    left: 0,
-    background: theme.palette.background.paper,
-  },
-}));
-
-enum SortBy {
-  HostPID,
-  Status,
-  ActiveWorkers,
-  Queues,
-  Started,
-}
-const colConfigs: SortableTableColumn<SortBy>[] = [
-  {
-    label: "Host:PID",
-    key: "host",
-    sortBy: SortBy.HostPID,
-    align: "left",
-  },
-  {
-    label: "Started",
-    key: "started",
-    sortBy: SortBy.Started,
-    align: "left",
-  },
-  {
-    label: "Status",
-    key: "status",
-    sortBy: SortBy.Status,
-    align: "left",
-  },
-  {
-    label: "Queues",
-    key: "queues",
-    sortBy: SortBy.Queues,
-    align: "left",
-  },
-  {
-    label: "Active Workers",
-    key: "workers",
-    sortBy: SortBy.ActiveWorkers,
-    align: "left",
-  },
-];
-
-// sortServers takes a array of server-infos and return a sorted array.
-// It returns a new array and leave the original array untouched.
-function sortServerInfos(
-  entries: ServerInfo[],
-  cmpFn: (first: ServerInfo, second: ServerInfo) => number
-): ServerInfo[] {
-  let copy = [...entries];
-  copy.sort(cmpFn);
-  return copy;
-}
+import SyntaxHighlighter from "./SyntaxHighlighter";
 
 interface Props {
   servers: ServerInfo[];
 }
 
-export default function ServersTable(props: Props) {
-  const classes = useStyles();
-  const [sortBy, setSortBy] = useState<SortBy>(SortBy.HostPID);
-  const [sortDir, setSortDir] = useState<SortDirection>(SortDirection.Asc);
+function serverStatusVariant(status: string): "success" | "warning" | "secondary" {
+  if (status === "active") return "success";
+  if (status === "idle") return "secondary";
+  return "warning";
+}
 
-  const createSortClickHandler = (sortKey: SortBy) => (e: React.MouseEvent) => {
-    if (sortKey === sortBy) {
-      // Toggle sort direction.
-      const nextSortDir =
-        sortDir === SortDirection.Asc ? SortDirection.Desc : SortDirection.Asc;
-      setSortDir(nextSortDir);
-    } else {
-      // Change the sort key.
-      setSortBy(sortKey);
-    }
-  };
+function ServerRow({ server }: { server: ServerInfo }) {
+  const [expanded, setExpanded] = useState(false);
 
-  const cmpFunc = (s1: ServerInfo, s2: ServerInfo): number => {
-    let isS1Smaller = false;
-    switch (sortBy) {
-      case SortBy.HostPID:
-        if (s1.host === s2.host && s1.pid === s2.pid) return 0;
-        if (s1.host === s2.host) {
-          isS1Smaller = s1.pid < s2.pid;
-        } else {
-          isS1Smaller = s1.host < s2.host;
-        }
-        break;
-      case SortBy.Started:
-        const s1StartTime = Date.parse(s1.start_time);
-        const s2StartTime = Date.parse(s2.start_time);
-        if (s1StartTime === s2StartTime) return 0;
-        isS1Smaller = s1StartTime < s2StartTime;
-        break;
-      case SortBy.Status:
-        if (s1.status === s2.status) return 0;
-        isS1Smaller = s1.status < s2.status;
-        break;
-      case SortBy.Queues:
-        const s1Queues = Object.keys(s1.queue_priorities).join(",");
-        const s2Queues = Object.keys(s2.queue_priorities).join(",");
-        if (s1Queues === s2Queues) return 0;
-        isS1Smaller = s1Queues < s2Queues;
-        break;
-      case SortBy.ActiveWorkers:
-        if (s1.active_workers.length === s2.active_workers.length) {
-          return 0;
-        }
-        isS1Smaller = s1.active_workers.length < s2.active_workers.length;
-        break;
-      default:
-        // eslint-disable-next-line no-throw-literal
-        throw `Unexpected order by value: ${sortBy}`;
-    }
-    if (sortDir === SortDirection.Asc) {
-      return isS1Smaller ? -1 : 1;
-    } else {
-      return isS1Smaller ? 1 : -1;
-    }
-  };
+  const queues = Object.entries(server.queue_priorities)
+    .sort((a, b) => b[1] - a[1])
+    .map(([q, p]) => `${q}:${p}`)
+    .join(", ");
 
-  if (props.servers.length === 0) {
+  return (
+    <>
+      <TableRow>
+        <TableCell>
+          <Button
+            variant="ghost"
+            size="icon"
+            className="h-6 w-6"
+            onClick={() => setExpanded(!expanded)}
+          >
+            {expanded ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
+          </Button>
+        </TableCell>
+        <TableCell className="font-mono text-xs">
+          {server.host}:{server.pid}
+        </TableCell>
+        <TableCell>
+          <Badge variant={serverStatusVariant(server.status)}>{server.status}</Badge>
+        </TableCell>
+        <TableCell className="text-right">{server.active_workers.length}/{server.concurrency}</TableCell>
+        <TableCell>{queues}</TableCell>
+        <TableCell className="text-[hsl(var(--muted-foreground))] text-xs">{timeAgo(server.start_time)}</TableCell>
+      </TableRow>
+      {expanded && server.active_workers.length > 0 && (
+        <TableRow>
+          <TableCell colSpan={6} className="bg-[hsl(var(--muted))]/30 p-4">
+            <p className="text-xs font-medium text-[hsl(var(--muted-foreground))] mb-2">Active Workers</p>
+            <div className="space-y-2">
+              {server.active_workers.map((w) => (
+                <div key={w.task_id} className="text-xs border border-[hsl(var(--border))] rounded p-2">
+                  <div className="flex gap-4 mb-1">
+                    <span className="font-mono text-[hsl(var(--primary))]">{w.task_type}</span>
+                    <Link to={queueDetailsPath(w.queue)} className="text-[hsl(var(--muted-foreground))] hover:underline">
+                      {w.queue}
+                    </Link>
+                    <span className="text-[hsl(var(--muted-foreground))]">started {timeAgo(w.start_time)}</span>
+                  </div>
+                  <SyntaxHighlighter>{prettifyPayload(w.task_payload)}</SyntaxHighlighter>
+                </div>
+              ))}
+            </div>
+          </TableCell>
+        </TableRow>
+      )}
+    </>
+  );
+}
+
+export default function ServersTable({ servers }: Props) {
+  if (servers.length === 0) {
     return (
-      <Alert severity="info">
-        <AlertTitle>Info</AlertTitle>
-        No servers found at this time.
-      </Alert>
+      <div className="px-6 py-8 text-center text-sm text-[hsl(var(--muted-foreground))]">
+        No servers connected
+      </div>
     );
   }
 
   return (
-    <TableContainer>
-      <Table className={classes.table} aria-label="server info table">
-        <TableHead>
-          <TableRow>
-            {colConfigs.map((cfg, i) => (
-              <TableCell
-                key={cfg.key}
-                align={cfg.align}
-                className={clsx(i === 0 && classes.fixedCell)}
-              >
-                <TableSortLabel
-                  active={cfg.sortBy === sortBy}
-                  direction={sortDir}
-                  onClick={createSortClickHandler(cfg.sortBy)}
-                >
-                  {cfg.label}
-                </TableSortLabel>
-              </TableCell>
-            ))}
-            <TableCell />
-          </TableRow>
-        </TableHead>
-        <TableBody>
-          {sortServerInfos(props.servers, cmpFunc).map((srv) => (
-            <Row key={srv.id} server={srv} />
-          ))}
-        </TableBody>
-      </Table>
-    </TableContainer>
-  );
-}
-interface RowProps {
-  server: ServerInfo;
-}
-
-const useRowStyles = makeStyles((theme) => ({
-  rowRoot: {
-    "& > *": {
-      borderBottom: "unset",
-    },
-  },
-  noBorder: {
-    border: "none",
-  },
-  link: {
-    color: theme.palette.text.primary,
-  },
-}));
-
-function Row(props: RowProps) {
-  const classes = useRowStyles();
-  const { server } = props;
-  const [open, setOpen] = useState<boolean>(false);
-  const qnames = Object.keys(server.queue_priorities);
-  return (
-    <React.Fragment>
-      <TableRow className={classes.rowRoot}>
-        <TableCell>
-          {server.host}:{server.pid}
-        </TableCell>
-        <TableCell>{timeAgo(server.start_time)}</TableCell>
-        <TableCell>{server.status}</TableCell>
-        <TableCell>
-          {qnames.map((qname, idx) => (
-            <span key={qname}>
-              <Link to={queueDetailsPath(qname)} className={classes.link}>
-                {qname}
-              </Link>
-              {idx === qnames.length - 1 ? "" : ", "}
-            </span>
-          ))}
-        </TableCell>
-        <TableCell>
-          {server.active_workers.length}/{server.concurrency}
-        </TableCell>
-        <TableCell>
-          <Tooltip title={open ? "Hide Details" : "Show Details"}>
-            <IconButton
-              aria-label="expand row"
-              size="small"
-              onClick={() => setOpen(!open)}
-            >
-              {open ? <KeyboardArrowUpIcon /> : <KeyboardArrowDownIcon />}
-            </IconButton>
-          </Tooltip>
-        </TableCell>
-      </TableRow>
-      <TableRow className={classes.rowRoot}>
-        <TableCell style={{ paddingBottom: 0, paddingTop: 0 }} colSpan={6}>
-          <Collapse in={open} timeout="auto" unmountOnExit>
-            <Grid container spacing={2}>
-              <Grid item xs={9}>
-                <Typography
-                  variant="subtitle1"
-                  gutterBottom
-                  color="textSecondary"
-                >
-                  Active Workers
-                </Typography>
-                <Table size="small" aria-label="active workers">
-                  <TableHead>
-                    <TableRow>
-                      <TableCell>Task ID</TableCell>
-                      <TableCell>Task Payload</TableCell>
-                      <TableCell>Queue</TableCell>
-                      <TableCell>Started</TableCell>
-                    </TableRow>
-                  </TableHead>
-                  <TableBody>
-                    {server.active_workers.map((worker) => (
-                      <TableRow key={worker.task_id}>
-                        <TableCell component="th" scope="row">
-                          {uuidPrefix(worker.task_id)}
-                        </TableCell>
-                        <TableCell>
-                          <SyntaxHighlighter
-                            language="json"
-                            customStyle={{ margin: 0 }}
-                          >
-                            {prettifyPayload(worker.task_payload)}
-                          </SyntaxHighlighter>
-                        </TableCell>
-                        <TableCell>{worker.queue}</TableCell>
-                        <TableCell>{timeAgo(worker.start_time)}</TableCell>
-                      </TableRow>
-                    ))}
-                  </TableBody>
-                </Table>
-              </Grid>
-              <Grid item xs={3}>
-                <Typography
-                  variant="subtitle1"
-                  gutterBottom
-                  color="textSecondary"
-                >
-                  Queue Priority
-                </Typography>
-                <Table size="small" aria-label="active workers">
-                  <TableHead>
-                    <TableRow>
-                      <TableCell>Queue</TableCell>
-                      <TableCell align="right">Priority</TableCell>
-                    </TableRow>
-                  </TableHead>
-                  <TableBody>
-                    {qnames.map((qname) => (
-                      <TableRow key={qname}>
-                        <TableCell>
-                          <Link
-                            to={queueDetailsPath(qname)}
-                            className={classes.link}
-                          >
-                            {qname}
-                          </Link>
-                        </TableCell>
-                        <TableCell align="right">
-                          {server.queue_priorities[qname]}
-                        </TableCell>
-                      </TableRow>
-                    ))}
-                  </TableBody>
-                </Table>
-                <Box margin={2}>
-                  <Typography variant="subtitle2" component="span">
-                    Strict Priority:{" "}
-                  </Typography>
-                  <Typography variant="button" component="span">
-                    {server.strict_priority_enabled ? "ON" : "OFF"}
-                  </Typography>
-                </Box>
-              </Grid>
-            </Grid>
-          </Collapse>
-        </TableCell>
-      </TableRow>
-    </React.Fragment>
+    <Table>
+      <TableHeader>
+        <TableRow>
+          <TableHead className="w-10" />
+          <TableHead>Host:PID</TableHead>
+          <TableHead>Status</TableHead>
+          <TableHead className="text-right">Workers</TableHead>
+          <TableHead>Queues</TableHead>
+          <TableHead>Started</TableHead>
+        </TableRow>
+      </TableHeader>
+      <TableBody>
+        {servers.map((s) => (
+          <ServerRow key={s.id} server={s} />
+        ))}
+      </TableBody>
+    </Table>
   );
 }

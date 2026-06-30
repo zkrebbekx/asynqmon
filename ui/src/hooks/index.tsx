@@ -1,17 +1,31 @@
-import { useEffect, useMemo } from "react";
+import { useEffect, useMemo, useRef } from "react";
 import { useLocation } from "react-router-dom";
+import { useDispatch, useSelector } from "react-redux";
+import { AppState } from "../store";
+import { pollTick } from "../actions/settingsActions";
 
-// usePolling repeatedly calls doFn with a fix time delay specified
-// by interval (in millisecond).
 export function usePolling(doFn: () => void, interval: number) {
+  const dispatch = useDispatch();
+  const pollingActive = useSelector((s: AppState) => s.settings.pollingActive);
+
+  // Keep latest doFn in a ref so inline callbacks don't re-trigger the effect
+  // every render (which would cause an infinite update loop).
+  const savedFn = useRef(doFn);
+  savedFn.current = doFn;
+
   useEffect(() => {
-    doFn();
-    const id = setInterval(doFn, interval * 1000);
+    const tick = () => {
+      savedFn.current();
+      dispatch(pollTick());
+    };
+    tick();
+    // When polling is paused we still fetch once, but skip the interval.
+    if (!pollingActive) return;
+    const id = setInterval(tick, interval * 1000);
     return () => clearInterval(id);
-  }, [interval, doFn]);
+  }, [interval, pollingActive, dispatch]);
 }
 
-// useQuery gets the URL search params from the current URL.
 export function useQuery(): URLSearchParams {
   const { search } = useLocation();
   return useMemo(() => new URLSearchParams(search), [search]);

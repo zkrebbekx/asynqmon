@@ -1,51 +1,35 @@
-import React, { useState, useCallback } from "react";
-import { makeStyles } from "@material-ui/core/styles";
-import Table from "@material-ui/core/Table";
-import TableBody from "@material-ui/core/TableBody";
-import TableCell from "@material-ui/core/TableCell";
-import TableContainer from "@material-ui/core/TableContainer";
-import TableHead from "@material-ui/core/TableHead";
-import TableRow from "@material-ui/core/TableRow";
-import TableFooter from "@material-ui/core/TableFooter";
-import TablePagination from "@material-ui/core/TablePagination";
-import Paper from "@material-ui/core/Paper";
-import Checkbox from "@material-ui/core/Checkbox";
-import IconButton from "@material-ui/core/IconButton";
-import PlayArrowIcon from "@material-ui/icons/PlayArrow";
-import DeleteIcon from "@material-ui/icons/Delete";
-import ArchiveIcon from "@material-ui/icons/Archive";
-import CancelIcon from "@material-ui/icons/Cancel";
-import Alert from "@material-ui/lab/Alert";
-import AlertTitle from "@material-ui/lab/AlertTitle";
-import TablePaginationActions, {
-  rowsPerPageOptions,
-} from "./TablePaginationActions";
-import TableActions from "./TableActions";
+import { useState, useCallback, type ReactElement } from "react";
+import { useNavigate } from "react-router-dom";
+import { Trash2, Play, Archive, X, ChevronLeft, ChevronRight, Filter } from "lucide-react";
 import { usePolling } from "../hooks";
+import { prettifyPayload } from "../utils";
+import { matchesQuery } from "../lib/filter";
+import { Input } from "./ui/input";
 import { TaskInfoExtended } from "../reducers/tasksReducer";
 import { TableColumn } from "../types/table";
 import { PaginationOptions } from "../api";
 import { TaskState } from "../types/taskState";
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "./ui/table";
+import { Button } from "./ui/button";
+import { Alert, AlertDescription, AlertTitle } from "./ui/alert";
+import { AlertCircle } from "lucide-react";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "./ui/select";
+import { cn } from "../lib/utils";
 
-const useStyles = makeStyles((theme) => ({
-  table: {
-    minWidth: 650,
-  },
-  stickyHeaderCell: {
-    background: theme.palette.background.paper,
-  },
-  alert: {
-    borderTopLeftRadius: 0,
-    borderTopRightRadius: 0,
-  },
-  pagination: {
-    border: "none",
-  },
-}));
+export const rowsPerPageOptions = [10, 20, 50, 100];
+export const defaultPageSize = 20;
+
+export interface RowProps {
+  task: TaskInfoExtended;
+  isSelected: boolean;
+  onSelectChange: (checked: boolean) => void;
+  onActionComplete: () => void;
+  allActionPending: boolean;
+}
 
 interface Props {
-  queue: string; // name of the queue.
-  totalTaskCount: number; // totoal number of tasks in the given state.
+  queue: string;
+  totalTaskCount: number;
   taskState: TaskState;
   loading: boolean;
   error: string;
@@ -56,7 +40,6 @@ interface Props {
   pageSize: number;
   columns: TableColumn[];
 
-  // actions
   listTasks: (qname: string, pgn: PaginationOptions) => void;
   batchDeleteTasks?: (qname: string, taskIds: string[]) => Promise<void>;
   batchRunTasks?: (qname: string, taskIds: string[]) => Promise<void>;
@@ -66,313 +49,289 @@ interface Props {
   runAllTasks?: (qname: string) => Promise<void>;
   archiveAllTasks?: (qname: string) => Promise<void>;
   cancelAllTasks?: (qname: string) => Promise<void>;
-  deleteTask?: (qname: string, taskId: string) => Promise<void>;
-  runTask?: (qname: string, taskId: string) => Promise<void>;
-  archiveTask?: (qname: string, taskId: string) => Promise<void>;
-  cancelTask?: (qname: string, taskId: string) => Promise<void>;
   taskRowsPerPageChange: (n: number) => void;
 
-  renderRow: (rowProps: RowProps) => JSX.Element;
+  renderRow: (rowProps: RowProps) => ReactElement;
 }
 
 export default function TasksTable(props: Props) {
   const { pollInterval, listTasks, queue, pageSize } = props;
-  const classes = useStyles();
   const [page, setPage] = useState(0);
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
-  const [activeTaskId, setActiveTaskId] = useState<string>("");
+  const [filter, setFilter] = useState("");
 
-  const handlePageChange = (
-    event: React.MouseEvent<HTMLButtonElement> | null,
-    newPage: number
-  ) => {
-    setPage(newPage);
+  const fetchTasks = useCallback(() => {
+    listTasks(queue, { size: pageSize, page: page + 1 });
+  }, [listTasks, queue, pageSize, page]);
+
+  usePolling(fetchTasks, pollInterval);
+
+  // Filter the current page by task type or (decoded) payload contents.
+  const needle = filter.trim();
+  const visibleTasks = needle
+    ? props.tasks.filter(
+        (t) => matchesQuery(t.type, needle) || matchesQuery(prettifyPayload(t.payload), needle)
+      )
+    : props.tasks;
+
+  const handleSelectAll = (checked: boolean) => {
+    setSelectedIds(checked ? visibleTasks.map((t) => t.id) : []);
   };
 
-  const handleRowsPerPageChange = (
-    event: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>
-  ) => {
-    props.taskRowsPerPageChange(parseInt(event.target.value, 10));
-    setPage(0);
+  const handleSelectOne = (id: string, checked: boolean) => {
+    setSelectedIds((prev) =>
+      checked ? [...prev, id] : prev.filter((x) => x !== id)
+    );
   };
 
-  const handleSelectAllClick = (event: React.ChangeEvent<HTMLInputElement>) => {
-    if (event.target.checked) {
-      const newSelected = props.tasks.map((t) => t.id);
-      setSelectedIds(newSelected);
-    } else {
-      setSelectedIds([]);
-    }
-  };
+  const totalPages = Math.ceil(props.totalTaskCount / pageSize);
+  const allSelected = visibleTasks.length > 0 && selectedIds.length === visibleTasks.length;
+  const someSelected = selectedIds.length > 0 && !allSelected;
 
-  function createAllActionHandler(action: (qname: string) => Promise<void>) {
-    return () => action(queue);
-  }
-
-  function createBatchActionHandler(
-    action: (qname: string, taskIds: string[]) => Promise<void>
-  ) {
-    return () => action(queue, selectedIds).then(() => setSelectedIds([]));
-  }
-
-  function createSingleActionHandler(
-    action: (qname: string, taskId: string) => Promise<void>,
-    taskId: string
-  ) {
-    return () => action(queue, taskId);
-  }
-
-  let allActions = [];
-  if (props.deleteAllTasks) {
-    allActions.push({
-      label: "Delete All",
-      onClick: createAllActionHandler(props.deleteAllTasks),
-      disabled: props.allActionPending,
-    });
-  }
-  if (props.archiveAllTasks) {
-    allActions.push({
-      label: "Archive All",
-      onClick: createAllActionHandler(props.archiveAllTasks),
-      disabled: props.allActionPending,
-    });
-  }
-  if (props.runAllTasks) {
-    allActions.push({
-      label: "Run All",
-      onClick: createAllActionHandler(props.runAllTasks),
-      disabled: props.allActionPending,
-    });
-  }
-  if (props.cancelAllTasks) {
-    allActions.push({
-      label: "Cancel All",
-      onClick: createAllActionHandler(props.cancelAllTasks),
-      disabled: props.allActionPending,
-    });
-  }
-
-  let batchActions = [];
-  if (props.batchDeleteTasks) {
-    batchActions.push({
-      tooltip: "Delete",
-      icon: <DeleteIcon />,
-      disabled: props.batchActionPending,
-      onClick: createBatchActionHandler(props.batchDeleteTasks),
-    });
-  }
-  if (props.batchArchiveTasks) {
-    batchActions.push({
-      tooltip: "Archive",
-      icon: <ArchiveIcon />,
-      disabled: props.batchActionPending,
-      onClick: createBatchActionHandler(props.batchArchiveTasks),
-    });
-  }
-  if (props.batchRunTasks) {
-    batchActions.push({
-      tooltip: "Run",
-      icon: <PlayArrowIcon />,
-      disabled: props.batchActionPending,
-      onClick: createBatchActionHandler(props.batchRunTasks),
-    });
-  }
-  if (props.batchCancelTasks) {
-    batchActions.push({
-      tooltip: "Cancel",
-      icon: <CancelIcon />,
-      disabled: props.batchActionPending,
-      onClick: createBatchActionHandler(props.batchCancelTasks),
-    });
-  }
-
-  const fetchData = useCallback(() => {
-    const pageOpts = { page: page + 1, size: pageSize };
-    listTasks(queue, pageOpts);
-  }, [page, pageSize, queue, listTasks]);
-
-  usePolling(fetchData, pollInterval);
-
-  if (props.error.length > 0) {
+  if (props.error) {
     return (
-      <Alert severity="error" className={classes.alert}>
+      <Alert variant="destructive" className="m-4">
+        <AlertCircle className="h-4 w-4" />
         <AlertTitle>Error</AlertTitle>
-        {props.error}
-      </Alert>
-    );
-  }
-  if (props.tasks.length === 0) {
-    return (
-      <Alert severity="info" className={classes.alert}>
-        <AlertTitle>Info</AlertTitle>
-        {props.taskState === "aggregating" ? (
-          <div>Selected group is empty.</div>
-        ) : (
-          <div>No {props.taskState} tasks at this time.</div>
-        )}
+        <AlertDescription>{props.error}</AlertDescription>
       </Alert>
     );
   }
 
-  const rowCount = props.tasks.length;
-  const numSelected = selectedIds.length;
   return (
-    <div>
-      {!window.READ_ONLY && (
-        <TableActions
-          showIconButtons={numSelected > 0}
-          iconButtonActions={batchActions}
-          menuItemActions={allActions}
-        />
+    <div className="flex flex-col">
+      {/* Bulk action toolbar */}
+      {selectedIds.length > 0 && !window.READ_ONLY && (
+        <div className="flex items-center gap-2 px-4 py-2 bg-[hsl(var(--muted))]/50 border-b border-[hsl(var(--border))]">
+          <span className="text-sm text-[hsl(var(--muted-foreground))]">
+            {selectedIds.length} selected
+          </span>
+          {props.batchDeleteTasks && (
+            <Button
+              size="sm"
+              variant="ghost"
+              className="h-7 text-red-500 hover:text-red-600"
+              disabled={props.batchActionPending}
+              onClick={async () => {
+                await props.batchDeleteTasks!(queue, selectedIds);
+                setSelectedIds([]);
+              }}
+            >
+              <Trash2 size={13} className="mr-1" /> Delete
+            </Button>
+          )}
+          {props.batchRunTasks && (
+            <Button
+              size="sm"
+              variant="ghost"
+              className="h-7"
+              disabled={props.batchActionPending}
+              onClick={async () => {
+                await props.batchRunTasks!(queue, selectedIds);
+                setSelectedIds([]);
+              }}
+            >
+              <Play size={13} className="mr-1" /> Run now
+            </Button>
+          )}
+          {props.batchArchiveTasks && (
+            <Button
+              size="sm"
+              variant="ghost"
+              className="h-7"
+              disabled={props.batchActionPending}
+              onClick={async () => {
+                await props.batchArchiveTasks!(queue, selectedIds);
+                setSelectedIds([]);
+              }}
+            >
+              <Archive size={13} className="mr-1" /> Archive
+            </Button>
+          )}
+          {props.batchCancelTasks && (
+            <Button
+              size="sm"
+              variant="ghost"
+              className="h-7"
+              disabled={props.batchActionPending}
+              onClick={async () => {
+                await props.batchCancelTasks!(queue, selectedIds);
+                setSelectedIds([]);
+              }}
+            >
+              <X size={13} className="mr-1" /> Cancel
+            </Button>
+          )}
+        </div>
       )}
-      <TableContainer component={Paper}>
-        <Table
-          stickyHeader={true}
-          className={classes.table}
-          aria-label={`${props.taskState} tasks table`}
-          size="small"
-        >
-          <TableHead>
+
+      {/* All-tasks action bar */}
+      {props.totalTaskCount > 0 && selectedIds.length === 0 && !window.READ_ONLY && (
+        <div className="flex items-center gap-2 px-4 py-2 border-b border-[hsl(var(--border))]">
+          {props.deleteAllTasks && (
+            <Button
+              size="sm"
+              variant="ghost"
+              className="h-7 text-red-500 hover:text-red-600 text-xs"
+              disabled={props.allActionPending}
+              onClick={() => props.deleteAllTasks!(queue)}
+            >
+              Delete all ({props.totalTaskCount})
+            </Button>
+          )}
+          {props.runAllTasks && (
+            <Button
+              size="sm"
+              variant="ghost"
+              className="h-7 text-xs"
+              disabled={props.allActionPending}
+              onClick={() => props.runAllTasks!(queue)}
+            >
+              Run all ({props.totalTaskCount})
+            </Button>
+          )}
+          {props.archiveAllTasks && (
+            <Button
+              size="sm"
+              variant="ghost"
+              className="h-7 text-xs"
+              disabled={props.allActionPending}
+              onClick={() => props.archiveAllTasks!(queue)}
+            >
+              Archive all ({props.totalTaskCount})
+            </Button>
+          )}
+          {props.cancelAllTasks && (
+            <Button
+              size="sm"
+              variant="ghost"
+              className="h-7 text-xs"
+              disabled={props.allActionPending}
+              onClick={() => props.cancelAllTasks!(queue)}
+            >
+              Cancel all ({props.totalTaskCount})
+            </Button>
+          )}
+        </div>
+      )}
+
+      {/* Filter current page by type / payload */}
+      {props.tasks.length > 0 && (
+        <div className="flex items-center justify-between px-4 py-2 border-b border-[hsl(var(--border))]">
+          <div className="relative">
+            <Filter size={13} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-[hsl(var(--muted-foreground))]" />
+            <Input
+              placeholder="Filter by type or payload"
+              value={filter}
+              onChange={(e) => {
+                setFilter(e.target.value);
+                // Drop any selection that may no longer be visible so bulk
+                // actions never act on filtered-out rows.
+                setSelectedIds([]);
+              }}
+              className="pl-7 h-8 w-64 text-xs"
+            />
+          </div>
+          {needle && (
+            <span className="text-xs text-[hsl(var(--muted-foreground))]">
+              {visibleTasks.length} of {props.tasks.length} on this page
+            </span>
+          )}
+        </div>
+      )}
+
+      <Table>
+        <TableHeader>
+          <TableRow>
+            {!window.READ_ONLY && (
+              <TableHead className="w-10 pr-0">
+                <input
+                  type="checkbox"
+                  checked={allSelected}
+                  ref={(el) => { if (el) el.indeterminate = someSelected; }}
+                  onChange={(e) => handleSelectAll(e.target.checked)}
+                  className="h-4 w-4 accent-[hsl(var(--primary))]"
+                />
+              </TableHead>
+            )}
+            {props.columns.map((col) => (
+              <TableHead key={col.key} className={col.align === "right" ? "text-right" : col.align === "center" ? "text-center" : ""}>
+                {col.label}
+              </TableHead>
+            ))}
+          </TableRow>
+        </TableHeader>
+        <TableBody>
+          {visibleTasks.length === 0 ? (
             <TableRow>
-              {!window.READ_ONLY && (
-                <TableCell
-                  padding="checkbox"
-                  classes={{ stickyHeader: classes.stickyHeaderCell }}
-                >
-                  <IconButton>
-                    <Checkbox
-                      indeterminate={numSelected > 0 && numSelected < rowCount}
-                      checked={rowCount > 0 && numSelected === rowCount}
-                      onChange={handleSelectAllClick}
-                      inputProps={{
-                        "aria-label": "select all tasks shown in the table",
-                      }}
-                    />
-                  </IconButton>
-                </TableCell>
-              )}
-              {props.columns
-                .filter((col) => {
-                  // Filter out actions column in readonly mode.
-                  return !window.READ_ONLY || col.key !== "actions";
-                })
-                .map((col) => (
-                  <TableCell
-                    key={col.label}
-                    align={col.align}
-                    classes={{ stickyHeader: classes.stickyHeaderCell }}
-                  >
-                    {col.label}
-                  </TableCell>
-                ))}
+              <TableCell
+                colSpan={props.columns.length + (window.READ_ONLY ? 0 : 1)}
+                className="text-center py-8 text-[hsl(var(--muted-foreground))]"
+              >
+                {needle ? `No tasks match "${filter}" on this page` : "No tasks"}
+              </TableCell>
             </TableRow>
-          </TableHead>
-          <TableBody>
-            {props.tasks.map((task) => {
-              return props.renderRow({
-                key: task.id,
-                task: task,
-                allActionPending: props.allActionPending,
+          ) : (
+            visibleTasks.map((task) =>
+              props.renderRow({
+                task,
                 isSelected: selectedIds.includes(task.id),
-                onSelectChange: (checked: boolean) => {
-                  if (checked) {
-                    setSelectedIds(selectedIds.concat(task.id));
-                  } else {
-                    setSelectedIds(selectedIds.filter((id) => id !== task.id));
-                  }
-                },
-                onRunClick: props.runTask
-                  ? createSingleActionHandler(props.runTask, task.id)
-                  : undefined,
-                onDeleteClick: props.deleteTask
-                  ? createSingleActionHandler(props.deleteTask, task.id)
-                  : undefined,
-                onArchiveClick: props.archiveTask
-                  ? createSingleActionHandler(props.archiveTask, task.id)
-                  : undefined,
-                onCancelClick: props.cancelTask
-                  ? createSingleActionHandler(props.cancelTask, task.id)
-                  : undefined,
-                onActionCellEnter: () => setActiveTaskId(task.id),
-                onActionCellLeave: () => setActiveTaskId(""),
-                showActions: activeTaskId === task.id,
-              });
-            })}
-          </TableBody>
-          <TableFooter>
-            <TableRow>
-              <TablePagination
-                rowsPerPageOptions={rowsPerPageOptions}
-                colSpan={props.columns.length + 1}
-                count={props.totalTaskCount}
-                rowsPerPage={pageSize}
-                page={page}
-                SelectProps={{
-                  inputProps: { "aria-label": "rows per page" },
-                  native: true,
-                }}
-                onPageChange={handlePageChange}
-                onRowsPerPageChange={handleRowsPerPageChange}
-                ActionsComponent={TablePaginationActions}
-                className={classes.pagination}
-              />
-            </TableRow>
-          </TableFooter>
-        </Table>
-      </TableContainer>
+                onSelectChange: (checked) => handleSelectOne(task.id, checked),
+                onActionComplete: fetchTasks,
+                allActionPending: props.allActionPending,
+              })
+            )
+          )}
+        </TableBody>
+      </Table>
+
+      {/* Pagination */}
+      {props.totalTaskCount > 0 && (
+        <div className="flex items-center justify-between px-4 py-3 border-t border-[hsl(var(--border))]">
+          <div className="flex items-center gap-2 text-xs text-[hsl(var(--muted-foreground))]">
+            <span>Rows per page:</span>
+            <Select
+              value={String(pageSize)}
+              onValueChange={(v) => {
+                props.taskRowsPerPageChange(Number(v));
+                setPage(0);
+              }}
+            >
+              <SelectTrigger className="h-7 w-16 text-xs">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {rowsPerPageOptions.map((n) => (
+                  <SelectItem key={n} value={String(n)}>{n}</SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <span>
+              {page * pageSize + 1}–{Math.min((page + 1) * pageSize, props.totalTaskCount)} of {props.totalTaskCount}
+            </span>
+          </div>
+          <div className="flex items-center gap-1">
+            <Button
+              size="icon"
+              variant="ghost"
+              className="h-7 w-7"
+              disabled={page === 0}
+              onClick={() => setPage(page - 1)}
+            >
+              <ChevronLeft size={14} />
+            </Button>
+            <Button
+              size="icon"
+              variant="ghost"
+              className="h-7 w-7"
+              disabled={page >= totalPages - 1}
+              onClick={() => setPage(page + 1)}
+            >
+              <ChevronRight size={14} />
+            </Button>
+          </div>
+        </div>
+      )}
     </div>
   );
-}
-
-export const useRowStyles = makeStyles((theme) => ({
-  root: {
-    cursor: "pointer",
-    "& #copy-button": {
-      display: "none",
-    },
-    "&:hover": {
-      boxShadow: theme.shadows[2],
-      "& #copy-button": {
-        display: "inline-block",
-      },
-    },
-    "&:hover $copyButton": {
-      display: "inline-block",
-    },
-    "&:hover .MuiTableCell-root": {
-      borderBottomColor: theme.palette.background.paper,
-    },
-  },
-  actionCell: {
-    width: "140px",
-  },
-  actionButton: {
-    marginLeft: 3,
-    marginRight: 3,
-  },
-  idCell: {
-    width: "200px",
-  },
-  copyButton: {
-    display: "none",
-  },
-  IdGroup: {
-    display: "flex",
-    alignItems: "center",
-  },
-}));
-
-export interface RowProps {
-  key: string;
-  task: TaskInfoExtended;
-  isSelected: boolean;
-  onSelectChange: (checked: boolean) => void;
-  onRunClick?: () => void;
-  onDeleteClick?: () => void;
-  onArchiveClick?: () => void;
-  onCancelClick?: () => void;
-  allActionPending: boolean;
-  showActions: boolean;
-  onActionCellEnter: () => void;
-  onActionCellLeave: () => void;
 }

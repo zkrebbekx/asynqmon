@@ -1,13 +1,14 @@
 import {
   DAILY_STATS_KEY_CHANGE,
   POLL_INTERVAL_CHANGE,
+  POLL_TICK,
   SettingsActionTypes,
   TASK_ROWS_PER_PAGE_CHANGE,
   THEME_PREFERENCE_CHANGE,
   TOGGLE_DRAWER,
+  TOGGLE_POLLING,
 } from "../actions/settingsActions";
-import { defaultPageSize } from "../components/TablePaginationActions"
-import { DailyStatsKey, defaultDailyStatsKey } from "../views/DashboardView";
+import { defaultPageSize, DailyStatsKey, defaultDailyStatsKey } from "../constants";
 
 export enum ThemePreference {
   SystemDefault,
@@ -30,6 +31,12 @@ export interface SettingsState {
 
   // Type of the chart displayed for "Processed Tasks" section in dashboard.
   dailyStatsChartType: DailyStatsKey;
+
+  // Whether periodic background refresh (polling) is active.
+  pollingActive: boolean;
+
+  // Epoch milliseconds of the most recent data refresh (0 if never).
+  lastUpdatedAt: number;
 }
 
 export const initialState: SettingsState = {
@@ -38,6 +45,8 @@ export const initialState: SettingsState = {
   isDrawerOpen: true,
   taskRowsPerPage: defaultPageSize,
   dailyStatsChartType: defaultDailyStatsKey,
+  pollingActive: true,
+  lastUpdatedAt: 0,
 };
 
 function settingsReducer(
@@ -74,6 +83,18 @@ function settingsReducer(
         ...state,
         dailyStatsChartType: action.value,
       }
+
+    case TOGGLE_POLLING:
+      return {
+        ...state,
+        pollingActive: !state.pollingActive,
+      };
+
+    case POLL_TICK:
+      return {
+        ...state,
+        lastUpdatedAt: action.value,
+      };
 
     default:
       return state;

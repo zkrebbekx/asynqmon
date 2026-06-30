@@ -98,11 +98,12 @@ func (h *uiAssetsHandler) serveFile(w http.ResponseWriter, path string) (code in
 		}
 		return http.StatusInternalServerError, err
 	}
-	// Setting the MIME type for .js files manually to application/javascript as
-	// http.DetectContentType is using https://mimesniff.spec.whatwg.org/ which
-	// will not recognize application/javascript for security reasons.
-	if strings.HasSuffix(path, ".js") {
-		w.Header().Add("Content-Type", "application/javascript; charset=utf-8")
+	// Set the MIME type explicitly by file extension. http.DetectContentType
+	// uses https://mimesniff.spec.whatwg.org/ which, for security reasons, will
+	// not recognize text/css or application/javascript from content sniffing —
+	// browsers then refuse to apply stylesheets/modules served as text/plain.
+	if ct := contentTypeByExt(filepath.Ext(path)); ct != "" {
+		w.Header().Add("Content-Type", ct)
 	} else {
 		w.Header().Add("Content-Type", http.DetectContentType(bytes))
 	}
@@ -111,4 +112,37 @@ func (h *uiAssetsHandler) serveFile(w http.ResponseWriter, path string) (code in
 		return http.StatusInternalServerError, err
 	}
 	return http.StatusOK, nil
+}
+
+// contentTypeByExt returns a fixed Content-Type for known web asset extensions,
+// or "" to fall back to content sniffing.
+func contentTypeByExt(ext string) string {
+	switch strings.ToLower(ext) {
+	case ".js", ".mjs":
+		return "application/javascript; charset=utf-8"
+	case ".css":
+		return "text/css; charset=utf-8"
+	case ".html":
+		return "text/html; charset=utf-8"
+	case ".json", ".map":
+		return "application/json; charset=utf-8"
+	case ".svg":
+		return "image/svg+xml"
+	case ".png":
+		return "image/png"
+	case ".jpg", ".jpeg":
+		return "image/jpeg"
+	case ".gif":
+		return "image/gif"
+	case ".ico":
+		return "image/x-icon"
+	case ".woff":
+		return "font/woff"
+	case ".woff2":
+		return "font/woff2"
+	case ".ttf":
+		return "font/ttf"
+	default:
+		return ""
+	}
 }
