@@ -1,0 +1,17 @@
+apiVersion: v2
+name: asynqmon
+description: Web UI for monitoring and administering Asynq task queues
+type: application
+version: 0.1.0
+# appVersion is the default image tag if image.tag is not set.
+appVersion: "latest"
+home: https://github.com/zkrebbekx/asynqmon
+sources:
+  - https://github.com/zkrebbekx/asynqmon
+keywords:
+  - asynq
+  - redis
+  - task-queue
+  - monitoring
+maintainers:
+  - name: zkrebbekx

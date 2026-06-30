@@ -67,6 +67,21 @@ To build Docker image locally, run:
 make docker
 ```
 
+### Deploy on Kubernetes with Helm
+
+A Helm chart is provided in [`charts/asynqmon`](charts/asynqmon). The container
+image is published to `ghcr.io/zkrebbekx/asynqmon` by CI on each push to
+`master` and on tags.
+
+```bash
+helm install asynqmon ./charts/asynqmon \
+  --set image.repository=ghcr.io/zkrebbekx/asynqmon \
+  --set redis.url=redis://my-redis:6379
+```
+
+See the [chart README](charts/asynqmon/README.md) for Redis Cluster, Ingress,
+Prometheus `ServiceMonitor`, and cloud IAM (IRSA / Workload Identity) examples.
+
 ## Run the binary
 
 To use the defaults, simply run and open http://localhost:8080.

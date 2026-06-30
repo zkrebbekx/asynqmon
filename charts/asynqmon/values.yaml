@@ -1,0 +1,113 @@
+replicaCount: 1
+
+image:
+  repository: ghcr.io/zkrebbekx/asynqmon
+  # tag defaults to the chart appVersion when empty.
+  tag: ""
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+# Redis connection. Use either `url` OR (`addr`/`db`/`password`) OR `clusterNodes`.
+redis:
+  url: ""          # REDIS_URL (redis://, rediss://, redis-sentinel://...)
+  addr: ""         # REDIS_ADDR (host:port); ignored if url/clusterNodes set
+  db: 0            # REDIS_DB
+  password: ""     # REDIS_PASSWORD (inline; prefer existingSecret below)
+  clusterNodes: "" # REDIS_CLUSTER_NODES (comma-separated host:port)
+  tls: ""          # REDIS_TLS (server name for TLS validation)
+  insecureTLS: false
+  # Mount the redis password from an existing secret instead of inlining it.
+  existingSecret: ""
+  existingSecretPasswordKey: redis-password
+
+# Run the Web UI in read-only mode.
+readOnly: false
+
+prometheus:
+  # Expose /metrics for Prometheus to scrape.
+  enableExporter: false
+  # Address of a Prometheus server to query for the metrics view (PROMETHEUS_ADDR).
+  address: ""
+
+# Extra raw flags appended to the container args, e.g. ["--max-payload-length=500"].
+extraArgs: []
+# Extra environment variables (list of {name,value} or valueFrom).
+extraEnv: []
+
+serviceAccount:
+  create: true
+  name: ""
+  # Annotations for cloud IAM (e.g. AWS IRSA eks.amazonaws.com/role-arn,
+  # GCP Workload Identity iam.gke.io/gcp-service-account).
+  annotations: {}
+
+service:
+  type: ClusterIP
+  port: 8080
+  annotations: {}
+
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  hosts:
+    - host: asynqmon.local
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+  #  - secretName: asynqmon-tls
+  #    hosts:
+  #      - asynqmon.example.com
+
+# Prometheus Operator ServiceMonitor (requires prometheus.enableExporter=true).
+serviceMonitor:
+  enabled: false
+  interval: 30s
+  scrapeTimeout: ""
+  path: /metrics
+  labels: {}
+  relabelings: []
+  metricRelabelings: []
+
+resources: {}
+  # limits:
+  #   cpu: 200m
+  #   memory: 128Mi
+  # requests:
+  #   cpu: 50m
+  #   memory: 64Mi
+
+podAnnotations: {}
+podLabels: {}
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65534
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+
+livenessProbe:
+  httpGet:
+    path: /
+    port: http
+  initialDelaySeconds: 5
+  periodSeconds: 15
+readinessProbe:
+  httpGet:
+    path: /
+    port: http
+  initialDelaySeconds: 3
+  periodSeconds: 10
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
