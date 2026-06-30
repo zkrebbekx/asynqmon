@@ -347,6 +347,99 @@ func collectFacets(matches []*searchTask, limit int) []metaFacet {
 	return out
 }
 
+type aggregateGroup struct {
+	Label string `json:"label"`
+	Count int    `json:"count"`
+}
+
+type taskAggregateResponse struct {
+	By        string           `json:"by"`
+	Groups    []aggregateGroup `json:"groups"`
+	Total     int              `json:"total"`
+	Scanned   int              `json:"scanned"`
+	Truncated bool             `json:"truncated"`
+}
+
+// aggregateBy groups the matched tasks by a chosen field (type/error/queue) and
+// returns counts, most frequent first, capped at limit.
+func aggregateBy(matches []*searchTask, by string, limit int) []aggregateGroup {
+	counts := make(map[string]int)
+	for _, t := range matches {
+		var label string
+		switch by {
+		case "type":
+			label = t.Type
+		case "error":
+			label = t.LastError
+		case "queue":
+			label = t.Queue
+		default:
+			label = t.Type
+		}
+		if label == "" {
+			continue
+		}
+		counts[label]++
+	}
+	out := make([]aggregateGroup, 0, len(counts))
+	for label, n := range counts {
+		out = append(out, aggregateGroup{Label: label, Count: n})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Count != out[j].Count {
+			return out[i].Count > out[j].Count
+		}
+		return out[i].Label < out[j].Label
+	})
+	if len(out) > limit {
+		out = out[:limit]
+	}
+	return out
+}
+
+// newTaskAggregateHandlerFunc groups the filtered task set by type, error, or
+// queue — powering failure analytics ("top failing types", "top errors").
+//
+//	GET /api/task_aggregate?queue=&state=&q=&meta=&by=type|error|queue&max_scan=&limit=
+func newTaskAggregateHandlerFunc(inspector *asynq.Inspector, pf PayloadFormatter) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		state := q.Get("state")
+		if state == "" {
+			state = "retry"
+		}
+		by := q.Get("by")
+		if by == "" {
+			by = "type"
+		}
+		search := q.Get("q")
+		metaFilters := parseMetaFilters(q["meta"])
+		maxScan := atoiDefault(q.Get("max_scan"), defaultMaxScan)
+		if maxScan < 1 {
+			maxScan = defaultMaxScan
+		}
+		limit := atoiDefault(q.Get("limit"), defaultFacetLimit)
+		if limit < 1 {
+			limit = defaultFacetLimit
+		}
+
+		queues, err := resolveQueues(inspector, q.Get("queue"))
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		matches, scanned, truncated := scanMatchingTasks(inspector, queues, state, search, metaFilters, maxScan, pf)
+		writeResponseJSON(w, taskAggregateResponse{
+			By:        by,
+			Groups:    aggregateBy(matches, by, limit),
+			Total:     len(matches),
+			Scanned:   scanned,
+			Truncated: truncated,
+		})
+	}
+}
+
 // newTaskMetadataHandlerFunc returns metadata facets (distinct key=value pairs
 // with counts) across the whole filtered result set, so the UI can offer global
 // drill-down chips rather than ones limited to the current page.
@@ -380,6 +473,89 @@ func newTaskMetadataHandlerFunc(inspector *asynq.Inspector, pf PayloadFormatter)
 
 		writeResponseJSON(w, taskMetadataResponse{
 			Facets:    collectFacets(matches, limit),
+			Scanned:   scanned,
+			Truncated: truncated,
+		})
+	}
+}
+
+type bulkFilteredRequest struct {
+	Queue   string   `json:"queue"`
+	State   string   `json:"state"`
+	Q       string   `json:"q"`
+	Meta    []string `json:"meta"`
+	Action  string   `json:"action"` // delete | run | archive | cancel
+	MaxScan int      `json:"max_scan"`
+}
+
+type bulkFilteredResponse struct {
+	Processed int  `json:"processed"`
+	Errors    int  `json:"errors"`
+	Scanned   int  `json:"scanned"`
+	Truncated bool `json:"truncated"`
+}
+
+// newBulkFilteredTasksHandlerFunc applies an action to every task matching a
+// queue/state/search/metadata filter (within the scan cap), not just the rows
+// on the current page.
+//
+//	POST /api/tasks:batch_filtered  {queue,state,q,meta,action,max_scan}
+func newBulkFilteredTasksHandlerFunc(inspector *asynq.Inspector, pf PayloadFormatter) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodySize)
+		dec := json.NewDecoder(r.Body)
+		dec.DisallowUnknownFields()
+		var req bulkFilteredRequest
+		if err := dec.Decode(&req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		switch req.Action {
+		case "delete", "run", "archive", "cancel":
+		default:
+			http.Error(w, "invalid action (want delete|run|archive|cancel)", http.StatusBadRequest)
+			return
+		}
+		if req.State == "" {
+			http.Error(w, "state is required", http.StatusBadRequest)
+			return
+		}
+		maxScan := req.MaxScan
+		if maxScan < 1 {
+			maxScan = defaultMaxScan
+		}
+
+		queues, err := resolveQueues(inspector, req.Queue)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		matches, scanned, truncated := scanMatchingTasks(inspector, queues, req.State, req.Q, parseMetaFilters(req.Meta), maxScan, pf)
+
+		processed, errCount := 0, 0
+		for _, t := range matches {
+			var actErr error
+			switch req.Action {
+			case "delete":
+				actErr = inspector.DeleteTask(t.Queue, t.ID)
+			case "run":
+				actErr = inspector.RunTask(t.Queue, t.ID)
+			case "archive":
+				actErr = inspector.ArchiveTask(t.Queue, t.ID)
+			case "cancel":
+				actErr = inspector.CancelProcessing(t.ID)
+			}
+			if actErr != nil {
+				errCount++
+			} else {
+				processed++
+			}
+		}
+
+		writeResponseJSON(w, bulkFilteredResponse{
+			Processed: processed,
+			Errors:    errCount,
 			Scanned:   scanned,
 			Truncated: truncated,
 		})

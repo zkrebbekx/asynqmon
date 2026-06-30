@@ -39,6 +39,21 @@ export interface TaskMetadataResponse {
   truncated: boolean;
 }
 
+export interface TaskAggregateResponse {
+  by: string;
+  groups: { label: string; count: number }[];
+  total: number;
+  scanned: number;
+  truncated: boolean;
+}
+
+export interface BulkFilteredResponse {
+  processed: number;
+  errors: number;
+  scanned: number;
+  truncated: boolean;
+}
+
 export interface ListServersResponse {
   servers: ServerInfo[];
 }
@@ -466,6 +481,53 @@ export async function taskMetadata(params: {
   const resp = await axios({
     method: "get",
     url: `${getBaseUrl()}/task_metadata?${usp.toString()}`,
+  });
+  return resp.data;
+}
+
+export async function taskAggregate(params: {
+  queue?: string;
+  state: string;
+  q?: string;
+  meta?: string[];
+  by: "type" | "error" | "queue";
+  maxScan?: number;
+  limit?: number;
+}): Promise<TaskAggregateResponse> {
+  const usp = new URLSearchParams();
+  if (params.queue) usp.set("queue", params.queue);
+  usp.set("state", params.state);
+  if (params.q) usp.set("q", params.q);
+  (params.meta ?? []).forEach((m) => usp.append("meta", m));
+  usp.set("by", params.by);
+  if (params.maxScan) usp.set("max_scan", String(params.maxScan));
+  if (params.limit) usp.set("limit", String(params.limit));
+  const resp = await axios({
+    method: "get",
+    url: `${getBaseUrl()}/task_aggregate?${usp.toString()}`,
+  });
+  return resp.data;
+}
+
+export async function bulkFilteredTasks(body: {
+  queue?: string;
+  state: string;
+  q?: string;
+  meta?: string[];
+  action: "delete" | "run" | "archive" | "cancel";
+  maxScan?: number;
+}): Promise<BulkFilteredResponse> {
+  const resp = await axios({
+    method: "post",
+    url: `${getBaseUrl()}/tasks:batch_filtered`,
+    data: {
+      queue: body.queue,
+      state: body.state,
+      q: body.q,
+      meta: body.meta ?? [],
+      action: body.action,
+      max_scan: body.maxScan,
+    },
   });
   return resp.data;
 }
