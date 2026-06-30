@@ -196,6 +196,38 @@ payload) to drill down with `key=value` filters.
 
 ![Web UI Settings and adaptive dark mode](./docs/screenshots/settings-dark.png)
 
+## Redis IAM authentication (cloud-managed)
+
+For cloud-managed Redis with IAM auth, asynqmon can mint short-lived auth tokens
+per connection instead of using a static password. The mechanism is
+provider-agnostic; AWS and GCP are supported (cluster mode). In-transit
+encryption (TLS) is required.
+
+**AWS ElastiCache (IAM RBAC user):** uses a SigV4-presigned token (via the
+standard AWS credential chain — env, profile, or instance/IRSA role).
+
+```bash
+./asynqmon \
+  --redis-iam-auth --redis-iam-provider=aws \
+  --aws-region=us-east-1 \
+  --redis-iam-cache-name=my-cache \
+  --redis-user=my-iam-user \
+  --redis-cluster-nodes=clustercfg.my-cache.xxxx.use1.cache.amazonaws.com:6379
+```
+
+**GCP Memorystore (IAM):** uses a Google OAuth2 access token from Application
+Default Credentials.
+
+```bash
+./asynqmon \
+  --redis-iam-auth --redis-iam-provider=gcp \
+  --redis-cluster-nodes=10.0.0.3:6379
+```
+
+All flags also accept env vars (`REDIS_IAM_AUTH`, `REDIS_IAM_PROVIDER`,
+`AWS_REGION`, `REDIS_IAM_CACHE_NAME`, `REDIS_USER`). When IAM auth is disabled
+(the default), nothing changes.
+
 ## Import as a Library
 
 [![GoDoc](https://godoc.org/github.com/hibiken/asynqmon?status.svg)](https://godoc.org/github.com/hibiken/asynqmon)
