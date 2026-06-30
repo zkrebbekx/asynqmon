@@ -4,6 +4,7 @@ import { BrowserRouter, Routes, Route, NavLink, useLocation } from "react-router
 import { Toaster, toast } from "sonner";
 import {
   BarChart2,
+  ListChecks,
   Server,
   Clock,
   Database,
@@ -25,6 +26,7 @@ import HeaderBar from "./components/HeaderBar";
 // loads on demand instead of in the initial bundle.
 const DashboardView = lazy(() => import("./views/DashboardView"));
 const TasksView = lazy(() => import("./views/TasksView"));
+const TasksGlobalView = lazy(() => import("./views/TasksGlobalView"));
 const TaskDetailsView = lazy(() => import("./views/TaskDetailsView"));
 const SchedulersView = lazy(() => import("./views/SchedulersView"));
 const ServersView = lazy(() => import("./views/ServersView"));
@@ -94,6 +96,7 @@ function AppContent() {
 
   const navItems = [
     { to: appPaths.HOME, icon: <BarChart2 size={18} />, label: "Queues" },
+    { to: appPaths.TASKS, icon: <ListChecks size={18} />, label: "Tasks" },
     { to: appPaths.SERVERS, icon: <Server size={18} />, label: "Servers" },
     { to: appPaths.SCHEDULERS, icon: <Clock size={18} />, label: "Schedulers" },
     { to: appPaths.REDIS, icon: <Database size={18} />, label: "Redis" },
@@ -176,6 +179,7 @@ function AppContent() {
         >
           <Routes>
             <Route path={appPaths.TASK_DETAILS} element={<TaskDetailsView />} />
+            <Route path={appPaths.TASKS} element={<TasksGlobalView />} />
             <Route path={appPaths.QUEUE_DETAILS} element={<TasksView />} />
             <Route path={appPaths.SCHEDULERS} element={<SchedulersView />} />
             <Route path={appPaths.SERVERS} element={<ServersView />} />

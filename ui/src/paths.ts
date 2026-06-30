@@ -4,6 +4,7 @@ export const paths = () => ({
   SERVERS: `${window.ROOT_PATH}/servers`,
   SCHEDULERS: `${window.ROOT_PATH}/schedulers`,
   QUEUE_DETAILS: `${window.ROOT_PATH}/queues/:qname`,
+  TASKS: `${window.ROOT_PATH}/tasks`,
   REDIS: `${window.ROOT_PATH}/redis`,
   TASK_DETAILS: `${window.ROOT_PATH}/queues/:qname/tasks/:taskId`,
   QUEUE_METRICS: `${window.ROOT_PATH}/q/metrics`,
