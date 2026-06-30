@@ -186,6 +186,9 @@ func muxRouter(opts Options, rc redis.UniversalClient, inspector *asynq.Inspecto
 
 	api.HandleFunc("/queues/{qname}/tasks/{task_id}", newGetTaskHandlerFunc(inspector, payloadFmt, resultFmt)).Methods("GET")
 
+	// Cross-queue server-side task search / filter / pagination.
+	api.HandleFunc("/tasks", newSearchTasksHandlerFunc(inspector, payloadFmt)).Methods("GET")
+
 	// Groups endponts
 	api.HandleFunc("/queues/{qname}/groups", newListGroupsHandlerFunc(inspector)).Methods("GET")
 
