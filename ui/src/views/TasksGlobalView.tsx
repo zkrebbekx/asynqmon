@@ -1,16 +1,15 @@
 import { useEffect, useMemo, useState, useCallback } from "react";
 import { useDispatch, useSelector } from "react-redux";
 import { useNavigate } from "react-router-dom";
-import { Search, Play, Trash2, Archive, X, ChevronLeft, ChevronRight, Tag, AlertCircle } from "lucide-react";
+import { Search, Play, Trash2, Archive, X, ChevronLeft, ChevronRight, Tag, AlertCircle, AlertTriangle } from "lucide-react";
 import { AppState } from "../store";
 import { listQueuesAsync } from "../actions/queuesActions";
 import { pollTick } from "../actions/settingsActions";
 import * as api from "../api";
-import { TaskInfo, ListTasksResponse, PaginationOptions } from "../api";
+import { TaskInfo } from "../api";
 import { taskDetailsPath } from "../paths";
 import { prettifyPayload, uuidPrefix } from "../utils";
-import { matchesQuery } from "../lib/filter";
-import { matchesMetadata, collectMetadata, metaId, MetaPair } from "../lib/metadata";
+import { metaId, MetaPair } from "../lib/metadata";
 import { cn } from "../lib/utils";
 import { Input } from "../components/ui/input";
 import { Button } from "../components/ui/button";
@@ -19,20 +18,10 @@ import { Alert, AlertDescription, AlertTitle } from "../components/ui/alert";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "../components/ui/tooltip";
 import SyntaxHighlighter from "../components/SyntaxHighlighter";
 
-type ListFn = (qname: string, opts?: PaginationOptions) => Promise<ListTasksResponse>;
 type ActionFn = (qname: string, taskId: string) => Promise<unknown>;
 
 const STATES = ["active", "pending", "scheduled", "retry", "archived", "completed"] as const;
 type State = (typeof STATES)[number];
-
-const listFns: Record<State, ListFn> = {
-  active: api.listActiveTasks,
-  pending: api.listPendingTasks,
-  scheduled: api.listScheduledTasks,
-  retry: api.listRetryTasks,
-  archived: api.listArchivedTasks,
-  completed: api.listCompletedTasks,
-};
 
 const actionFns: Record<State, { run?: ActionFn; archive?: ActionFn; delete?: ActionFn; cancel?: ActionFn }> = {
   active: { cancel: api.cancelActiveTask },
@@ -43,7 +32,6 @@ const actionFns: Record<State, { run?: ActionFn; archive?: ActionFn; delete?: Ac
   completed: { delete: api.deleteCompletedTask },
 };
 
-const PER_QUEUE_FETCH = 100;
 const PAGE_SIZE = 20;
 
 export default function TasksGlobalView() {
@@ -56,8 +44,12 @@ export default function TasksGlobalView() {
   const [selectedQueue, setSelectedQueue] = useState<string>("all");
   const [selectedState, setSelectedState] = useState<State>("pending");
   const [search, setSearch] = useState("");
+  const [debouncedSearch, setDebouncedSearch] = useState("");
   const [metaFilters, setMetaFilters] = useState<MetaPair[]>([]);
   const [tasks, setTasks] = useState<TaskInfo[]>([]);
+  const [total, setTotal] = useState(0);
+  const [truncated, setTruncated] = useState(false);
+  const [facets, setFacets] = useState<{ key: string; value: string; count: number }[]>([]);
   const [error, setError] = useState("");
   const [page, setPage] = useState(0);
 
@@ -65,33 +57,36 @@ export default function TasksGlobalView() {
     dispatch(listQueuesAsync() as any);
   }, [dispatch]);
 
-  const targetQueues = selectedQueue === "all" ? queues : [selectedQueue];
-  const queueKey = `${selectedQueue}|${queues.join(",")}`;
+  // Debounce the search box so typing doesn't hammer the server-side scan.
+  useEffect(() => {
+    const id = setTimeout(() => setDebouncedSearch(search), 300);
+    return () => clearTimeout(id);
+  }, [search]);
+
+  const metaParam = metaFilters.map((p) => `${p.key}:${p.value}`);
+  const metaKey = metaParam.join("|");
 
   const fetchTasks = useCallback(async () => {
-    if (targetQueues.length === 0) {
-      setTasks([]);
-      return;
-    }
-    const listFn = listFns[selectedState];
     try {
-      const perQueue = await Promise.all(
-        targetQueues.map((q) =>
-          listFn(q, { size: PER_QUEUE_FETCH, page: 1 })
-            .then((r) => r.tasks ?? [])
-            .catch(() => [] as TaskInfo[])
-        )
-      );
-      setTasks(perQueue.flat());
+      const resp = await api.searchTasks({
+        queue: selectedQueue,
+        state: selectedState,
+        q: debouncedSearch,
+        meta: metaParam,
+        page: page + 1,
+        size: PAGE_SIZE,
+      });
+      setTasks(resp.tasks ?? []);
+      setTotal(resp.total);
+      setTruncated(resp.truncated);
       setError("");
     } catch (e) {
       setError(String(e));
     }
     dispatch(pollTick());
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedState, queueKey, dispatch]);
+  }, [selectedQueue, selectedState, debouncedSearch, metaKey, page, dispatch]);
 
-  // Immediate refetch on control change + periodic polling.
   useEffect(() => {
     fetchTasks();
     if (!pollingActive) return;
@@ -99,35 +94,40 @@ export default function TasksGlobalView() {
     return () => clearInterval(id);
   }, [fetchTasks, pollingActive, pollInterval]);
 
-  // Reset to first page whenever the result set could change.
+  // Global metadata facets (across the whole filtered set, not just this page).
+  const fetchFacets = useCallback(async () => {
+    try {
+      const resp = await api.taskMetadata({
+        queue: selectedQueue,
+        state: selectedState,
+        q: debouncedSearch,
+        meta: metaParam,
+      });
+      setFacets(resp.facets);
+    } catch {
+      setFacets([]);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedQueue, selectedState, debouncedSearch, metaKey]);
+
+  useEffect(() => {
+    fetchFacets();
+  }, [fetchFacets]);
+
+  // Reset to first page when filters change (page itself is excluded).
   useEffect(() => {
     setPage(0);
-  }, [selectedQueue, selectedState, search, metaFilters]);
+  }, [selectedQueue, selectedState, debouncedSearch, metaKey]);
 
-  // search over id / type / queue / payload
-  const searchFiltered = useMemo(
-    () =>
-      tasks.filter((t) =>
-        matchesQuery(`${t.id} ${t.type} ${t.queue} ${prettifyPayload(t.payload)}`, search)
-      ),
-    [tasks, search]
-  );
-  const filtered = useMemo(
-    () => searchFiltered.filter((t) => matchesMetadata(t.payload, metaFilters)),
-    [searchFiltered, metaFilters]
-  );
-
-  // Metadata chips discovered from the currently-filtered set, minus active ones.
+  // Chips = global facets minus already-active filters.
   const activeIds = new Set(metaFilters.map(metaId));
   const chips = useMemo(
-    () => collectMetadata(filtered.map((t) => t.payload)).filter((p) => !activeIds.has(metaId(p))),
+    () => facets.filter((p) => !activeIds.has(metaId(p))),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [filtered, metaFilters]
+    [facets, metaKey]
   );
 
-  const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
-  const pageTasks = filtered.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE);
-
+  const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
   const addFilter = (p: MetaPair) => setMetaFilters((prev) => [...prev, p]);
   const removeFilter = (p: MetaPair) =>
     setMetaFilters((prev) => prev.filter((x) => metaId(x) !== metaId(p)));
@@ -144,7 +144,6 @@ export default function TasksGlobalView() {
 
       {/* Controls */}
       <div className="flex flex-wrap items-center gap-2">
-        {/* Queue filter */}
         <div className="flex items-center gap-1.5">
           <span className="text-xs text-[hsl(var(--muted-foreground))]">Queue</span>
           <select
@@ -159,7 +158,6 @@ export default function TasksGlobalView() {
           </select>
         </div>
 
-        {/* State tabs */}
         <div className="flex items-center gap-1 flex-wrap">
           {STATES.map((st) => (
             <button
@@ -173,12 +171,11 @@ export default function TasksGlobalView() {
               )}
             >
               {st}
-              {selectedState === st && <span className="opacity-70">{filtered.length}</span>}
+              {selectedState === st && <span className="opacity-70">{total}</span>}
             </button>
           ))}
         </div>
 
-        {/* Search */}
         <div className="relative ml-auto">
           <Search size={13} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-[hsl(var(--muted-foreground))]" />
           <Input
@@ -206,10 +203,11 @@ export default function TasksGlobalView() {
         {chips.map((p) => (
           <button
             key={metaId(p)}
-            onClick={() => addFilter(p)}
+            onClick={() => addFilter({ key: p.key, value: p.value })}
             className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs border border-[hsl(var(--border))] text-[hsl(var(--muted-foreground))] hover:border-[hsl(var(--primary))] hover:text-[hsl(var(--foreground))] transition-colors"
           >
             {p.key}: {p.value}
+            <span className="opacity-60">{p.count}</span>
           </button>
         ))}
         {metaFilters.length === 0 && chips.length === 0 && (
@@ -225,6 +223,13 @@ export default function TasksGlobalView() {
         </Alert>
       )}
 
+      {truncated && (
+        <div className="flex items-center gap-2 text-xs text-amber-500">
+          <AlertTriangle size={14} />
+          <span>Result set is large; counts are capped by the scan limit. Narrow with search or metadata filters for exact totals.</span>
+        </div>
+      )}
+
       {/* Table */}
       <div className="rounded-lg border border-[hsl(var(--border))] bg-[hsl(var(--card))]">
         <Table>
@@ -238,14 +243,14 @@ export default function TasksGlobalView() {
             </TableRow>
           </TableHeader>
           <TableBody>
-            {pageTasks.length === 0 ? (
+            {tasks.length === 0 ? (
               <TableRow>
                 <TableCell colSpan={window.READ_ONLY ? 4 : 5} className="text-center py-8 text-[hsl(var(--muted-foreground))]">
                   No tasks
                 </TableCell>
               </TableRow>
             ) : (
-              pageTasks.map((t) => (
+              tasks.map((t) => (
                 <TableRow
                   key={`${t.queue}:${t.id}`}
                   className="cursor-pointer"
@@ -302,10 +307,10 @@ export default function TasksGlobalView() {
         </Table>
 
         {/* Pagination */}
-        {filtered.length > PAGE_SIZE && (
+        {total > PAGE_SIZE && (
           <div className="flex items-center justify-between px-4 py-3 border-t border-[hsl(var(--border))]">
             <span className="text-xs text-[hsl(var(--muted-foreground))]">
-              {page * PAGE_SIZE + 1}–{Math.min((page + 1) * PAGE_SIZE, filtered.length)} of {filtered.length}
+              {page * PAGE_SIZE + 1}–{Math.min((page + 1) * PAGE_SIZE, total)} of {truncated ? `${total}+` : total}
             </span>
             <div className="flex items-center gap-1">
               <Button size="icon" variant="ghost" className="h-7 w-7" disabled={page === 0} onClick={() => setPage(page - 1)}>
@@ -318,10 +323,6 @@ export default function TasksGlobalView() {
           </div>
         )}
       </div>
-
-      <p className="text-xs text-[hsl(var(--muted-foreground))]">
-        Showing up to {PER_QUEUE_FETCH} tasks per queue. Refine with search or metadata filters to narrow results.
-      </p>
     </div>
   );
 }

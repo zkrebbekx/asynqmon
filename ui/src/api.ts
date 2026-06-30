@@ -24,6 +24,21 @@ export interface ListAggregatingTasksResponse {
   groups: GroupInfo[];
 }
 
+export interface SearchTasksResponse {
+  tasks: TaskInfo[];
+  total: number;
+  scanned: number;
+  truncated: boolean;
+  page: number;
+  size: number;
+}
+
+export interface TaskMetadataResponse {
+  facets: { key: string; value: string; count: number }[];
+  scanned: number;
+  truncated: boolean;
+}
+
 export interface ListServersResponse {
   servers: ServerInfo[];
 }
@@ -405,6 +420,52 @@ export async function listGroups(qname: string): Promise<ListGroupsResponse> {
   const resp = await axios({
     method: "get",
     url: `${getBaseUrl()}/queues/${qname}/groups`,
+  });
+  return resp.data;
+}
+
+export async function searchTasks(params: {
+  queue?: string;
+  state: string;
+  q?: string;
+  meta?: string[];
+  page?: number;
+  size?: number;
+  maxScan?: number;
+}): Promise<SearchTasksResponse> {
+  const usp = new URLSearchParams();
+  if (params.queue) usp.set("queue", params.queue);
+  usp.set("state", params.state);
+  if (params.q) usp.set("q", params.q);
+  (params.meta ?? []).forEach((m) => usp.append("meta", m));
+  if (params.page) usp.set("page", String(params.page));
+  if (params.size) usp.set("size", String(params.size));
+  if (params.maxScan) usp.set("max_scan", String(params.maxScan));
+  const resp = await axios({
+    method: "get",
+    url: `${getBaseUrl()}/tasks?${usp.toString()}`,
+  });
+  return resp.data;
+}
+
+export async function taskMetadata(params: {
+  queue?: string;
+  state: string;
+  q?: string;
+  meta?: string[];
+  maxScan?: number;
+  limit?: number;
+}): Promise<TaskMetadataResponse> {
+  const usp = new URLSearchParams();
+  if (params.queue) usp.set("queue", params.queue);
+  usp.set("state", params.state);
+  if (params.q) usp.set("q", params.q);
+  (params.meta ?? []).forEach((m) => usp.append("meta", m));
+  if (params.maxScan) usp.set("max_scan", String(params.maxScan));
+  if (params.limit) usp.set("limit", String(params.limit));
+  const resp = await axios({
+    method: "get",
+    url: `${getBaseUrl()}/task_metadata?${usp.toString()}`,
   });
   return resp.data;
 }
