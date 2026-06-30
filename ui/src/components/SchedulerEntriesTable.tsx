@@ -4,7 +4,7 @@ import { ChevronRight, ChevronDown, Loader2 } from "lucide-react";
 import { SchedulerEntry, SchedulerEnqueueEvent, listSchedulerEnqueueEvents } from "../api";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "./ui/table";
 import { Badge } from "./ui/badge";
-import { timeAgo, uuidPrefix } from "../utils";
+import { timeAgo, durationBefore, uuidPrefix } from "../utils";
 import { taskDetailsPath } from "../paths";
 import SyntaxHighlighter from "./SyntaxHighlighter";
 
@@ -141,7 +141,7 @@ export default function SchedulerEntriesTable({ entries }: Props) {
                   </div>
                 </TableCell>
                 <TableCell className="text-xs text-[hsl(var(--muted-foreground))]">
-                  {timeAgo(entry.next_enqueue_at)}
+                  {durationBefore(entry.next_enqueue_at)}
                 </TableCell>
                 <TableCell className="text-xs text-[hsl(var(--muted-foreground))]">
                   {entry.prev_enqueue_at ? timeAgo(entry.prev_enqueue_at) : "–"}

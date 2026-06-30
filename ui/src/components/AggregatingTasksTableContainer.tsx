@@ -104,6 +104,17 @@ export default function AggregatingTasksTableContainer({ queue }: Props) {
     );
   }
 
+  // Aggregating tasks only exist within a group. With no groups there's nothing
+  // to fetch — listing without a group name errors on the API, so show an empty
+  // state instead of rendering the auto-fetching table.
+  if (groups.length === 0 || currentGroup === "") {
+    return (
+      <div className="px-6 py-8 text-center text-sm text-[hsl(var(--muted-foreground))]">
+        No task groups
+      </div>
+    );
+  }
+
   const totalCount = groups.find((g) => g.group === currentGroup)?.size ?? 0;
 
   return (
