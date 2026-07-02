@@ -1,7 +1,6 @@
 package asynqmon
 
 import (
-	"encoding/json"
 	"net/http"
 
 	"github.com/hibiken/asynq"
@@ -20,15 +19,12 @@ func newListServersHandlerFunc(inspector *asynq.Inspector, pf PayloadFormatter) 
 	return func(w http.ResponseWriter, r *http.Request) {
 		srvs, err := inspector.Servers()
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			writeError(w, errorStatus(err), err)
 			return
 		}
 		resp := listServersResponse{
 			Servers: toServerInfoList(srvs, pf),
 		}
-		if err := json.NewEncoder(w).Encode(resp); err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
+		writeResponseJSON(w, resp)
 	}
 }

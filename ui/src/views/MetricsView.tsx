@@ -1,13 +1,11 @@
-import { useEffect, lazy, Suspense } from "react";
-import { useDispatch, useSelector } from "react-redux";
-import { useNavigate } from "react-router-dom";
-import { Info, AlertTriangle } from "lucide-react";
+import { useCallback, useMemo, useState, lazy, Suspense } from "react";
+import { useSelector } from "react-redux";
+import { AlertTriangle } from "lucide-react";
 import { getMetricsAsync } from "../actions/metricsActions";
 import { listQueuesAsync } from "../actions/queuesActions";
-import { AppState } from "../store";
+import { AppState, useAppDispatch } from "../store";
 import { currentUnixtime } from "../utils";
-import { useQuery } from "../hooks";
-import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "../components/ui/tooltip";
+import { useQuery, usePolling } from "../hooks";
 import { Alert, AlertDescription, AlertTitle } from "../components/ui/alert";
 import { AlertCircle } from "lucide-react";
 
@@ -16,18 +14,32 @@ const QueueMetricsChart = lazy(() => import("../components/QueueMetricsChart"));
 import MetricsFetchControls from "../components/MetricsFetchControls";
 
 export default function MetricsView() {
-  const dispatch = useDispatch();
-  const navigate = useNavigate();
+  const dispatch = useAppDispatch();
   const query = useQuery();
-  const { loading, error, data: metrics } = useSelector((s: AppState) => s.metrics);
-  const queues = useSelector((s: AppState) => s.queues.data.map((q) => q.name));
-  const endTime = parseInt(query.get("end_time") || String(currentUnixtime()), 10);
-  const duration = parseInt(query.get("duration") || "60", 10);
+  const { error, data: metrics } = useSelector((s: AppState) => s.metrics);
+  const queuesData = useSelector((s: AppState) => s.queues.data);
+  const queues = useMemo(() => queuesData.map((q) => q.name), [queuesData]);
+  const pollInterval = useSelector((s: AppState) => s.settings.pollInterval);
+  const queuesKey = queues.join(",");
 
-  useEffect(() => {
-    dispatch(listQueuesAsync() as any);
-    dispatch(getMetricsAsync(endTime, duration, queues) as any);
-  }, [dispatch, endTime, duration]);
+  // With no end_time pinned in the URL we're "live": each poll recomputes
+  // "now" inside the fetch instead of freezing the window at mount time
+  // (recomputing it during render made every render refire the fetch effect).
+  const endTimeParam = query.get("end_time");
+  const duration = parseInt(query.get("duration") || "60", 10);
+  const [endTime, setEndTime] = useState(() =>
+    endTimeParam ? parseInt(endTimeParam, 10) : currentUnixtime()
+  );
+
+  const fetchMetrics = useCallback(() => {
+    const end = endTimeParam ? parseInt(endTimeParam, 10) : currentUnixtime();
+    setEndTime(end);
+    dispatch(listQueuesAsync());
+    dispatch(getMetricsAsync(end, duration, queues));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dispatch, endTimeParam, duration, queuesKey]);
+
+  usePolling(fetchMetrics, pollInterval, [endTimeParam ?? "live", duration, queuesKey]);
 
   if (!window.PROMETHEUS_SERVER_ADDRESS) {
     return (

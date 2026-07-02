@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useSelector, useDispatch } from "react-redux";
 import { AppState } from "../store";
 import { pollIntervalChange, selectTheme } from "../actions/settingsActions";
@@ -11,6 +11,14 @@ export default function SettingsView() {
   const dispatch = useDispatch();
   const { pollInterval, themePreference } = useSelector((s: AppState) => s.settings);
   const [sliderValue, setSliderValue] = useState(pollInterval);
+
+  // Commit on change (debounced) rather than only on mouseup, so keyboard
+  // arrow-key adjustments persist too.
+  useEffect(() => {
+    if (sliderValue === pollInterval) return;
+    const id = setTimeout(() => dispatch(pollIntervalChange(sliderValue)), 300);
+    return () => clearTimeout(id);
+  }, [sliderValue, pollInterval, dispatch]);
 
   return (
     <div className="max-w-2xl mx-auto px-4 py-8">
@@ -33,8 +41,7 @@ export default function SettingsView() {
               step={1}
               value={sliderValue}
               onChange={(e) => setSliderValue(Number(e.target.value))}
-              onMouseUp={(e) => dispatch(pollIntervalChange(Number((e.target as HTMLInputElement).value)))}
-              onTouchEnd={(e) => dispatch(pollIntervalChange(Number((e.target as HTMLInputElement).value)))}
+              aria-label="Polling interval in seconds"
               className="w-full accent-[hsl(var(--primary))]"
             />
             <div className="flex justify-between text-xs text-[hsl(var(--muted-foreground))] mt-1">

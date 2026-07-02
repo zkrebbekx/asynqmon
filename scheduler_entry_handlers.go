@@ -1,7 +1,6 @@
 package asynqmon
 
 import (
-	"encoding/json"
 	"net/http"
 
 	"github.com/gorilla/mux"
@@ -18,7 +17,7 @@ func newListSchedulerEntriesHandlerFunc(inspector *asynq.Inspector, pf PayloadFo
 	return func(w http.ResponseWriter, r *http.Request) {
 		entries, err := inspector.SchedulerEntries()
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			writeError(w, errorStatus(err), err)
 			return
 		}
 		payload := make(map[string]interface{})
@@ -28,10 +27,7 @@ func newListSchedulerEntriesHandlerFunc(inspector *asynq.Inspector, pf PayloadFo
 		} else {
 			payload["entries"] = toSchedulerEntries(entries, pf)
 		}
-		if err := json.NewEncoder(w).Encode(payload); err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
+		writeResponseJSON(w, payload)
 	}
 }
 
@@ -46,15 +42,12 @@ func newListSchedulerEnqueueEventsHandlerFunc(inspector *asynq.Inspector) http.H
 		events, err := inspector.ListSchedulerEnqueueEvents(
 			entryID, asynq.PageSize(pageSize), asynq.Page(pageNum))
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			writeError(w, errorStatus(err), err)
 			return
 		}
 		resp := listSchedulerEnqueueEventsResponse{
 			Events: toSchedulerEnqueueEvents(events),
 		}
-		if err := json.NewEncoder(w).Encode(resp); err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
+		writeResponseJSON(w, resp)
 	}
 }

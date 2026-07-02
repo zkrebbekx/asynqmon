@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/gorilla/mux"
 	"github.com/hibiken/asynq"
@@ -214,7 +215,10 @@ func muxRouter(opts Options, rc redis.UniversalClient, inspector *asynq.Inspecto
 	}
 
 	// Time series metrics endpoints.
-	api.HandleFunc("/metrics", newGetMetricsHandlerFunc(http.DefaultClient, opts.PrometheusAddress)).Methods("GET")
+	// Use a dedicated client with a timeout: a hanging Prometheus must not leak
+	// goroutines on every metrics poll.
+	metricsClient := &http.Client{Timeout: 10 * time.Second}
+	api.HandleFunc("/metrics", newGetMetricsHandlerFunc(metricsClient, opts.PrometheusAddress)).Methods("GET")
 
 	// Restrict APIs when running in read-only mode.
 	if opts.ReadOnly {

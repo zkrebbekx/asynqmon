@@ -4,8 +4,10 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -33,6 +35,42 @@ func (w *responseRecorderWriter) Write(b []byte) (int, error) {
 	n, err := w.ResponseWriter.Write(b)
 	w.size += n
 	return n, err
+}
+
+// csrfProtection rejects cross-origin mutating requests. Browsers attach an
+// Origin header to every cross-origin request — including simple form POSTs
+// that never trigger a CORS preflight — so checking it here blocks CSRF
+// against the unauthenticated dashboard. Requests without an Origin header
+// (curl, scripts, same-origin GET navigations) are unaffected.
+func csrfProtection(allowedOrigins []string) func(http.Handler) http.Handler {
+	allowed := make(map[string]bool, len(allowedOrigins))
+	for _, o := range allowedOrigins {
+		allowed[strings.ToLower(strings.TrimSuffix(strings.TrimSpace(o), "/"))] = true
+	}
+	return func(h http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch r.Method {
+			case http.MethodGet, http.MethodHead, http.MethodOptions:
+			default:
+				origin := r.Header.Get("Origin")
+				if origin != "" && !allowed[strings.ToLower(origin)] && !sameOrigin(origin, r) {
+					http.Error(w, "cross-origin request rejected", http.StatusForbidden)
+					return
+				}
+			}
+			h.ServeHTTP(w, r)
+		})
+	}
+}
+
+// sameOrigin reports whether the given Origin header value points at the host
+// this request was addressed to.
+func sameOrigin(origin string, r *http.Request) bool {
+	u, err := url.Parse(origin)
+	if err != nil {
+		return false
+	}
+	return strings.EqualFold(u.Host, r.Host)
 }
 
 func loggingMiddleware(h http.Handler) http.Handler {

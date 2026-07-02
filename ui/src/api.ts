@@ -320,6 +320,7 @@ export interface Queue {
   archived: number;
   completed: number;
   processed: number;
+  succeeded: number;
   failed: number;
   timestamp: string;
 }
@@ -328,6 +329,7 @@ export interface DailyStat {
   queue: string;
   date: string;
   processed: number;
+  succeeded: number;
   failed: number;
 }
 

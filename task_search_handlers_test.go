@@ -9,10 +9,11 @@ import (
 func TestTaskMatchesSearch(t *testing.T) {
 	Convey("Given a task and a free-text query", t, func() {
 		task := &searchTask{
-			ID:      "abc-123",
-			Queue:   "critical",
-			Type:    "email:welcome",
-			Payload: `{"user_id":1002,"email":"u@example.com"}`,
+			ID:         "abc-123",
+			Queue:      "critical",
+			Type:       "email:welcome",
+			Payload:    `{"user_id":1002,"email":"u@example.com"}`,
+			rawPayload: `{"user_id":1002,"email":"u@example.com"}`,
 		}
 
 		Convey("An empty query matches everything", func() {
@@ -26,6 +27,13 @@ func TestTaskMatchesSearch(t *testing.T) {
 		})
 		Convey("It fails when the substring is absent", func() {
 			So(taskMatchesSearch(task, "payment"), ShouldBeFalse)
+		})
+		Convey("It matches on the full raw payload even when the display payload is truncated", func() {
+			truncated := &searchTask{
+				Payload:    `{"user_id":1002,"note":"aaaaaaaaaa…`,
+				rawPayload: `{"user_id":1002,"note":"aaaaaaaaaa","needle":"deep-value"}`,
+			}
+			So(taskMatchesSearch(truncated, "deep-value"), ShouldBeTrue)
 		})
 	})
 }
@@ -66,10 +74,10 @@ func TestScalarString(t *testing.T) {
 func TestCollectFacets(t *testing.T) {
 	Convey("Given a set of matched tasks", t, func() {
 		matches := []*searchTask{
-			{Payload: `{"region":"eu","tier":"gold"}`},
-			{Payload: `{"region":"eu","tier":"silver"}`},
-			{Payload: `{"region":"us","nested":{"x":1},"list":[1,2]}`},
-			{Payload: `not json`},
+			{rawPayload: `{"region":"eu","tier":"gold"}`},
+			{rawPayload: `{"region":"eu","tier":"silver"}`},
+			{rawPayload: `{"region":"us","nested":{"x":1},"list":[1,2]}`},
+			{rawPayload: `not json`},
 		}
 
 		Convey("collectFacets aggregates distinct key=value with counts, most frequent first", func() {

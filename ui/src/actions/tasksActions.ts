@@ -142,7 +142,7 @@ export const BATCH_ARCHIVE_PENDING_TASKS_BEGIN =
 export const BATCH_ARCHIVE_PENDING_TASKS_SUCCESS =
   "BATCH_ARCHIVE_PENDING_TASKS_SUCCESS";
 export const BATCH_ARCHIVE_PENDING_TASKS_ERROR =
-  "BATCH_RUN_PENDING_TASKS_ERROR";
+  "BATCH_ARCHIVE_PENDING_TASKS_ERROR";
 export const BATCH_DELETE_PENDING_TASKS_BEGIN =
   "BATCH_DELETE_PENDING_TASKS_BEGIN";
 export const BATCH_DELETE_PENDING_TASKS_SUCCESS =
@@ -170,7 +170,7 @@ export const BATCH_ARCHIVE_SCHEDULED_TASKS_BEGIN =
 export const BATCH_ARCHIVE_SCHEDULED_TASKS_SUCCESS =
   "BATCH_ARCHIVE_SCHEDULED_TASKS_SUCCESS";
 export const BATCH_ARCHIVE_SCHEDULED_TASKS_ERROR =
-  "BATCH_RUN_SCHEDULED_TASKS_ERROR";
+  "BATCH_ARCHIVE_SCHEDULED_TASKS_ERROR";
 export const BATCH_DELETE_SCHEDULED_TASKS_BEGIN =
   "BATCH_DELETE_SCHEDULED_TASKS_BEGIN";
 export const BATCH_DELETE_SCHEDULED_TASKS_SUCCESS =
@@ -267,7 +267,7 @@ export const BATCH_ARCHIVE_AGGREGATING_TASKS_BEGIN =
 export const BATCH_ARCHIVE_AGGREGATING_TASKS_SUCCESS =
   "BATCH_ARCHIVE_AGGREGATING_TASKS_SUCCESS";
 export const BATCH_ARCHIVE_AGGREGATING_TASKS_ERROR =
-  "BATCH_RUN_AGGREGATING_TASKS_ERROR";
+  "BATCH_ARCHIVE_AGGREGATING_TASKS_ERROR";
 export const BATCH_DELETE_AGGREGATING_TASKS_BEGIN =
   "BATCH_DELETE_AGGREGATING_TASKS_BEGIN";
 export const BATCH_DELETE_AGGREGATING_TASKS_SUCCESS =
@@ -1427,16 +1427,24 @@ export type TasksActionTypes =
   | ArchiveAggregatingTaskSuccessAction
   | ArchiveAggregatingTaskErrorAction;
 
+// Each list/get thunk keeps a monotonically increasing sequence number and
+// only dispatches the result of the most recent request. Without this, a slow
+// response for queue A can land after a fast response for queue B and clobber
+// the fresh data (out-of-order responses during navigation + polling).
+let getTaskInfoSeq = 0;
 export function getTaskInfoAsync(qname: string, id: string) {
   return async (dispatch: Dispatch<TasksActionTypes>) => {
+    const seq = ++getTaskInfoSeq;
     dispatch({ type: GET_TASK_INFO_BEGIN });
     try {
       const response = await getTaskInfo(qname, id);
+      if (seq !== getTaskInfoSeq) return; // superseded by a newer request
       dispatch({
         type: GET_TASK_INFO_SUCCESS,
         payload: response,
       });
     } catch (error) {
+      if (seq !== getTaskInfoSeq) return;
       console.error("getTaskInfoAsync: ", toErrorStringWithHttpStatus(error));
       dispatch({
         type: GET_TASK_INFO_ERROR,
@@ -1446,20 +1454,24 @@ export function getTaskInfoAsync(qname: string, id: string) {
   };
 }
 
+let listActiveSeq = 0;
 export function listActiveTasksAsync(
   qname: string,
   pageOpts?: PaginationOptions
 ) {
   return async (dispatch: Dispatch<TasksActionTypes>) => {
+    const seq = ++listActiveSeq;
     dispatch({ type: LIST_ACTIVE_TASKS_BEGIN, queue: qname });
     try {
       const response = await listActiveTasks(qname, pageOpts);
+      if (seq !== listActiveSeq) return; // superseded by a newer request
       dispatch({
         type: LIST_ACTIVE_TASKS_SUCCESS,
         queue: qname,
         payload: response,
       });
     } catch (error) {
+      if (seq !== listActiveSeq) return;
       console.error(
         "listActiveTasksAsync: ",
         toErrorStringWithHttpStatus(error)
@@ -1473,20 +1485,24 @@ export function listActiveTasksAsync(
   };
 }
 
+let listPendingSeq = 0;
 export function listPendingTasksAsync(
   qname: string,
   pageOpts?: PaginationOptions
 ) {
   return async (dispatch: Dispatch<TasksActionTypes>) => {
+    const seq = ++listPendingSeq;
     dispatch({ type: LIST_PENDING_TASKS_BEGIN, queue: qname });
     try {
       const response = await listPendingTasks(qname, pageOpts);
+      if (seq !== listPendingSeq) return; // superseded by a newer request
       dispatch({
         type: LIST_PENDING_TASKS_SUCCESS,
         queue: qname,
         payload: response,
       });
     } catch (error) {
+      if (seq !== listPendingSeq) return;
       console.error(
         "listPendingTasksAsync: ",
         toErrorStringWithHttpStatus(error)
@@ -1500,20 +1516,24 @@ export function listPendingTasksAsync(
   };
 }
 
+let listScheduledSeq = 0;
 export function listScheduledTasksAsync(
   qname: string,
   pageOpts?: PaginationOptions
 ) {
   return async (dispatch: Dispatch<TasksActionTypes>) => {
+    const seq = ++listScheduledSeq;
     dispatch({ type: LIST_SCHEDULED_TASKS_BEGIN, queue: qname });
     try {
       const response = await listScheduledTasks(qname, pageOpts);
+      if (seq !== listScheduledSeq) return; // superseded by a newer request
       dispatch({
         type: LIST_SCHEDULED_TASKS_SUCCESS,
         queue: qname,
         payload: response,
       });
     } catch (error) {
+      if (seq !== listScheduledSeq) return;
       console.error(
         "listScheduledTasksAsync: ",
         toErrorStringWithHttpStatus(error)
@@ -1527,20 +1547,24 @@ export function listScheduledTasksAsync(
   };
 }
 
+let listRetrySeq = 0;
 export function listRetryTasksAsync(
   qname: string,
   pageOpts?: PaginationOptions
 ) {
   return async (dispatch: Dispatch<TasksActionTypes>) => {
+    const seq = ++listRetrySeq;
     dispatch({ type: LIST_RETRY_TASKS_BEGIN, queue: qname });
     try {
       const response = await listRetryTasks(qname, pageOpts);
+      if (seq !== listRetrySeq) return; // superseded by a newer request
       dispatch({
         type: LIST_RETRY_TASKS_SUCCESS,
         queue: qname,
         payload: response,
       });
     } catch (error) {
+      if (seq !== listRetrySeq) return;
       console.error(
         "listRetryTasksAsync: ",
         toErrorStringWithHttpStatus(error)
@@ -1554,20 +1578,24 @@ export function listRetryTasksAsync(
   };
 }
 
+let listArchivedSeq = 0;
 export function listArchivedTasksAsync(
   qname: string,
   pageOpts?: PaginationOptions
 ) {
   return async (dispatch: Dispatch<TasksActionTypes>) => {
+    const seq = ++listArchivedSeq;
     dispatch({ type: LIST_ARCHIVED_TASKS_BEGIN, queue: qname });
     try {
       const response = await listArchivedTasks(qname, pageOpts);
+      if (seq !== listArchivedSeq) return; // superseded by a newer request
       dispatch({
         type: LIST_ARCHIVED_TASKS_SUCCESS,
         queue: qname,
         payload: response,
       });
     } catch (error) {
+      if (seq !== listArchivedSeq) return;
       console.error(
         "listArchivedTasksAsync: ",
         toErrorStringWithHttpStatus(error)
@@ -1581,20 +1609,24 @@ export function listArchivedTasksAsync(
   };
 }
 
+let listCompletedSeq = 0;
 export function listCompletedTasksAsync(
   qname: string,
   pageOpts?: PaginationOptions
 ) {
   return async (dispatch: Dispatch<TasksActionTypes>) => {
+    const seq = ++listCompletedSeq;
     try {
       dispatch({ type: LIST_COMPLETED_TASKS_BEGIN, queue: qname });
       const response = await listCompletedTasks(qname, pageOpts);
+      if (seq !== listCompletedSeq) return; // superseded by a newer request
       dispatch({
         type: LIST_COMPLETED_TASKS_SUCCESS,
         queue: qname,
         payload: response,
       });
     } catch (error) {
+      if (seq !== listCompletedSeq) return;
       console.error(
         "listCompletedTasksAsync: ",
         toErrorStringWithHttpStatus(error)
@@ -1608,12 +1640,14 @@ export function listCompletedTasksAsync(
   };
 }
 
+let listAggregatingSeq = 0;
 export function listAggregatingTasksAsync(
   qname: string,
   gname: string,
   pageOpts?: PaginationOptions
 ) {
   return async (dispatch: Dispatch<TasksActionTypes>) => {
+    const seq = ++listAggregatingSeq;
     try {
       dispatch({
         type: LIST_AGGREGATING_TASKS_BEGIN,
@@ -1621,6 +1655,7 @@ export function listAggregatingTasksAsync(
         group: gname,
       });
       const response = await listAggregatingTasks(qname, gname, pageOpts);
+      if (seq !== listAggregatingSeq) return; // superseded by a newer request
       dispatch({
         type: LIST_AGGREGATING_TASKS_SUCCESS,
         queue: qname,
@@ -1628,6 +1663,7 @@ export function listAggregatingTasksAsync(
         payload: response,
       });
     } catch (error) {
+      if (seq !== listAggregatingSeq) return;
       console.error(
         "listAggregatingTasksAsync: ",
         toErrorStringWithHttpStatus(error)

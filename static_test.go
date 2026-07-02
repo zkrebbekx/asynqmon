@@ -48,10 +48,11 @@ func TestServeFileContentType(t *testing.T) {
 			staticDirPath: "ui/build",
 			indexFileName: "index.html",
 		}
+		req := httptest.NewRequest("GET", "/", nil)
 
 		Convey("When serving an embedded .svg asset", func() {
 			rec := httptest.NewRecorder()
-			code, err := h.serveFile(rec, "/favicon.svg")
+			code, err := h.serveFile(rec, req, "/favicon.svg")
 
 			Convey("Then it succeeds with the SVG content type", func() {
 				So(err, ShouldBeNil)
@@ -62,23 +63,70 @@ func TestServeFileContentType(t *testing.T) {
 
 		Convey("When serving the root path", func() {
 			rec := httptest.NewRecorder()
-			code, err := h.serveFile(rec, "/")
+			code, err := h.serveFile(rec, req, "/")
 
-			Convey("Then it renders the index template", func() {
+			Convey("Then it renders the index template with no-cache", func() {
+				So(err, ShouldBeNil)
+				So(code, ShouldEqual, 200)
+				So(rec.Body.Len(), ShouldBeGreaterThan, 0)
+				So(rec.Header().Get("Cache-Control"), ShouldEqual, "no-cache")
+			})
+		})
+
+		Convey("When serving an extension-less path that does not exist", func() {
+			rec := httptest.NewRecorder()
+			code, err := h.serveFile(rec, req, "/queues/default/tasks")
+
+			Convey("Then it falls back to the index file (SPA routing)", func() {
 				So(err, ShouldBeNil)
 				So(code, ShouldEqual, 200)
 				So(rec.Body.Len(), ShouldBeGreaterThan, 0)
 			})
 		})
 
-		Convey("When serving a path that does not exist", func() {
+		Convey("When serving a missing file with an extension (e.g. a stale hashed chunk)", func() {
 			rec := httptest.NewRecorder()
-			code, err := h.serveFile(rec, "/does-not-exist.css")
+			code, err := h.serveFile(rec, req, "/does-not-exist.css")
 
-			Convey("Then it falls back to the index file (SPA routing)", func() {
+			Convey("Then it returns 404 instead of the index page", func() {
+				So(err, ShouldNotBeNil)
+				So(code, ShouldEqual, 404)
+			})
+		})
+
+		Convey("When the client accepts gzip for a compressible asset", func() {
+			gzReq := httptest.NewRequest("GET", "/", nil)
+			gzReq.Header.Set("Accept-Encoding", "gzip, deflate, br")
+			rec := httptest.NewRecorder()
+			code, err := h.serveFile(rec, gzReq, "/favicon.svg")
+
+			Convey("Then the response is gzip-encoded with Vary set", func() {
 				So(err, ShouldBeNil)
 				So(code, ShouldEqual, 200)
-				So(rec.Body.Len(), ShouldBeGreaterThan, 0)
+				So(rec.Header().Get("Content-Encoding"), ShouldEqual, "gzip")
+				So(rec.Header().Get("Vary"), ShouldEqual, "Accept-Encoding")
+			})
+		})
+	})
+}
+
+func TestServeHTTPAPINotFound(t *testing.T) {
+	Convey("Given a uiAssetsHandler mounted as the NotFoundHandler", t, func() {
+		h := &uiAssetsHandler{
+			rootPath:      "",
+			contents:      staticContents,
+			staticDirPath: "ui/build",
+			indexFileName: "index.html",
+		}
+
+		Convey("When an unmatched /api path is requested", func() {
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest("GET", "/api/nope", nil)
+			h.ServeHTTP(rec, req)
+
+			Convey("Then it returns a JSON 404, not the SPA index", func() {
+				So(rec.Code, ShouldEqual, 404)
+				So(rec.Header().Get("Content-Type"), ShouldStartWith, "application/json")
 			})
 		})
 	})

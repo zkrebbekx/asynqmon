@@ -1,7 +1,7 @@
-import { useDispatch, useSelector } from "react-redux";
+import { useSelector } from "react-redux";
 import { useNavigate } from "react-router-dom";
-import { X, Copy } from "lucide-react";
-import { AppState } from "../store";
+import { X } from "lucide-react";
+import { AppState, useAppDispatch } from "../store";
 import {
   listActiveTasksAsync, cancelActiveTaskAsync,
   batchCancelActiveTasksAsync, cancelAllActiveTasksAsync,
@@ -15,6 +15,7 @@ import { Button } from "./ui/button";
 import { Badge } from "./ui/badge";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "./ui/tooltip";
 import SyntaxHighlighter from "./SyntaxHighlighter";
+import { cn, clickableRowClass, clickableRowProps } from "../lib/utils";
 
 interface Props {
   queue: string;
@@ -31,13 +32,13 @@ const columns = [
   ...(!window.READ_ONLY ? [{ key: "actions", label: "Actions", align: "center" as const }] : []),
 ];
 
-function Row({ task, isSelected, onSelectChange, onActionComplete }: RowProps) {
-  const dispatch = useDispatch();
+function Row({ task, isSelected, onSelectChange }: RowProps) {
+  const dispatch = useAppDispatch();
   const navigate = useNavigate();
   return (
     <TableRow
-      className={`cursor-pointer ${isSelected ? "bg-[hsl(var(--muted))]/60" : ""}`}
-      onClick={() => navigate(taskDetailsPath(task.queue, task.id))}
+      className={cn(clickableRowClass, isSelected && "bg-[hsl(var(--muted))]/60")}
+      {...clickableRowProps(() => navigate(taskDetailsPath(task.queue, task.id)))}
     >
       {!window.READ_ONLY && (
         <TableCell className="w-10 pr-0" onClick={(e) => e.stopPropagation()}>
@@ -76,7 +77,7 @@ function Row({ task, isSelected, onSelectChange, onActionComplete }: RowProps) {
                   size="icon"
                   variant="ghost"
                   className="h-7 w-7"
-                  onClick={() => dispatch(cancelActiveTaskAsync(task.queue, task.id) as any)}
+                  onClick={() => dispatch(cancelActiveTaskAsync(task.queue, task.id))}
                 >
                   <X size={14} />
                 </Button>
@@ -91,7 +92,7 @@ function Row({ task, isSelected, onSelectChange, onActionComplete }: RowProps) {
 }
 
 export default function ActiveTasksTable({ queue, totalTaskCount }: Props) {
-  const dispatch = useDispatch();
+  const dispatch = useAppDispatch();
   const { loading, error, data: tasks, batchActionPending, allActionPending } = useSelector(
     (s: AppState) => s.tasks.activeTasks
   );
@@ -111,9 +112,9 @@ export default function ActiveTasksTable({ queue, totalTaskCount }: Props) {
       pollInterval={pollInterval}
       pageSize={pageSize}
       columns={columns}
-      listTasks={(q, pgn) => dispatch(listActiveTasksAsync(q, pgn) as any)}
-      batchCancelTasks={(q, ids) => dispatch(batchCancelActiveTasksAsync(q, ids) as any)}
-      cancelAllTasks={(q) => dispatch(cancelAllActiveTasksAsync(q) as any)}
+      listTasks={(q, pgn) => dispatch(listActiveTasksAsync(q, pgn))}
+      batchCancelTasks={(q, ids) => dispatch(batchCancelActiveTasksAsync(q, ids))}
+      cancelAllTasks={(q) => dispatch(cancelAllActiveTasksAsync(q))}
       taskRowsPerPageChange={(n) => dispatch(taskRowsPerPageChange(n))}
       renderRow={(rp) => <Row key={rp.task.id} {...rp} />}
     />

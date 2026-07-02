@@ -1,45 +1,65 @@
 import { useEffect, useMemo, useState, useCallback } from "react";
-import { useDispatch, useSelector } from "react-redux";
+import { useSelector } from "react-redux";
 import { useNavigate } from "react-router-dom";
 import { Search, Play, Trash2, Archive, X, ChevronLeft, ChevronRight, Tag, AlertCircle, AlertTriangle } from "lucide-react";
-import { AppState } from "../store";
+import { AppState, useAppDispatch } from "../store";
 import { listQueuesAsync } from "../actions/queuesActions";
-import { pollTick } from "../actions/settingsActions";
 import * as api from "../api";
 import { TaskInfo } from "../api";
 import { taskDetailsPath } from "../paths";
-import { prettifyPayload, uuidPrefix } from "../utils";
+import { prettifyPayload, toErrorString, uuidPrefix } from "../utils";
 import { metaId, MetaPair } from "../lib/metadata";
-import { cn } from "../lib/utils";
+import { cn, clickableRowClass, clickableRowProps } from "../lib/utils";
+import { usePolling } from "../hooks";
 import { Input } from "../components/ui/input";
 import { Button } from "../components/ui/button";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "../components/ui/table";
 import { Alert, AlertDescription, AlertTitle } from "../components/ui/alert";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "../components/ui/tooltip";
 import SyntaxHighlighter from "../components/SyntaxHighlighter";
+import ConfirmDialog from "../components/ConfirmDialog";
 
 type ActionFn = (qname: string, taskId: string) => Promise<unknown>;
 
-const STATES = ["active", "pending", "scheduled", "retry", "archived", "completed"] as const;
+const STATES = ["active", "pending", "aggregating", "scheduled", "retry", "archived", "completed"] as const;
 type State = (typeof STATES)[number];
 
+// Per-row actions. Aggregating tasks have none here: acting on one requires
+// its group name, which the cross-queue search response doesn't carry —
+// bulk-on-filter actions below still cover them.
 const actionFns: Record<State, { run?: ActionFn; archive?: ActionFn; delete?: ActionFn; cancel?: ActionFn }> = {
   active: { cancel: api.cancelActiveTask },
   pending: { delete: api.deletePendingTask, archive: api.archivePendingTask },
+  aggregating: {},
   scheduled: { run: api.runScheduledTask, archive: api.archiveScheduledTask, delete: api.deleteScheduledTask },
   retry: { run: api.runRetryTask, archive: api.archiveRetryTask, delete: api.deleteRetryTask },
   archived: { run: api.runArchivedTask, delete: api.deleteArchivedTask },
   completed: { delete: api.deleteCompletedTask },
 };
 
+// Bulk-on-filter capabilities per state (the backend acts by queue + task id,
+// which works for aggregating tasks even though per-row actions can't).
+const bulkCaps: Record<State, Array<"run" | "archive" | "delete" | "cancel">> = {
+  active: ["cancel"],
+  pending: ["archive", "delete"],
+  aggregating: ["run", "archive", "delete"],
+  scheduled: ["run", "archive", "delete"],
+  retry: ["run", "archive", "delete"],
+  archived: ["run", "delete"],
+  completed: ["delete"],
+};
+
 const PAGE_SIZE = 20;
 
 export default function TasksGlobalView() {
-  const dispatch = useDispatch();
+  const dispatch = useAppDispatch();
   const navigate = useNavigate();
-  const queues = useSelector((s: AppState) => s.queues.data.map((q) => q.name));
+  // Select the stable data reference and derive names in a memo — mapping
+  // inside the selector returns a fresh array per dispatch and re-renders
+  // this view on every poll tick of unrelated slices.
+  const queuesData = useSelector((s: AppState) => s.queues.data);
+  const queues = useMemo(() => queuesData.map((q) => q.name), [queuesData]);
   const pollInterval = useSelector((s: AppState) => s.settings.pollInterval);
-  const pollingActive = useSelector((s: AppState) => s.settings.pollingActive);
 
   const [selectedQueue, setSelectedQueue] = useState<string>("all");
   const [selectedState, setSelectedState] = useState<State>("pending");
@@ -47,6 +67,7 @@ export default function TasksGlobalView() {
   const [debouncedSearch, setDebouncedSearch] = useState("");
   const [metaFilters, setMetaFilters] = useState<MetaPair[]>([]);
   const [tasks, setTasks] = useState<TaskInfo[]>([]);
+  const [loading, setLoading] = useState(true);
   const [total, setTotal] = useState(0);
   const [truncated, setTruncated] = useState(false);
   const [facets, setFacets] = useState<{ key: string; value: string; count: number }[]>([]);
@@ -58,9 +79,11 @@ export default function TasksGlobalView() {
   // Two-step confirm for bulk-on-filter actions.
   const [confirmAction, setConfirmAction] = useState<"run" | "archive" | "delete" | "cancel" | null>(null);
   const [bulkBusy, setBulkBusy] = useState(false);
+  // Row-level delete confirmation target.
+  const [confirmDelete, setConfirmDelete] = useState<TaskInfo | null>(null);
 
   useEffect(() => {
-    dispatch(listQueuesAsync() as any);
+    dispatch(listQueuesAsync());
   }, [dispatch]);
 
   // Debounce the search box so typing doesn't hammer the server-side scan.
@@ -87,18 +110,15 @@ export default function TasksGlobalView() {
       setTruncated(resp.truncated);
       setError("");
     } catch (e) {
-      setError(String(e));
+      setError(toErrorString(e));
     }
-    dispatch(pollTick());
+    setLoading(false);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedQueue, selectedState, debouncedSearch, metaKey, page, dispatch]);
+  }, [selectedQueue, selectedState, debouncedSearch, metaKey, page]);
 
-  useEffect(() => {
-    fetchTasks();
-    if (!pollingActive) return;
-    const id = setInterval(fetchTasks, pollInterval * 1000);
-    return () => clearInterval(id);
-  }, [fetchTasks, pollingActive, pollInterval]);
+  // usePolling gives pause-on-hidden-tab and the shared "Updated Ns ago"
+  // indicator for free; the fetch key refetches immediately on filter change.
+  usePolling(fetchTasks, pollInterval, [selectedQueue, selectedState, debouncedSearch, metaKey, page]);
 
   // Global metadata facets (across the whole filtered set, not just this page).
   const fetchFacets = useCallback(async () => {
@@ -146,9 +166,13 @@ export default function TasksGlobalView() {
     fetchAnalytics();
   }, [fetchAnalytics]);
 
-  // Reset to first page when filters change (page itself is excluded).
+  // Reset to first page when filters change (page itself is excluded), and
+  // drop the now-mismatched rows so the old filter's results don't linger
+  // while the new ones load.
   useEffect(() => {
     setPage(0);
+    setTasks([]);
+    setLoading(true);
   }, [selectedQueue, selectedState, debouncedSearch, metaKey]);
 
   // Chips = global facets minus already-active filters.
@@ -160,13 +184,25 @@ export default function TasksGlobalView() {
   );
 
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
+
+  // Clamp the page when the filtered total shrinks (bulk actions, drains) so
+  // the user is never stranded on an empty out-of-range page.
+  useEffect(() => {
+    if (page > totalPages - 1) setPage(totalPages - 1);
+  }, [page, totalPages]);
+
   const addFilter = (p: MetaPair) => setMetaFilters((prev) => [...prev, p]);
   const removeFilter = (p: MetaPair) =>
     setMetaFilters((prev) => prev.filter((x) => metaId(x) !== metaId(p)));
 
   const acts = actionFns[selectedState];
   const runAction = async (fn: ActionFn, queue: string, id: string) => {
-    await fn(queue, id);
+    try {
+      await fn(queue, id);
+      setError("");
+    } catch (e) {
+      setError(toErrorString(e));
+    }
     fetchTasks();
   };
 
@@ -182,7 +218,7 @@ export default function TasksGlobalView() {
       });
       setError("");
     } catch (e) {
-      setError(String(e));
+      setError(toErrorString(e));
     }
     setBulkBusy(false);
     setConfirmAction(null);
@@ -191,12 +227,11 @@ export default function TasksGlobalView() {
     fetchAnalytics();
   };
 
-  // Which bulk actions are valid for the current state (mirrors per-row actions).
-  const bulkActions: { action: "run" | "archive" | "delete" | "cancel"; label: string }[] = [];
-  if (acts.run) bulkActions.push({ action: "run", label: "Run" });
-  if (acts.cancel) bulkActions.push({ action: "cancel", label: "Cancel" });
-  if (acts.archive) bulkActions.push({ action: "archive", label: "Archive" });
-  if (acts.delete) bulkActions.push({ action: "delete", label: "Delete" });
+  // Which bulk actions are valid for the current state.
+  const bulkActions = bulkCaps[selectedState].map((action) => ({
+    action,
+    label: action.charAt(0).toUpperCase() + action.slice(1),
+  }));
 
   return (
     <div className="max-w-7xl mx-auto px-4 py-6 space-y-4">
@@ -372,7 +407,19 @@ export default function TasksGlobalView() {
             </TableRow>
           </TableHeader>
           <TableBody>
-            {tasks.length === 0 ? (
+            {loading && tasks.length === 0 ? (
+              // Skeleton rows while the (re)filtered set loads, so the empty
+              // state doesn't flash before data arrives.
+              Array.from({ length: 5 }, (_, i) => (
+                <TableRow key={`skeleton-${i}`}>
+                  {Array.from({ length: window.READ_ONLY ? 4 : 5 }, (_, j) => (
+                    <TableCell key={j}>
+                      <div className="h-4 animate-pulse rounded bg-[hsl(var(--muted))]" />
+                    </TableCell>
+                  ))}
+                </TableRow>
+              ))
+            ) : tasks.length === 0 ? (
               <TableRow>
                 <TableCell colSpan={window.READ_ONLY ? 4 : 5} className="text-center py-8 text-[hsl(var(--muted-foreground))]">
                   No tasks
@@ -382,8 +429,8 @@ export default function TasksGlobalView() {
               tasks.map((t) => (
                 <TableRow
                   key={`${t.queue}:${t.id}`}
-                  className="cursor-pointer"
-                  onClick={() => navigate(taskDetailsPath(t.queue, t.id))}
+                  className={clickableRowClass}
+                  {...clickableRowProps(() => navigate(taskDetailsPath(t.queue, t.id)))}
                 >
                   <TableCell className="font-mono text-xs">{uuidPrefix(t.id)}</TableCell>
                   <TableCell className="text-xs">{t.queue}</TableCell>
@@ -420,7 +467,7 @@ export default function TasksGlobalView() {
                           )}
                           {acts.delete && (
                             <Tooltip><TooltipTrigger asChild>
-                              <Button size="icon" variant="ghost" className="h-7 w-7 text-red-500" onClick={() => runAction(acts.delete!, t.queue, t.id)}>
+                              <Button size="icon" variant="ghost" className="h-7 w-7 text-red-500" onClick={() => setConfirmDelete(t)}>
                                 <Trash2 size={13} />
                               </Button>
                             </TooltipTrigger><TooltipContent>Delete</TooltipContent></Tooltip>
@@ -434,6 +481,24 @@ export default function TasksGlobalView() {
             )}
           </TableBody>
         </Table>
+
+        <ConfirmDialog
+          open={confirmDelete !== null}
+          title="Delete Task"
+          description={
+            <>
+              Delete task <strong>{confirmDelete ? uuidPrefix(confirmDelete.id) : ""}</strong> from
+              queue <strong>{confirmDelete?.queue}</strong>? This action cannot be undone.
+            </>
+          }
+          onConfirm={() => {
+            if (confirmDelete && acts.delete) {
+              runAction(acts.delete, confirmDelete.queue, confirmDelete.id);
+            }
+            setConfirmDelete(null);
+          }}
+          onClose={() => setConfirmDelete(null)}
+        />
 
         {/* Pagination */}
         {total > PAGE_SIZE && (

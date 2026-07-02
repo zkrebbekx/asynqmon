@@ -19,7 +19,7 @@ function makeChartData(queueStats: { [qname: string]: DailyStat[] }, numDays: nu
       if (!byDate[stat.date]) {
         byDate[stat.date] = { succeeded: 0, failed: 0, date: stat.date };
       }
-      byDate[stat.date].succeeded += stat.processed - stat.failed;
+      byDate[stat.date].succeeded += stat.succeeded;
       byDate[stat.date].failed += stat.failed;
     }
   }
@@ -36,7 +36,10 @@ export default function DailyStatsChart({ data, numDays }: Props) {
         <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" />
         <XAxis dataKey="date" minTickGap={10} stroke="hsl(var(--muted-foreground))" tick={{ fontSize: 11 }} />
         <YAxis stroke="hsl(var(--muted-foreground))" tick={{ fontSize: 11 }} />
-        <Tooltip contentStyle={{ backgroundColor: "hsl(var(--popover))", border: "1px solid hsl(var(--border))", borderRadius: "6px" }} />
+        <Tooltip
+          contentStyle={{ backgroundColor: "hsl(var(--popover))", border: "1px solid hsl(var(--border))", borderRadius: "6px" }}
+          labelStyle={{ color: "hsl(var(--popover-foreground))" }}
+        />
         <Legend />
         <Line type="monotone" dataKey="succeeded" stroke="#81c995" strokeWidth={2} dot={false} isAnimationActive={false} />
         <Line type="monotone" dataKey="failed" stroke="#f28b82" strokeWidth={2} dot={false} isAnimationActive={false} />

@@ -1,7 +1,7 @@
-import { useEffect } from "react";
-import { useDispatch, useSelector } from "react-redux";
+import { useEffect, useMemo } from "react";
+import { useSelector } from "react-redux";
 import { useParams } from "react-router-dom";
-import { AppState } from "../store";
+import { AppState, useAppDispatch } from "../store";
 import { listQueuesAsync } from "../actions/queuesActions";
 import { useQuery } from "../hooks";
 import QueueBreadcrumb from "../components/QueueBreadcrumb";
@@ -12,9 +12,10 @@ const validStatus = ["active", "pending", "aggregating", "scheduled", "retry", "
 const defaultStatus = "active";
 
 export default function TasksView() {
-  const dispatch = useDispatch();
+  const dispatch = useAppDispatch();
   const { qname } = useParams<{ qname: string }>();
-  const queues = useSelector((s: AppState) => s.queues.data.map((q) => q.name));
+  const queuesData = useSelector((s: AppState) => s.queues.data);
+  const queues = useMemo(() => queuesData.map((q) => q.name), [queuesData]);
   const query = useQuery();
 
   let selected = query.get("status");
@@ -23,7 +24,7 @@ export default function TasksView() {
   }
 
   useEffect(() => {
-    dispatch(listQueuesAsync() as any);
+    dispatch(listQueuesAsync());
   }, [dispatch]);
 
   return (

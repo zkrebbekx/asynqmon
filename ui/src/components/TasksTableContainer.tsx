@@ -111,14 +111,15 @@ export default function TasksTableContainer({ queue, selected }: Props) {
         </div>
       </div>
 
-      {/* Tab content */}
-      {selected === "active" && <ActiveTasksTable queue={queue} totalTaskCount={stats.active} />}
-      {selected === "pending" && <PendingTasksTable queue={queue} totalTaskCount={stats.pending} />}
-      {selected === "aggregating" && <AggregatingTasksTableContainer queue={queue} />}
-      {selected === "scheduled" && <ScheduledTasksTable queue={queue} totalTaskCount={stats.scheduled} />}
-      {selected === "retry" && <RetryTasksTable queue={queue} totalTaskCount={stats.retry} />}
-      {selected === "archived" && <ArchivedTasksTable queue={queue} totalTaskCount={stats.archived} />}
-      {selected === "completed" && <CompletedTasksTable queue={queue} totalTaskCount={stats.completed} />}
+      {/* Tab content. Keyed by queue so page, filter, and selection state
+          reset when switching queues instead of leaking across them. */}
+      {selected === "active" && <ActiveTasksTable key={queue} queue={queue} totalTaskCount={stats.active} />}
+      {selected === "pending" && <PendingTasksTable key={queue} queue={queue} totalTaskCount={stats.pending} />}
+      {selected === "aggregating" && <AggregatingTasksTableContainer key={queue} queue={queue} />}
+      {selected === "scheduled" && <ScheduledTasksTable key={queue} queue={queue} totalTaskCount={stats.scheduled} />}
+      {selected === "retry" && <RetryTasksTable key={queue} queue={queue} totalTaskCount={stats.retry} />}
+      {selected === "archived" && <ArchivedTasksTable key={queue} queue={queue} totalTaskCount={stats.archived} />}
+      {selected === "completed" && <CompletedTasksTable key={queue} queue={queue} totalTaskCount={stats.completed} />}
     </div>
   );
 }

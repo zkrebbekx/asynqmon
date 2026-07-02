@@ -126,6 +126,7 @@ _Note_: Use `--redis-url` to specify address, db-number, and password with one f
 | `--enable-metrics-exporter`(bool) | `ENABLE_METRICS_EXPORTER` | enable prometheus metrics exporter to expose queue metrics                                                                   | false            |
 | `--prometheus-addr`(string)       | `PROMETHEUS_ADDR`         | address of prometheus server to query time series                                                                            | ""               |
 | `--read-only`(bool)               | `READ_ONLY`               | use web UI in read-only mode                                                                                                 | false            |
+| `--cors-allowed-origins`(string)  | `CORS_ALLOWED_ORIGINS`    | comma separated list of origins allowed to make cross-origin requests (empty = same-origin only; cross-origin mutations are rejected) | ""               |
 
 ### Connecting to Redis
 

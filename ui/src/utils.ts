@@ -1,21 +1,40 @@
 import { AxiosError } from "axios";
+import dayjs from "dayjs";
+
+// The API returns errors as JSON bodies: {"error": "..."}. Older endpoints
+// (and proxies) may still return plain text, so fall back gracefully.
+type ErrorBody = string | { error?: string } | undefined;
+
+function errorMessageFromBody(data: ErrorBody): string {
+  if (typeof data === "string" && data !== "") {
+    return data;
+  }
+  if (data && typeof data === "object" && typeof data.error === "string") {
+    return data.error;
+  }
+  return "";
+}
 
 // toErrorStringWithHttpStatus returns a string representaion of axios error with HTTP status.
-export function toErrorStringWithHttpStatus(error: AxiosError<string>): string {
+export function toErrorStringWithHttpStatus(error: AxiosError<ErrorBody>): string {
   const { response } = error;
   if (!response) {
     return "error: no error response data available";
   }
-  return `${response.status} (${response.statusText}): ${response.data}`;
+  const msg = errorMessageFromBody(response.data) || response.statusText;
+  return `${response.status} (${response.statusText}): ${msg}`;
 }
 
 // toErrorString returns a string representaion of axios error.
-export function toErrorString(error: AxiosError<string>): string {
+export function toErrorString(error: AxiosError<ErrorBody>): string {
   const { response } = error;
   if (!response) {
     return "Unknown error occurred. See the logs for details.";
   }
-  return response.data;
+  return (
+    errorMessageFromBody(response.data) ||
+    `${response.status} ${response.statusText}`
+  );
 }
 
 interface Duration {
@@ -85,12 +104,14 @@ export function timeAgoUnix(unixtime: number): string {
   return stringifyDuration(duration) + " ago";
 }
 
-export function getCurrentUTCDate(): string {
-  const today = new Date();
-  const dd = today.getUTCDate().toString().padStart(2, "0");
-  const mm = (today.getMonth() + 1).toString().padStart(2, "0");
-  const yyyy = today.getFullYear();
-  return `${yyyy}-${mm}-${dd}`;
+// formatTimestamp renders a server RFC3339 timestamp in the viewer's locale
+// and timezone, for display next to relative times like timeAgo.
+export function formatTimestamp(timestamp: string): string {
+  if (!timestamp || timestamp === zeroTimestamp) {
+    return "-";
+  }
+  const d = dayjs(timestamp);
+  return d.isValid() ? d.format("MMM D, YYYY HH:mm:ss") : timestamp;
 }
 
 export function uuidPrefix(uuid: string): string {
@@ -126,25 +147,4 @@ export function prettifyPayload(p: string) {
 // Returns the number of seconds elapsed since January 1, 1970 00:00:00 UTC.
 export function currentUnixtime(): number {
   return Math.floor(Date.now() / 1000);
-}
-
-const durationRegex = /([0-9]*(\.[0-9]*)?)[s|m|h]/;
-// Parses the given string and returns the number of seconds if the input is valid.
-// Otherwise, it throws an error
-// Supported time units are "s", "m", "h"
-export function parseDuration(s: string): number {
-  if (!durationRegex.test(s)) {
-    throw new Error("invalid duration");
-  }
-  const val = parseFloat(s.slice(0, -1));
-  switch (s.slice(-1)) {
-    case "s":
-      return val;
-    case "m":
-      return val * 60;
-    case "h":
-      return val * 60 * 60;
-    default:
-      throw new Error("invalid duration unit");
-  }
 }

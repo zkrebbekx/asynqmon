@@ -1,5 +1,5 @@
-import { useSelector, useDispatch } from "react-redux";
-import { AppState } from "../store";
+import { useSelector } from "react-redux";
+import { AppState, useAppDispatch } from "../store";
 import { listServersAsync } from "../actions/serversActions";
 import { usePolling } from "../hooks";
 import { Alert, AlertDescription, AlertTitle } from "../components/ui/alert";
@@ -7,11 +7,11 @@ import { AlertCircle } from "lucide-react";
 import ServersTable from "../components/ServersTable";
 
 export default function ServersView() {
-  const dispatch = useDispatch();
+  const dispatch = useAppDispatch();
   const { loading, error, data: servers, } = useSelector((s: AppState) => s.servers);
   const pollInterval = useSelector((s: AppState) => s.settings.pollInterval);
 
-  usePolling(() => dispatch(listServersAsync() as any), pollInterval);
+  usePolling(() => dispatch(listServersAsync()), pollInterval);
 
   return (
     <div className="max-w-7xl mx-auto px-4 py-8">

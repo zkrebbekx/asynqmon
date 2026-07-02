@@ -1,7 +1,6 @@
 package asynqmon
 
 import (
-	"encoding/json"
 	"net/http"
 
 	"github.com/gorilla/mux"
@@ -19,12 +18,12 @@ func newListGroupsHandlerFunc(inspector *asynq.Inspector) http.HandlerFunc {
 
 		groups, err := inspector.Groups(qname)
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			writeError(w, errorStatus(err), err)
 			return
 		}
 		qinfo, err := inspector.GetQueueInfo(qname)
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			writeError(w, errorStatus(err), err)
 			return
 		}
 
@@ -32,9 +31,6 @@ func newListGroupsHandlerFunc(inspector *asynq.Inspector) http.HandlerFunc {
 			Queue:  toQueueStateSnapshot(qinfo),
 			Groups: toGroupInfos(groups),
 		}
-		if err := json.NewEncoder(w).Encode(resp); err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
+		writeResponseJSON(w, resp)
 	}
 }

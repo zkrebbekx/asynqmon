@@ -1,9 +1,9 @@
 package asynqmon
 
 import (
-	"encoding/json"
 	"errors"
 	"net/http"
+	"sync"
 
 	"github.com/gorilla/mux"
 
@@ -19,20 +19,48 @@ func newListQueuesHandlerFunc(inspector *asynq.Inspector) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		qnames, err := inspector.Queues()
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			writeError(w, errorStatus(err), err)
 			return
 		}
+		// GetQueueInfo does several redis calls (incl. MEMORY USAGE sampling) per
+		// queue; fetch queues concurrently so the homepage stays fast with many queues.
 		snapshots := make([]*queueStateSnapshot, len(qnames))
+		var (
+			wg       sync.WaitGroup
+			mu       sync.Mutex
+			firstErr error
+		)
 		for i, qname := range qnames {
-			qinfo, err := inspector.GetQueueInfo(qname)
-			if err != nil {
-				http.Error(w, err.Error(), http.StatusInternalServerError)
-				return
-			}
-			snapshots[i] = toQueueStateSnapshot(qinfo)
+			wg.Add(1)
+			go func(i int, qname string) {
+				defer wg.Done()
+				qinfo, err := inspector.GetQueueInfo(qname)
+				if err != nil {
+					// A queue deleted mid-request is not an error for the listing.
+					if !errors.Is(err, asynq.ErrQueueNotFound) {
+						mu.Lock()
+						if firstErr == nil {
+							firstErr = err
+						}
+						mu.Unlock()
+					}
+					return
+				}
+				snapshots[i] = toQueueStateSnapshot(qinfo)
+			}(i, qname)
 		}
-		payload := map[string]interface{}{"queues": snapshots}
-		json.NewEncoder(w).Encode(payload)
+		wg.Wait()
+		if firstErr != nil {
+			writeError(w, errorStatus(firstErr), firstErr)
+			return
+		}
+		queues := make([]*queueStateSnapshot, 0, len(snapshots))
+		for _, s := range snapshots {
+			if s != nil {
+				queues = append(queues, s)
+			}
+		}
+		writeResponseJSON(w, map[string]interface{}{"queues": queues})
 	}
 }
 
@@ -44,8 +72,7 @@ func newGetQueueHandlerFunc(inspector *asynq.Inspector) http.HandlerFunc {
 		payload := make(map[string]interface{})
 		qinfo, err := inspector.GetQueueInfo(qname)
 		if err != nil {
-			// TODO: Check for queue not found error.
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			writeError(w, errorStatus(err), err)
 			return
 		}
 		payload["current"] = toQueueStateSnapshot(qinfo)
@@ -53,15 +80,16 @@ func newGetQueueHandlerFunc(inspector *asynq.Inspector) http.HandlerFunc {
 		// TODO: make this n a variable
 		data, err := inspector.History(qname, 10)
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			writeError(w, errorStatus(err), err)
 			return
 		}
-		var dailyStats []*dailyStats
+		// avoid null for the history field in json output.
+		dailyStats := make([]*dailyStats, 0, len(data))
 		for _, s := range data {
 			dailyStats = append(dailyStats, toDailyStats(s))
 		}
 		payload["history"] = dailyStats
-		json.NewEncoder(w).Encode(payload)
+		writeResponseJSON(w, payload)
 	}
 }
 
@@ -70,15 +98,7 @@ func newDeleteQueueHandlerFunc(inspector *asynq.Inspector) http.HandlerFunc {
 		vars := mux.Vars(r)
 		qname := vars["qname"]
 		if err := inspector.DeleteQueue(qname, false); err != nil {
-			if errors.Is(err, asynq.ErrQueueNotFound) {
-				http.Error(w, err.Error(), http.StatusNotFound)
-				return
-			}
-			if errors.Is(err, asynq.ErrQueueNotEmpty) {
-				http.Error(w, err.Error(), http.StatusBadRequest)
-				return
-			}
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			writeError(w, errorStatus(err), err)
 			return
 		}
 		w.WriteHeader(http.StatusNoContent)
@@ -90,7 +110,7 @@ func newPauseQueueHandlerFunc(inspector *asynq.Inspector) http.HandlerFunc {
 		vars := mux.Vars(r)
 		qname := vars["qname"]
 		if err := inspector.PauseQueue(qname); err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			writeError(w, errorStatus(err), err)
 			return
 		}
 		w.WriteHeader(http.StatusNoContent)
@@ -102,7 +122,7 @@ func newResumeQueueHandlerFunc(inspector *asynq.Inspector) http.HandlerFunc {
 		vars := mux.Vars(r)
 		qname := vars["qname"]
 		if err := inspector.UnpauseQueue(qname); err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			writeError(w, errorStatus(err), err)
 			return
 		}
 		w.WriteHeader(http.StatusNoContent)
@@ -117,7 +137,7 @@ func newListQueueStatsHandlerFunc(inspector *asynq.Inspector) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		qnames, err := inspector.Queues()
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			writeError(w, errorStatus(err), err)
 			return
 		}
 		resp := listQueueStatsResponse{Stats: make(map[string][]*dailyStats)}
@@ -125,14 +145,14 @@ func newListQueueStatsHandlerFunc(inspector *asynq.Inspector) http.HandlerFunc {
 		for _, qname := range qnames {
 			stats, err := inspector.History(qname, numdays)
 			if err != nil {
-				http.Error(w, err.Error(), http.StatusInternalServerError)
+				if errors.Is(err, asynq.ErrQueueNotFound) {
+					continue // queue deleted mid-request
+				}
+				writeError(w, errorStatus(err), err)
 				return
 			}
 			resp.Stats[qname] = toDailyStatsList(stats)
 		}
-		if err := json.NewEncoder(w).Encode(resp); err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
+		writeResponseJSON(w, resp)
 	}
 }

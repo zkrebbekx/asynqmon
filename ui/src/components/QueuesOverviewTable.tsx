@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { Link } from "react-router-dom";
 import prettyBytes from "pretty-bytes";
-import { Pause, Play, Trash2, MoreHorizontal, Search } from "lucide-react";
+import { Pause, Play, Trash2, Search } from "lucide-react";
 import { Queue } from "../api";
 import { queueDetailsPath } from "../paths";
 import { percentage } from "../utils";
@@ -30,13 +30,8 @@ function QueueRow({ queue: q, onPauseClick, onResumeClick, onDeleteClick }: {
   onResumeClick: () => void;
   onDeleteClick: () => void;
 }) {
-  const [showActions, setShowActions] = useState(false);
-
   return (
-    <TableRow
-      onMouseEnter={() => setShowActions(true)}
-      onMouseLeave={() => setShowActions(false)}
-    >
+    <TableRow className="group">
       <TableCell className="font-medium sticky left-0 bg-[hsl(var(--card))]">
         <Link
           to={queueDetailsPath(q.queue)}
@@ -59,43 +54,39 @@ function QueueRow({ queue: q, onPauseClick, onResumeClick, onDeleteClick }: {
       <TableCell className="text-right">{percentage(q.failed, q.processed)}</TableCell>
       {!window.READ_ONLY && (
         <TableCell className="text-center w-28">
-          {showActions ? (
-            <TooltipProvider>
-              <div className="flex items-center justify-center gap-1">
-                {q.paused ? (
-                  <Tooltip>
-                    <TooltipTrigger asChild>
-                      <Button size="icon" variant="ghost" className="h-7 w-7" onClick={onResumeClick} disabled={q.requestPending}>
-                        <Play size={14} />
-                      </Button>
-                    </TooltipTrigger>
-                    <TooltipContent>Resume</TooltipContent>
-                  </Tooltip>
-                ) : (
-                  <Tooltip>
-                    <TooltipTrigger asChild>
-                      <Button size="icon" variant="ghost" className="h-7 w-7" onClick={onPauseClick} disabled={q.requestPending}>
-                        <Pause size={14} />
-                      </Button>
-                    </TooltipTrigger>
-                    <TooltipContent>Pause</TooltipContent>
-                  </Tooltip>
-                )}
+          {/* Always rendered (dimmed until hover or keyboard focus) so the
+              actions are reachable with Tab, not just the mouse. */}
+          <TooltipProvider>
+            <div className="flex items-center justify-center gap-1 opacity-30 transition-opacity group-hover:opacity-100 focus-within:opacity-100">
+              {q.paused ? (
                 <Tooltip>
                   <TooltipTrigger asChild>
-                    <Button size="icon" variant="ghost" className="h-7 w-7 text-red-500 hover:text-red-600" onClick={onDeleteClick}>
-                      <Trash2 size={14} />
+                    <Button size="icon" variant="ghost" className="h-7 w-7" onClick={onResumeClick} disabled={q.requestPending}>
+                      <Play size={14} />
                     </Button>
                   </TooltipTrigger>
-                  <TooltipContent>Delete</TooltipContent>
+                  <TooltipContent>Resume</TooltipContent>
                 </Tooltip>
-              </div>
-            </TooltipProvider>
-          ) : (
-            <Button size="icon" variant="ghost" className="h-7 w-7 opacity-30">
-              <MoreHorizontal size={14} />
-            </Button>
-          )}
+              ) : (
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <Button size="icon" variant="ghost" className="h-7 w-7" onClick={onPauseClick} disabled={q.requestPending}>
+                      <Pause size={14} />
+                    </Button>
+                  </TooltipTrigger>
+                  <TooltipContent>Pause</TooltipContent>
+                </Tooltip>
+              )}
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Button size="icon" variant="ghost" className="h-7 w-7 text-red-500 hover:text-red-600" onClick={onDeleteClick}>
+                    <Trash2 size={14} />
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent>Delete</TooltipContent>
+              </Tooltip>
+            </div>
+          </TooltipProvider>
         </TableCell>
       )}
     </TableRow>

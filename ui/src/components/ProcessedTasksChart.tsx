@@ -17,7 +17,11 @@ export default function ProcessedTasksChart({ data }: Props) {
         <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" />
         <XAxis dataKey="queue" stroke="hsl(var(--muted-foreground))" tick={{ fontSize: 12 }} />
         <YAxis stroke="hsl(var(--muted-foreground))" tick={{ fontSize: 12 }} />
-        <Tooltip contentStyle={{ backgroundColor: "hsl(var(--popover))", border: "1px solid hsl(var(--border))", borderRadius: "6px" }} />
+        <Tooltip
+          contentStyle={{ backgroundColor: "hsl(var(--popover))", border: "1px solid hsl(var(--border))", borderRadius: "6px" }}
+          labelStyle={{ color: "hsl(var(--popover-foreground))" }}
+          cursor={{ fill: "hsl(var(--muted))", opacity: 0.4 }}
+        />
         <Legend />
         <Bar dataKey="succeeded" stackId="a" fill="#81c995" isAnimationActive={false} />
         <Bar dataKey="failed" stackId="a" fill="#f28b82" isAnimationActive={false} />

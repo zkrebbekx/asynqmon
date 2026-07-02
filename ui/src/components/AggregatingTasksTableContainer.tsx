@@ -1,8 +1,8 @@
 import { useState, useCallback } from "react";
-import { useDispatch, useSelector } from "react-redux";
+import { useSelector } from "react-redux";
 import { useNavigate } from "react-router-dom";
-import { Trash2, Archive, Play } from "lucide-react";
-import { AppState } from "../store";
+import { Archive, Play } from "lucide-react";
+import { AppState, useAppDispatch } from "../store";
 import { listGroupsAsync } from "../actions/groupsActions";
 import {
   listAggregatingTasksAsync, deleteAggregatingTaskAsync,
@@ -22,6 +22,8 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from ".
 import { Alert, AlertDescription, AlertTitle } from "./ui/alert";
 import { AlertCircle } from "lucide-react";
 import SyntaxHighlighter from "./SyntaxHighlighter";
+import DeleteConfirmButton from "./DeleteConfirmButton";
+import { clickableRowClass, clickableRowProps } from "../lib/utils";
 
 interface Props { queue: string }
 
@@ -34,10 +36,10 @@ const columns = [
 ];
 
 function Row({ task, isSelected, onSelectChange }: RowProps) {
-  const dispatch = useDispatch();
+  const dispatch = useAppDispatch();
   const navigate = useNavigate();
   return (
-    <TableRow className="cursor-pointer" onClick={() => navigate(taskDetailsPath(task.queue, task.id))}>
+    <TableRow className={clickableRowClass} {...clickableRowProps(() => navigate(taskDetailsPath(task.queue, task.id)))}>
       {!window.READ_ONLY && (
         <TableCell className="w-10 pr-0" onClick={(e) => e.stopPropagation()}>
           <input type="checkbox" checked={isSelected} onChange={(e) => onSelectChange(e.target.checked)} className="h-4 w-4 accent-[hsl(var(--primary))]" />
@@ -56,20 +58,19 @@ function Row({ task, isSelected, onSelectChange }: RowProps) {
           <TooltipProvider>
             <div className="flex items-center justify-center gap-1">
               <Tooltip><TooltipTrigger asChild>
-                <Button size="icon" variant="ghost" className="h-7 w-7" onClick={() => dispatch(runAggregatingTaskAsync(task.queue, task.group, task.id) as any)}>
+                <Button size="icon" variant="ghost" className="h-7 w-7" onClick={() => dispatch(runAggregatingTaskAsync(task.queue, task.group, task.id))}>
                   <Play size={13} />
                 </Button>
               </TooltipTrigger><TooltipContent>Run now</TooltipContent></Tooltip>
               <Tooltip><TooltipTrigger asChild>
-                <Button size="icon" variant="ghost" className="h-7 w-7" onClick={() => dispatch(archiveAggregatingTaskAsync(task.queue, task.group, task.id) as any)}>
+                <Button size="icon" variant="ghost" className="h-7 w-7" onClick={() => dispatch(archiveAggregatingTaskAsync(task.queue, task.group, task.id))}>
                   <Archive size={13} />
                 </Button>
               </TooltipTrigger><TooltipContent>Archive</TooltipContent></Tooltip>
-              <Tooltip><TooltipTrigger asChild>
-                <Button size="icon" variant="ghost" className="h-7 w-7 text-red-500" onClick={() => dispatch(deleteAggregatingTaskAsync(task.queue, task.group, task.id) as any)}>
-                  <Trash2 size={13} />
-                </Button>
-              </TooltipTrigger><TooltipContent>Delete</TooltipContent></Tooltip>
+              <DeleteConfirmButton
+                description={<>Delete task <strong>{uuidPrefix(task.id)}</strong>? This action cannot be undone.</>}
+                onDelete={() => dispatch(deleteAggregatingTaskAsync(task.queue, task.group, task.id))}
+              />
             </div>
           </TooltipProvider>
         </TableCell>
@@ -79,7 +80,7 @@ function Row({ task, isSelected, onSelectChange }: RowProps) {
 }
 
 export default function AggregatingTasksTableContainer({ queue }: Props) {
-  const dispatch = useDispatch();
+  const dispatch = useAppDispatch();
   const { data: groups, error: groupsError } = useSelector((s: AppState) => s.groups);
   const { loading, error, data: tasks, batchActionPending, allActionPending } = useSelector((s: AppState) => s.tasks.aggregatingTasks);
   const pollInterval = useSelector((s: AppState) => s.settings.pollInterval);
@@ -87,12 +88,17 @@ export default function AggregatingTasksTableContainer({ queue }: Props) {
   const [selectedGroup, setSelectedGroup] = useState<string>("");
 
   const fetchGroups = useCallback(() => {
-    dispatch(listGroupsAsync(queue) as any);
+    dispatch(listGroupsAsync(queue));
   }, [dispatch, queue]);
 
-  usePolling(fetchGroups, pollInterval);
+  usePolling(fetchGroups, pollInterval, [queue]);
 
-  const currentGroup = selectedGroup || groups[0]?.group || "";
+  // Fall back to the first group when the selected one drains and disappears,
+  // so the table never keeps polling a group that no longer exists.
+  const currentGroup =
+    selectedGroup && groups.some((g) => g.group === selectedGroup)
+      ? selectedGroup
+      : groups[0]?.group || "";
 
   if (groupsError) {
     return (
@@ -101,6 +107,17 @@ export default function AggregatingTasksTableContainer({ queue }: Props) {
         <AlertTitle>Error</AlertTitle>
         <AlertDescription>{groupsError}</AlertDescription>
       </Alert>
+    );
+  }
+
+  // Aggregating tasks only exist within a group. With no groups there's nothing
+  // to fetch — listing without a group name errors on the API, so show an empty
+  // state instead of rendering the auto-fetching table.
+  if (groups.length === 0 || currentGroup === "") {
+    return (
+      <div className="px-6 py-8 text-center text-sm text-[hsl(var(--muted-foreground))]">
+        No task groups
+      </div>
     );
   }
 
@@ -114,24 +131,27 @@ export default function AggregatingTasksTableContainer({ queue }: Props) {
             <SelectValue placeholder="Select group" />
           </SelectTrigger>
           <SelectContent>
-            {(groups as any[]).map((g) => (
+            {groups.map((g) => (
               <SelectItem key={g.group} value={g.group}>{g.group} ({g.size})</SelectItem>
             ))}
           </SelectContent>
         </Select>
       </div>
       <TasksTable
+        // Keyed by group: switching groups resets page/selection and fetches
+        // the new group's tasks immediately.
+        key={currentGroup}
         queue={queue} totalTaskCount={totalCount} taskState="aggregating"
         loading={loading} error={error} tasks={tasks}
         batchActionPending={batchActionPending} allActionPending={allActionPending}
         pollInterval={pollInterval} pageSize={pageSize} columns={columns}
-        listTasks={(q, pgn) => dispatch(listAggregatingTasksAsync(q, currentGroup, pgn) as any)}
-        batchDeleteTasks={(q, ids) => dispatch(batchDeleteAggregatingTasksAsync(q, currentGroup, ids) as any)}
-        deleteAllTasks={(q) => dispatch(deleteAllAggregatingTasksAsync(q, currentGroup) as any)}
-        batchRunTasks={(q, ids) => dispatch(batchRunAggregatingTasksAsync(q, currentGroup, ids) as any)}
-        runAllTasks={(q) => dispatch(runAllAggregatingTasksAsync(q, currentGroup) as any)}
-        batchArchiveTasks={(q, ids) => dispatch(batchArchiveAggregatingTasksAsync(q, currentGroup, ids) as any)}
-        archiveAllTasks={(q) => dispatch(archiveAllAggregatingTasksAsync(q, currentGroup) as any)}
+        listTasks={(q, pgn) => dispatch(listAggregatingTasksAsync(q, currentGroup, pgn))}
+        batchDeleteTasks={(q, ids) => dispatch(batchDeleteAggregatingTasksAsync(q, currentGroup, ids))}
+        deleteAllTasks={(q) => dispatch(deleteAllAggregatingTasksAsync(q, currentGroup))}
+        batchRunTasks={(q, ids) => dispatch(batchRunAggregatingTasksAsync(q, currentGroup, ids))}
+        runAllTasks={(q) => dispatch(runAllAggregatingTasksAsync(q, currentGroup))}
+        batchArchiveTasks={(q, ids) => dispatch(batchArchiveAggregatingTasksAsync(q, currentGroup, ids))}
+        archiveAllTasks={(q) => dispatch(archiveAllAggregatingTasksAsync(q, currentGroup))}
         taskRowsPerPageChange={(n) => dispatch(taskRowsPerPageChange(n))}
         renderRow={(rp) => <Row key={rp.task.id} {...rp} />}
       />
