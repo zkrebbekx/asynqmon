@@ -1,7 +1,7 @@
-import { useDispatch, useSelector } from "react-redux";
+import { useSelector } from "react-redux";
 import { useNavigate } from "react-router-dom";
-import { Trash2, Play } from "lucide-react";
-import { AppState } from "../store";
+import { Play } from "lucide-react";
+import { AppState, useAppDispatch } from "../store";
 import {
   listArchivedTasksAsync, deleteArchivedTaskAsync,
   batchDeleteArchivedTasksAsync, deleteAllArchivedTasksAsync,
@@ -15,6 +15,8 @@ import { TableCell, TableRow } from "./ui/table";
 import { Button } from "./ui/button";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "./ui/tooltip";
 import SyntaxHighlighter from "./SyntaxHighlighter";
+import DeleteConfirmButton from "./DeleteConfirmButton";
+import { clickableRowClass, clickableRowProps } from "../lib/utils";
 
 interface Props { queue: string; totalTaskCount: number }
 
@@ -29,10 +31,10 @@ const columns = [
 ];
 
 function Row({ task, isSelected, onSelectChange }: RowProps) {
-  const dispatch = useDispatch();
+  const dispatch = useAppDispatch();
   const navigate = useNavigate();
   return (
-    <TableRow className="cursor-pointer" onClick={() => navigate(taskDetailsPath(task.queue, task.id))}>
+    <TableRow className={clickableRowClass} {...clickableRowProps(() => navigate(taskDetailsPath(task.queue, task.id)))}>
       {!window.READ_ONLY && (
         <TableCell className="w-10 pr-0" onClick={(e) => e.stopPropagation()}>
           <input type="checkbox" checked={isSelected} onChange={(e) => onSelectChange(e.target.checked)} className="h-4 w-4 accent-[hsl(var(--primary))]" />
@@ -53,15 +55,14 @@ function Row({ task, isSelected, onSelectChange }: RowProps) {
           <TooltipProvider>
             <div className="flex items-center justify-center gap-1">
               <Tooltip><TooltipTrigger asChild>
-                <Button size="icon" variant="ghost" className="h-7 w-7" onClick={() => dispatch(runArchivedTaskAsync(task.queue, task.id) as any)}>
+                <Button size="icon" variant="ghost" className="h-7 w-7" onClick={() => dispatch(runArchivedTaskAsync(task.queue, task.id))}>
                   <Play size={13} />
                 </Button>
               </TooltipTrigger><TooltipContent>Run now</TooltipContent></Tooltip>
-              <Tooltip><TooltipTrigger asChild>
-                <Button size="icon" variant="ghost" className="h-7 w-7 text-red-500" onClick={() => dispatch(deleteArchivedTaskAsync(task.queue, task.id) as any)}>
-                  <Trash2 size={13} />
-                </Button>
-              </TooltipTrigger><TooltipContent>Delete</TooltipContent></Tooltip>
+              <DeleteConfirmButton
+                description={<>Delete task <strong>{uuidPrefix(task.id)}</strong>? This action cannot be undone.</>}
+                onDelete={() => dispatch(deleteArchivedTaskAsync(task.queue, task.id))}
+              />
             </div>
           </TooltipProvider>
         </TableCell>
@@ -71,7 +72,7 @@ function Row({ task, isSelected, onSelectChange }: RowProps) {
 }
 
 export default function ArchivedTasksTable({ queue, totalTaskCount }: Props) {
-  const dispatch = useDispatch();
+  const dispatch = useAppDispatch();
   const { loading, error, data: tasks, batchActionPending, allActionPending } = useSelector((s: AppState) => s.tasks.archivedTasks);
   const pollInterval = useSelector((s: AppState) => s.settings.pollInterval);
   const pageSize = useSelector((s: AppState) => s.settings.taskRowsPerPage);
@@ -81,11 +82,11 @@ export default function ArchivedTasksTable({ queue, totalTaskCount }: Props) {
       loading={loading} error={error} tasks={tasks}
       batchActionPending={batchActionPending} allActionPending={allActionPending}
       pollInterval={pollInterval} pageSize={pageSize} columns={columns}
-      listTasks={(q, pgn) => dispatch(listArchivedTasksAsync(q, pgn) as any)}
-      batchDeleteTasks={(q, ids) => dispatch(batchDeleteArchivedTasksAsync(q, ids) as any)}
-      deleteAllTasks={(q) => dispatch(deleteAllArchivedTasksAsync(q) as any)}
-      batchRunTasks={(q, ids) => dispatch(batchRunArchivedTasksAsync(q, ids) as any)}
-      runAllTasks={(q) => dispatch(runAllArchivedTasksAsync(q) as any)}
+      listTasks={(q, pgn) => dispatch(listArchivedTasksAsync(q, pgn))}
+      batchDeleteTasks={(q, ids) => dispatch(batchDeleteArchivedTasksAsync(q, ids))}
+      deleteAllTasks={(q) => dispatch(deleteAllArchivedTasksAsync(q))}
+      batchRunTasks={(q, ids) => dispatch(batchRunArchivedTasksAsync(q, ids))}
+      runAllTasks={(q) => dispatch(runAllArchivedTasksAsync(q))}
       taskRowsPerPageChange={(n) => dispatch(taskRowsPerPageChange(n))}
       renderRow={(rp) => <Row key={rp.task.id} {...rp} />}
     />

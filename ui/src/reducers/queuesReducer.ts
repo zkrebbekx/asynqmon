@@ -670,7 +670,7 @@ function queuesReducer(
           currentStats: {
             ...queueInfo.currentStats,
             archived:
-              queueInfo.currentStats.pending +
+              queueInfo.currentStats.archived +
               action.payload.archived_ids.length,
             retry:
               queueInfo.currentStats.retry - action.payload.archived_ids.length,

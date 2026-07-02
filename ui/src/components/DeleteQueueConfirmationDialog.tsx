@@ -1,5 +1,5 @@
-import { useDispatch } from "react-redux";
 import { Queue } from "../api";
+import { useAppDispatch } from "../store";
 import { deleteQueueAsync } from "../actions/queuesActions";
 import {
   Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle,
@@ -12,11 +12,11 @@ interface Props {
 }
 
 export default function DeleteQueueConfirmationDialog({ queue, onClose }: Props) {
-  const dispatch = useDispatch();
+  const dispatch = useAppDispatch();
 
   const handleDelete = () => {
     if (queue) {
-      dispatch(deleteQueueAsync(queue.queue) as any);
+      dispatch(deleteQueueAsync(queue.queue));
     }
     onClose();
   };

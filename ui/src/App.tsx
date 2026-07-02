@@ -1,6 +1,6 @@
 import { useEffect, lazy, Suspense } from "react";
 import { useSelector, useDispatch } from "react-redux";
-import { BrowserRouter, Routes, Route, NavLink, useLocation } from "react-router-dom";
+import { BrowserRouter, Routes, Route, NavLink } from "react-router-dom";
 import { Toaster, toast } from "sonner";
 import {
   BarChart2,
@@ -18,7 +18,7 @@ import { AppState } from "./store";
 import { paths } from "./paths";
 import { toggleDrawer } from "./actions/settingsActions";
 import { closeSnackbar } from "./actions/snackbarActions";
-import { ThemePreference } from "./reducers/settingsReducer";
+import { useIsDark } from "./hooks";
 import { cn } from "./lib/utils";
 import HeaderBar from "./components/HeaderBar";
 
@@ -38,13 +38,6 @@ const PageNotFoundView = lazy(() => import("./views/PageNotFoundView"));
 // Import logo SVGs as URLs
 import logoColor from "./images/logo-color.svg";
 import logoWhite from "./images/logo-white.svg";
-
-function useIsDark(themePreference: ThemePreference): boolean {
-  const prefersDark = window.matchMedia("(prefers-color-scheme: dark)").matches;
-  if (themePreference === ThemePreference.Always) return true;
-  if (themePreference === ThemePreference.Never) return false;
-  return prefersDark;
-}
 
 interface NavItemProps {
   to: string;
@@ -76,9 +69,9 @@ function NavItem({ to, icon, label, collapsed }: NavItemProps) {
 
 function AppContent() {
   const dispatch = useDispatch();
-  const { themePreference, isDrawerOpen } = useSelector((s: AppState) => s.settings);
+  const { isDrawerOpen } = useSelector((s: AppState) => s.settings);
   const snackbar = useSelector((s: AppState) => s.snackbar);
-  const isDark = useIsDark(themePreference);
+  const isDark = useIsDark();
   const appPaths = paths();
 
   // Apply dark class to root

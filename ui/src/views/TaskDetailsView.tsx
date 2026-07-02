@@ -1,11 +1,11 @@
 import { useMemo, useEffect, useState } from "react";
 import { useParams, useNavigate } from "react-router-dom";
-import { useDispatch, useSelector } from "react-redux";
+import { useSelector } from "react-redux";
 import {
   ArrowLeft, AlertCircle, Copy, Check, Play, Archive, Trash2, X,
   Clock, AlertTriangle, CheckCircle2, Loader2,
 } from "lucide-react";
-import { AppState } from "../store";
+import { AppState, useAppDispatch } from "../store";
 import {
   getTaskInfoAsync,
   runScheduledTaskAsync, runRetryTaskAsync, runArchivedTaskAsync,
@@ -16,7 +16,8 @@ import {
 } from "../actions/tasksActions";
 import { listQueuesAsync } from "../actions/queuesActions";
 import { usePolling } from "../hooks";
-import { durationFromSeconds, stringifyDuration, timeAgo, prettifyPayload } from "../utils";
+import { durationFromSeconds, stringifyDuration, timeAgo, formatTimestamp, prettifyPayload } from "../utils";
+import ConfirmDialog from "../components/ConfirmDialog";
 import QueueBreadcrumb from "../components/QueueBreadcrumb";
 import SyntaxHighlighter from "../components/SyntaxHighlighter";
 import { Button } from "../components/ui/button";
@@ -100,22 +101,34 @@ function Timeline({ events }: { events: TimelineEvent[] }) {
 }
 
 export default function TaskDetailsView() {
-  const dispatch = useDispatch();
+  const dispatch = useAppDispatch();
   const navigate = useNavigate();
   const { qname, taskId } = useParams<{ qname: string; taskId: string }>();
-  const { error, data: taskInfo } = useSelector((s: AppState) => s.tasks.taskInfo);
-  const queues = useSelector((s: AppState) => s.queues.data.map((q) => q.name));
+  const { error, data: fetchedTaskInfo } = useSelector((s: AppState) => s.tasks.taskInfo);
+  const queuesData = useSelector((s: AppState) => s.queues.data);
+  const queues = useMemo(() => queuesData.map((q) => q.name), [queuesData]);
   const pollInterval = useSelector((s: AppState) => s.settings.pollInterval);
   const [copied, setCopied] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState(false);
 
   const fetchTaskInfo = useMemo(() => {
-    return () => { dispatch(getTaskInfoAsync(qname!, taskId!) as any); };
+    return () => { dispatch(getTaskInfoAsync(qname!, taskId!)); };
   }, [dispatch, qname, taskId]);
 
-  usePolling(fetchTaskInfo, pollInterval);
+  usePolling(fetchTaskInfo, pollInterval, [qname, taskId]);
+
+  // The store may still hold the previously viewed task while this one loads.
+  // Render (and act on) it only if it matches the route, so a fast click on
+  // Delete/Run can never hit the wrong task.
+  const taskInfo =
+    fetchedTaskInfo &&
+    fetchedTaskInfo.id === taskId &&
+    fetchedTaskInfo.queue === qname
+      ? fetchedTaskInfo
+      : undefined;
 
   useEffect(() => {
-    dispatch(listQueuesAsync() as any);
+    dispatch(listQueuesAsync());
   }, [dispatch]);
 
   const copyId = () => {
@@ -131,12 +144,12 @@ export default function TaskDetailsView() {
   const canDelete = !window.READ_ONLY && !!deleteActions[state];
   const canCancel = !window.READ_ONLY && state === "active";
 
-  const doRun = () => taskInfo && dispatch(runActions[state](taskInfo.queue, taskInfo.id) as any);
-  const doArchive = () => taskInfo && dispatch(archiveActions[state](taskInfo.queue, taskInfo.id) as any);
-  const doCancel = () => taskInfo && dispatch(cancelActiveTaskAsync(taskInfo.queue, taskInfo.id) as any);
+  const doRun = () => taskInfo && dispatch(runActions[state](taskInfo.queue, taskInfo.id));
+  const doArchive = () => taskInfo && dispatch(archiveActions[state](taskInfo.queue, taskInfo.id));
+  const doCancel = () => taskInfo && dispatch(cancelActiveTaskAsync(taskInfo.queue, taskInfo.id));
   const doDelete = async () => {
     if (!taskInfo) return;
-    await dispatch(deleteActions[state](taskInfo.queue, taskInfo.id) as any);
+    await dispatch(deleteActions[state](taskInfo.queue, taskInfo.id));
     navigate(-1);
   };
 
@@ -147,7 +160,7 @@ export default function TaskDetailsView() {
       events.push({
         icon: <AlertTriangle size={11} />,
         title: `Last failed (attempt ${taskInfo.retried}/${taskInfo.max_retry})`,
-        time: `${timeAgo(taskInfo.last_failed_at)} · ${taskInfo.last_failed_at}`,
+        time: `${timeAgo(taskInfo.last_failed_at)} · ${formatTimestamp(taskInfo.last_failed_at)}`,
         tone: "error",
         detail: taskInfo.error_message ? (
           <span className="text-red-500">{taskInfo.error_message}</span>
@@ -158,21 +171,21 @@ export default function TaskDetailsView() {
       events.push({
         icon: <Loader2 size={11} />,
         title: "Processing started",
-        time: `${timeAgo(taskInfo.start_time)} · ${taskInfo.start_time}`,
+        time: `${timeAgo(taskInfo.start_time)} · ${formatTimestamp(taskInfo.start_time)}`,
       });
     }
     if ((taskInfo.state === "scheduled" || taskInfo.state === "retry") && taskInfo.next_process_at) {
       events.push({
         icon: <Clock size={11} />,
         title: "Scheduled to run",
-        time: taskInfo.next_process_at,
+        time: formatTimestamp(taskInfo.next_process_at),
       });
     }
     if (taskInfo.state === "completed" && taskInfo.completed_at) {
       events.push({
         icon: <CheckCircle2 size={11} />,
         title: "Completed",
-        time: `${timeAgo(taskInfo.completed_at)} · ${taskInfo.completed_at}`,
+        time: `${timeAgo(taskInfo.completed_at)} · ${formatTimestamp(taskInfo.completed_at)}`,
         tone: "success",
       });
     }
@@ -236,13 +249,27 @@ export default function TaskDetailsView() {
                     {canDelete && (
                       <Tooltip>
                         <TooltipTrigger asChild>
-                          <Button size="icon" variant="outline" className="h-8 w-8 text-red-500 hover:text-red-600" onClick={doDelete}>
+                          <Button size="icon" variant="outline" className="h-8 w-8 text-red-500 hover:text-red-600" onClick={() => setConfirmDelete(true)}>
                             <Trash2 size={14} />
                           </Button>
                         </TooltipTrigger>
                         <TooltipContent>Delete</TooltipContent>
                       </Tooltip>
                     )}
+                    <ConfirmDialog
+                      open={confirmDelete}
+                      title="Delete Task"
+                      description={
+                        <>
+                          Delete task <strong>{taskInfo.id}</strong>? This action cannot be undone.
+                        </>
+                      }
+                      onConfirm={() => {
+                        setConfirmDelete(false);
+                        doDelete();
+                      }}
+                      onClose={() => setConfirmDelete(false)}
+                    />
                   </div>
                 </TooltipProvider>
               )}
@@ -252,10 +279,10 @@ export default function TaskDetailsView() {
             <div className="mt-4 grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-2">
               <MetaCard label="Retried" value={`${taskInfo.retried} / ${taskInfo.max_retry}`} />
               {taskInfo.timeout_seconds > 0 && <MetaCard label="Timeout" value={`${taskInfo.timeout_seconds}s`} />}
-              {taskInfo.deadline && <MetaCard label="Deadline" value={<span className="text-xs">{taskInfo.deadline}</span>} />}
+              {taskInfo.deadline && <MetaCard label="Deadline" value={<span className="text-xs">{formatTimestamp(taskInfo.deadline)}</span>} />}
               {taskInfo.group && <MetaCard label="Group" value={taskInfo.group} />}
               {taskInfo.next_process_at && (taskInfo.state === "scheduled" || taskInfo.state === "retry") && (
-                <MetaCard label="Next Process" value={<span className="text-xs">{taskInfo.next_process_at}</span>} />
+                <MetaCard label="Next Process" value={<span className="text-xs">{formatTimestamp(taskInfo.next_process_at)}</span>} />
               )}
               {taskInfo.state === "completed" && (
                 <MetaCard
@@ -304,7 +331,13 @@ export default function TaskDetailsView() {
             </div>
           )}
         </>
-      ) : null}
+      ) : (
+        // Loading skeleton while the routed task is fetched.
+        <div className="space-y-4" aria-busy="true">
+          <div className="h-44 animate-pulse rounded-lg border border-[hsl(var(--border))] bg-[hsl(var(--muted))]/40" />
+          <div className="h-28 animate-pulse rounded-lg border border-[hsl(var(--border))] bg-[hsl(var(--muted))]/40" />
+        </div>
+      )}
 
       <div className="pt-2">
         <Button variant="ghost" onClick={() => navigate(-1)}>

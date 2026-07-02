@@ -1,5 +1,4 @@
-import { useState, useCallback, type ReactElement } from "react";
-import { useNavigate } from "react-router-dom";
+import { useState, useCallback, useEffect, type ReactElement } from "react";
 import { Trash2, Play, Archive, X, ChevronLeft, ChevronRight, Filter } from "lucide-react";
 import { usePolling } from "../hooks";
 import { prettifyPayload } from "../utils";
@@ -14,7 +13,7 @@ import { Button } from "./ui/button";
 import { Alert, AlertDescription, AlertTitle } from "./ui/alert";
 import { AlertCircle } from "lucide-react";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "./ui/select";
-import { cn } from "../lib/utils";
+import ConfirmDialog from "./ConfirmDialog";
 
 export const rowsPerPageOptions = [10, 20, 50, 100];
 export const defaultPageSize = 20;
@@ -59,12 +58,23 @@ export default function TasksTable(props: Props) {
   const [page, setPage] = useState(0);
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [filter, setFilter] = useState("");
+  const [confirmDeleteAll, setConfirmDeleteAll] = useState(false);
 
   const fetchTasks = useCallback(() => {
     listTasks(queue, { size: pageSize, page: page + 1 });
   }, [listTasks, queue, pageSize, page]);
 
-  usePolling(fetchTasks, pollInterval);
+  usePolling(fetchTasks, pollInterval, [queue, pageSize, page]);
+
+  // Clamp the page when the task count shrinks (deletions, queue drains) so
+  // the user is never stranded on an empty out-of-range page.
+  useEffect(() => {
+    const lastPage = Math.max(0, Math.ceil(props.totalTaskCount / pageSize) - 1);
+    if (page > lastPage) {
+      setPage(lastPage);
+      setSelectedIds([]);
+    }
+  }, [props.totalTaskCount, pageSize, page]);
 
   // Filter the current page by task type or (decoded) payload contents.
   const needle = filter.trim();
@@ -85,8 +95,17 @@ export default function TasksTable(props: Props) {
   };
 
   const totalPages = Math.ceil(props.totalTaskCount / pageSize);
-  const allSelected = visibleTasks.length > 0 && selectedIds.length === visibleTasks.length;
+  const allSelected =
+    visibleTasks.length > 0 &&
+    visibleTasks.every((t) => selectedIds.includes(t.id));
   const someSelected = selectedIds.length > 0 && !allSelected;
+
+  // Selections are page-local: carrying them across pages lets bulk actions
+  // hit off-screen tasks the user can no longer see.
+  const goToPage = (p: number) => {
+    setPage(p);
+    setSelectedIds([]);
+  };
 
   if (props.error) {
     return (
@@ -169,15 +188,34 @@ export default function TasksTable(props: Props) {
       {props.totalTaskCount > 0 && selectedIds.length === 0 && !window.READ_ONLY && (
         <div className="flex items-center gap-2 px-4 py-2 border-b border-[hsl(var(--border))]">
           {props.deleteAllTasks && (
-            <Button
-              size="sm"
-              variant="ghost"
-              className="h-7 text-red-500 hover:text-red-600 text-xs"
-              disabled={props.allActionPending}
-              onClick={() => props.deleteAllTasks!(queue)}
-            >
-              Delete all ({props.totalTaskCount})
-            </Button>
+            <>
+              <Button
+                size="sm"
+                variant="ghost"
+                className="h-7 text-red-500 hover:text-red-600 text-xs"
+                disabled={props.allActionPending}
+                onClick={() => setConfirmDeleteAll(true)}
+              >
+                Delete all ({props.totalTaskCount})
+              </Button>
+              <ConfirmDialog
+                open={confirmDeleteAll}
+                title="Delete All Tasks"
+                description={
+                  <>
+                    Are you sure you want to delete all{" "}
+                    <strong>{props.totalTaskCount}</strong> {props.taskState} tasks in
+                    queue <strong>{queue}</strong>? This action cannot be undone.
+                  </>
+                }
+                confirmLabel="Delete all"
+                onConfirm={() => {
+                  setConfirmDeleteAll(false);
+                  props.deleteAllTasks!(queue);
+                }}
+                onClose={() => setConfirmDeleteAll(false)}
+              />
+            </>
           )}
           {props.runAllTasks && (
             <Button
@@ -262,7 +300,20 @@ export default function TasksTable(props: Props) {
           </TableRow>
         </TableHeader>
         <TableBody>
-          {visibleTasks.length === 0 ? (
+          {props.loading && visibleTasks.length === 0 ? (
+            // Skeleton rows on first load so the empty state doesn't flash
+            // before data arrives.
+            Array.from({ length: 5 }, (_, i) => (
+              <TableRow key={`skeleton-${i}`}>
+                {!window.READ_ONLY && <TableCell className="w-10 pr-0" />}
+                {props.columns.map((col) => (
+                  <TableCell key={col.key}>
+                    <div className="h-4 animate-pulse rounded bg-[hsl(var(--muted))]" />
+                  </TableCell>
+                ))}
+              </TableRow>
+            ))
+          ) : visibleTasks.length === 0 ? (
             <TableRow>
               <TableCell
                 colSpan={props.columns.length + (window.READ_ONLY ? 0 : 1)}
@@ -294,7 +345,7 @@ export default function TasksTable(props: Props) {
               value={String(pageSize)}
               onValueChange={(v) => {
                 props.taskRowsPerPageChange(Number(v));
-                setPage(0);
+                goToPage(0);
               }}
             >
               <SelectTrigger className="h-7 w-16 text-xs">
@@ -316,7 +367,7 @@ export default function TasksTable(props: Props) {
               variant="ghost"
               className="h-7 w-7"
               disabled={page === 0}
-              onClick={() => setPage(page - 1)}
+              onClick={() => goToPage(page - 1)}
             >
               <ChevronLeft size={14} />
             </Button>
@@ -325,7 +376,7 @@ export default function TasksTable(props: Props) {
               variant="ghost"
               className="h-7 w-7"
               disabled={page >= totalPages - 1}
-              onClick={() => setPage(page + 1)}
+              onClick={() => goToPage(page + 1)}
             >
               <ChevronRight size={14} />
             </Button>

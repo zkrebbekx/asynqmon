@@ -1,5 +1,5 @@
-import { useDispatch, useSelector } from "react-redux";
-import { AppState } from "../store";
+import { useSelector } from "react-redux";
+import { AppState, useAppDispatch } from "../store";
 import { getRedisInfoAsync } from "../actions/redisInfoActions";
 import { usePolling } from "../hooks";
 import { timeAgoUnix } from "../utils";
@@ -58,13 +58,13 @@ function RedisMetricCards({ redisInfo }: { redisInfo: RedisInfo }) {
 }
 
 export default function RedisInfoView() {
-  const dispatch = useDispatch();
+  const dispatch = useAppDispatch();
   const { loading, error, data: redisInfo, address: redisAddress, rawData: redisInfoRaw,
     cluster: redisClusterEnabled, rawClusterNodes: redisClusterNodesRaw, queueLocations } =
     useSelector((s: AppState) => s.redis);
   const pollInterval = useSelector((s: AppState) => s.settings.pollInterval);
 
-  usePolling(() => dispatch(getRedisInfoAsync() as any), pollInterval);
+  usePolling(() => dispatch(getRedisInfoAsync()), pollInterval);
 
   return (
     <div className="max-w-5xl mx-auto px-4 py-8 space-y-6">

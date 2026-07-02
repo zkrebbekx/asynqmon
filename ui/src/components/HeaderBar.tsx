@@ -4,21 +4,17 @@ import { Sun, Moon, Pause, Play, RefreshCw } from "lucide-react";
 import { AppState } from "../store";
 import { ThemePreference } from "../reducers/settingsReducer";
 import { selectTheme, togglePolling } from "../actions/settingsActions";
+import { useIsDark } from "../hooks";
 import { timeAgoUnix } from "../utils";
 import { cn } from "../lib/utils";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "./ui/tooltip";
 
-function isDark(pref: ThemePreference): boolean {
-  if (pref === ThemePreference.Always) return true;
-  if (pref === ThemePreference.Never) return false;
-  return window.matchMedia("(prefers-color-scheme: dark)").matches;
-}
-
 export default function HeaderBar() {
   const dispatch = useDispatch();
-  const { themePreference, pollingActive, lastUpdatedAt, pollInterval } = useSelector(
+  const { pollingActive, lastUpdatedAt, pollInterval } = useSelector(
     (s: AppState) => s.settings
   );
+  const dark = useIsDark();
 
   // Re-render once a second so the "updated Ns ago" label stays fresh.
   const [, setNow] = useState(Date.now());
@@ -27,7 +23,6 @@ export default function HeaderBar() {
     return () => clearInterval(id);
   }, []);
 
-  const dark = isDark(themePreference);
   const updatedLabel =
     lastUpdatedAt > 0 ? `Updated ${timeAgoUnix(lastUpdatedAt / 1000)}` : "Waiting for data…";
 

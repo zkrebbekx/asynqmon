@@ -53,6 +53,7 @@ function MetricChart({ title, metrics, queues, formatter }: {
             <Tooltip
               labelFormatter={(ts) => dayjs.unix(ts as number).format("HH:mm:ss")}
               contentStyle={{ backgroundColor: "hsl(var(--popover))", border: "1px solid hsl(var(--border))", borderRadius: "6px", fontSize: "12px" }}
+              labelStyle={{ color: "hsl(var(--popover-foreground))" }}
             />
             <Legend />
             {queues.map((q, i) => (

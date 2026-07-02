@@ -3,9 +3,6 @@ declare global {
     ROOT_PATH: string;
     PROMETHEUS_SERVER_ADDRESS: string;
     READ_ONLY: boolean;
-    FLAG_ROOT_PATH?: string;
-    FLAG_PROMETHEUS_SERVER_ADDRESS?: string;
-    FLAG_READ_ONLY?: string;
   }
 }
 

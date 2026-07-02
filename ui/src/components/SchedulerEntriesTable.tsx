@@ -7,6 +7,7 @@ import { Badge } from "./ui/badge";
 import { timeAgo, durationBefore, uuidPrefix } from "../utils";
 import { taskDetailsPath } from "../paths";
 import SyntaxHighlighter from "./SyntaxHighlighter";
+import { clickableRowClass, clickableRowProps } from "../lib/utils";
 
 interface Props {
   entries: SchedulerEntry[];
@@ -116,7 +117,7 @@ export default function SchedulerEntriesTable({ entries }: Props) {
           const queue = queueFromOptions(entry.options);
           return (
             <React.Fragment key={entry.id}>
-              <TableRow className="cursor-pointer" onClick={() => toggle(entry.id)}>
+              <TableRow className={clickableRowClass} aria-expanded={isOpen} {...clickableRowProps(() => toggle(entry.id))}>
                 <TableCell className="w-8 pr-0 text-[hsl(var(--muted-foreground))]">
                   {isOpen ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
                 </TableCell>

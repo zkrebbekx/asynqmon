@@ -295,11 +295,15 @@ function tasksReducer(
 ): TasksState {
   switch (action.type) {
     case GET_TASK_INFO_BEGIN:
+      // Clear any stale error from a previously viewed task so it can't flash
+      // while the newly routed task loads (data is guarded by route match in
+      // the view, but the error string carries no task identity).
       return {
         ...state,
         taskInfo: {
           ...state.taskInfo,
           loading: true,
+          error: "",
         },
       };
 
@@ -1204,7 +1208,7 @@ function tasksReducer(
         aggregatingTasks: {
           ...state.aggregatingTasks,
           batchActionPending: false,
-          data: state.scheduledTasks.data.map((task) => {
+          data: state.aggregatingTasks.data.map((task) => {
             if (!action.taskIds.includes(task.id)) {
               return task;
             }

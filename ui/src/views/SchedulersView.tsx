@@ -1,5 +1,5 @@
-import { useSelector, useDispatch } from "react-redux";
-import { AppState } from "../store";
+import { useSelector } from "react-redux";
+import { AppState, useAppDispatch } from "../store";
 import { listSchedulerEntriesAsync } from "../actions/schedulerEntriesActions";
 import { usePolling } from "../hooks";
 import { Alert, AlertDescription, AlertTitle } from "../components/ui/alert";
@@ -7,11 +7,11 @@ import { AlertCircle } from "lucide-react";
 import SchedulerEntriesTable from "../components/SchedulerEntriesTable";
 
 export default function SchedulersView() {
-  const dispatch = useDispatch();
+  const dispatch = useAppDispatch();
   const { error, data: entries } = useSelector((s: AppState) => s.schedulerEntries);
   const pollInterval = useSelector((s: AppState) => s.settings.pollInterval);
 
-  usePolling(() => dispatch(listSchedulerEntriesAsync() as any), pollInterval);
+  usePolling(() => dispatch(listSchedulerEntriesAsync()), pollInterval);
 
   return (
     <div className="max-w-7xl mx-auto px-4 py-8">

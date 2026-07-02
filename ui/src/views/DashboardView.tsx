@@ -1,7 +1,7 @@
 import { useEffect, lazy, Suspense } from "react";
-import { useSelector, useDispatch } from "react-redux";
+import { useSelector } from "react-redux";
 import { Info, AlertCircle } from "lucide-react";
-import { AppState } from "../store";
+import { AppState, useAppDispatch } from "../store";
 import { listQueuesAsync, pauseQueueAsync, resumeQueueAsync, deleteQueueAsync } from "../actions/queuesActions";
 import { listQueueStatsAsync } from "../actions/queueStatsActions";
 import { dailyStatsKeyChange } from "../actions/settingsActions";
@@ -26,7 +26,7 @@ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "../com
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../components/ui/select";
 
 export default function DashboardView() {
-  const dispatch = useDispatch();
+  const dispatch = useAppDispatch();
   const { loading, data: queueData, error } = useSelector((s: AppState) => s.queues);
   const queueStats = useSelector((s: AppState) => s.queueStats.data);
   const pollInterval = useSelector((s: AppState) => s.settings.pollInterval);
@@ -37,16 +37,16 @@ export default function DashboardView() {
     requestPending: q.requestPending,
   }));
 
-  usePolling(() => dispatch(listQueuesAsync() as any), pollInterval);
+  usePolling(() => dispatch(listQueuesAsync()), pollInterval);
 
   const qnames = queues.map((q) => q.queue).sort().join(",");
   useEffect(() => {
-    dispatch(listQueueStatsAsync() as any);
+    dispatch(listQueueStatsAsync());
   }, [dispatch, qnames]);
 
   const processedStats = queues.map((q) => ({
     queue: q.queue,
-    succeeded: q.processed - q.failed,
+    succeeded: q.succeeded,
     failed: q.failed,
   }));
 
@@ -134,9 +134,9 @@ export default function DashboardView() {
       <Card>
         <QueuesOverviewTable
           queues={queues}
-          onPauseClick={(qname) => dispatch(pauseQueueAsync(qname) as any)}
-          onResumeClick={(qname) => dispatch(resumeQueueAsync(qname) as any)}
-          onDeleteClick={(qname) => dispatch(deleteQueueAsync(qname) as any)}
+          onPauseClick={(qname) => dispatch(pauseQueueAsync(qname))}
+          onResumeClick={(qname) => dispatch(resumeQueueAsync(qname))}
+          onDeleteClick={(qname) => dispatch(deleteQueueAsync(qname))}
         />
       </Card>
     </div>
