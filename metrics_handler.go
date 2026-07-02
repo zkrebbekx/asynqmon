@@ -1,11 +1,13 @@
 package asynqmon
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -63,7 +65,7 @@ func newGetMetricsHandlerFunc(client *http.Client, prometheusAddr string) http.H
 	return func(w http.ResponseWriter, r *http.Request) {
 		opts, err := extractMetricsFetchOptions(r)
 		if err != nil {
-			http.Error(w, fmt.Sprintf("invalid query parameter: %v", err), http.StatusBadRequest)
+			writeErrorMsg(w, http.StatusBadRequest, fmt.Sprintf("invalid query parameter: %v", err))
 			return
 		}
 		// List of queries (i.e. promQL) to send to prometheus server.
@@ -85,14 +87,14 @@ func newGetMetricsHandlerFunc(client *http.Client, prometheusAddr string) http.H
 		for _, q := range queries {
 			go func(q string) {
 				url := buildPrometheusURL(prometheusAddr, q, opts)
-				msg, err := fetchPrometheusMetrics(client, url)
+				msg, err := fetchPrometheusMetrics(r.Context(), client, url)
 				ch <- res{q, msg, err}
 			}(q)
 		}
 		for r := range ch {
 			n--
 			if r.err != nil {
-				http.Error(w, fmt.Sprintf("failed to fetch %q: %v", r.query, r.err), http.StatusInternalServerError)
+				writeErrorMsg(w, http.StatusBadGateway, fmt.Sprintf("failed to fetch %q: %v", r.query, r.err))
 				return
 			}
 			switch r.query {
@@ -121,12 +123,12 @@ func newGetMetricsHandlerFunc(client *http.Client, prometheusAddr string) http.H
 		}
 		bytes, err := json.Marshal(resp)
 		if err != nil {
-			http.Error(w, fmt.Sprintf("failed to marshal response into JSON: %v", err), http.StatusInternalServerError)
+			writeErrorMsg(w, http.StatusInternalServerError, fmt.Sprintf("failed to marshal response into JSON: %v", err))
 			return
 		}
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
 		if _, err := w.Write(bytes); err != nil {
-			http.Error(w, fmt.Sprintf("failed to write to response: %v", err), http.StatusInternalServerError)
-			return
+			return // response already partially written; nothing sensible to send
 		}
 	}
 }
@@ -173,6 +175,10 @@ func buildPrometheusURL(baseAddr, promQL string, opts *metricsFetchOptions) stri
 	return b.String()
 }
 
+// promQLStringEscaper escapes characters that would terminate or alter a
+// PromQL double-quoted string literal.
+var promQLStringEscaper = strings.NewReplacer(`\`, `\\`, `"`, `\"`)
+
 func applyQueueFilter(promQL string, qnames []string) string {
 	if len(qnames) == 0 {
 		return strings.ReplaceAll(promQL, "QUEUE_FILTER", "")
@@ -183,14 +189,21 @@ func applyQueueFilter(promQL string, qnames []string) string {
 		if i != 0 {
 			b.WriteString("|")
 		}
-		b.WriteString(q)
+		// Queue names come from a user-controlled query param; quote them both
+		// as regex alternatives and as PromQL string content so a crafted name
+		// cannot inject arbitrary PromQL.
+		b.WriteString(promQLStringEscaper.Replace(regexp.QuoteMeta(q)))
 	}
 	b.WriteByte('"')
 	return strings.ReplaceAll(promQL, "QUEUE_FILTER", b.String())
 }
 
-func fetchPrometheusMetrics(client *http.Client, url string) (*json.RawMessage, error) {
-	resp, err := client.Get(url)
+func fetchPrometheusMetrics(ctx context.Context, client *http.Client, url string) (*json.RawMessage, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -199,8 +212,18 @@ func fetchPrometheusMetrics(client *http.Client, url string) (*json.RawMessage, 
 	if err != nil {
 		return nil, err
 	}
+	if resp.StatusCode != http.StatusOK {
+		snippet := bytes
+		if len(snippet) > 200 {
+			snippet = snippet[:200]
+		}
+		return nil, fmt.Errorf("prometheus returned status %d: %s", resp.StatusCode, snippet)
+	}
+	if !json.Valid(bytes) {
+		return nil, fmt.Errorf("prometheus returned a non-JSON response")
+	}
 	msg := json.RawMessage(bytes)
-	return &msg, err
+	return &msg, nil
 }
 
 // Returns step to use given the fetch options.

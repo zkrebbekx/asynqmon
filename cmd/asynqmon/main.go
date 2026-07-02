@@ -39,6 +39,10 @@ type Config struct {
 	MaxPayloadLength int
 	MaxResultLength  int
 
+	// Comma-separated list of origins allowed to make cross-origin requests.
+	// Empty (the default) means same-origin only.
+	CorsAllowedOrigins string
+
 	// Prometheus related configs
 	EnableMetricsExporter bool
 	PrometheusServerAddr  string
@@ -72,6 +76,7 @@ func parseFlags(progname string, args []string) (cfg *Config, output string, err
 	flags.BoolVar(&conf.EnableMetricsExporter, "enable-metrics-exporter", getEnvOrDefaultBool("ENABLE_METRICS_EXPORTER", false), "enable prometheus metrics exporter to expose queue metrics")
 	flags.StringVar(&conf.PrometheusServerAddr, "prometheus-addr", getEnvDefaultString("PROMETHEUS_ADDR", ""), "address of prometheus server to query time series")
 	flags.BoolVar(&conf.ReadOnly, "read-only", getEnvOrDefaultBool("READ_ONLY", false), "restrict to read-only mode")
+	flags.StringVar(&conf.CorsAllowedOrigins, "cors-allowed-origins", getEnvDefaultString("CORS_ALLOWED_ORIGINS", ""), "comma separated list of origins allowed to make cross-origin requests (default: same-origin only)")
 
 	err = flags.Parse(args)
 	if err != nil {
@@ -156,11 +161,26 @@ func main() {
 	})
 	defer h.Close()
 
-	c := cors.New(cors.Options{
-		AllowedMethods: []string{"GET", "POST", "DELETE"},
-	})
+	var allowedOrigins []string
+	if cfg.CorsAllowedOrigins != "" {
+		allowedOrigins = strings.Split(cfg.CorsAllowedOrigins, ",")
+	}
+
+	// Reject cross-origin mutations (CSRF protection). The previous behavior —
+	// a CORS wrapper allowing every origin with POST/DELETE — let any web page
+	// the operator visited fire mutating requests at a localhost/intranet
+	// dashboard. The SPA is served same-origin, so CORS is only enabled when
+	// origins are explicitly allowed via -cors-allowed-origins.
+	var handler http.Handler = csrfProtection(allowedOrigins)(h)
+	if len(allowedOrigins) > 0 {
+		c := cors.New(cors.Options{
+			AllowedOrigins: allowedOrigins,
+			AllowedMethods: []string{"GET", "POST", "DELETE"},
+		})
+		handler = c.Handler(handler)
+	}
 	mux := http.NewServeMux()
-	mux.Handle("/", c.Handler(h))
+	mux.Handle("/", handler)
 	if cfg.EnableMetricsExporter {
 		// Using NewPedanticRegistry here to test the implementation of Collectors and Metrics.
 		reg := prometheus.NewPedanticRegistry()
@@ -177,7 +197,7 @@ func main() {
 	}
 
 	srv := &http.Server{
-		Handler:      mux,
+		Handler:      loggingMiddleware(mux),
 		Addr:         fmt.Sprintf(":%d", cfg.Port),
 		WriteTimeout: 10 * time.Second,
 		ReadTimeout:  10 * time.Second,

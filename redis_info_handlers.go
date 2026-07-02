@@ -1,8 +1,6 @@
 package asynqmon
 
 import (
-	"context"
-	"encoding/json"
 	"net/http"
 	"strings"
 
@@ -34,9 +32,9 @@ type queueLocationInfo struct {
 
 func newRedisInfoHandlerFunc(client *redis.Client) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		res, err := client.Info(context.Background()).Result()
+		res, err := client.Info(r.Context()).Result()
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			writeError(w, errorStatus(err), err)
 			return
 		}
 		info := parseRedisInfo(res)
@@ -46,43 +44,40 @@ func newRedisInfoHandlerFunc(client *redis.Client) http.HandlerFunc {
 			RawInfo: res,
 			Cluster: false,
 		}
-		if err := json.NewEncoder(w).Encode(resp); err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
+		writeResponseJSON(w, resp)
 	}
 }
 
 func newRedisClusterInfoHandlerFunc(client *redis.ClusterClient, inspector *asynq.Inspector) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		ctx := context.Background()
+		ctx := r.Context()
 		rawClusterInfo, err := client.ClusterInfo(ctx).Result()
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			writeError(w, errorStatus(err), err)
 			return
 		}
 		info := parseRedisInfo(rawClusterInfo)
 		rawClusterNodes, err := client.ClusterNodes(ctx).Result()
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			writeError(w, errorStatus(err), err)
 			return
 		}
 		queues, err := inspector.Queues()
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			writeError(w, errorStatus(err), err)
 			return
 		}
-		var queueLocations []*queueLocationInfo
+		queueLocations := make([]*queueLocationInfo, 0, len(queues))
 		for _, qname := range queues {
 			q := queueLocationInfo{Queue: qname}
 			q.KeySlot, err = inspector.ClusterKeySlot(qname)
 			if err != nil {
-				http.Error(w, err.Error(), http.StatusInternalServerError)
+				writeError(w, errorStatus(err), err)
 				return
 			}
 			nodes, err := inspector.ClusterNodes(qname)
 			if err != nil {
-				http.Error(w, err.Error(), http.StatusInternalServerError)
+				writeError(w, errorStatus(err), err)
 				return
 			}
 			for _, n := range nodes {
@@ -99,10 +94,7 @@ func newRedisClusterInfoHandlerFunc(client *redis.ClusterClient, inspector *asyn
 			RawClusterNodes: rawClusterNodes,
 			QueueLocations:  queueLocations,
 		}
-		if err := json.NewEncoder(w).Encode(resp); err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
+		writeResponseJSON(w, resp)
 	}
 }
 
@@ -112,11 +104,12 @@ func parseRedisInfo(infoStr string) map[string]string {
 	info := make(map[string]string)
 	lines := strings.Split(infoStr, "\r\n")
 	for _, l := range lines {
-		kv := strings.Split(l, ":")
-		if len(kv) == 2 {
+		// Split on the first colon only: values like
+		// "master0:name=...,address=host:port" contain colons themselves.
+		kv := strings.SplitN(l, ":", 2)
+		if len(kv) == 2 && kv[0] != "" && !strings.HasPrefix(kv[0], "#") {
 			info[kv[0]] = kv[1]
 		}
 	}
 	return info
-
 }

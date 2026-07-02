@@ -2,6 +2,8 @@ package asynqmon
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 	"sort"
 	"strconv"
@@ -20,10 +22,35 @@ import (
 // ****************************************************************************
 
 const (
-	defaultMaxScan   = 10000 // cap on tasks scanned per queue per request
-	searchBatchSize  = 1000  // page size used while scanning the inspector
-	defaultSearchTop = 20    // default result page size
+	defaultMaxScan   = 10000  // cap on tasks scanned per queue per request
+	maxScanCeiling   = 100000 // hard upper bound on the per-queue scan cap
+	searchBatchSize  = 1000   // page size used while scanning the inspector
+	defaultSearchTop = 20     // default result page size
 )
+
+// clampMaxScan bounds the user-provided max_scan so a single request cannot
+// force an unbounded scan of every task in every queue.
+func clampMaxScan(n int) int {
+	if n < 1 {
+		return defaultMaxScan
+	}
+	if n > maxScanCeiling {
+		return maxScanCeiling
+	}
+	return n
+}
+
+// searchableStates are the task states accepted by the search/facet/aggregate/
+// bulk-filtered endpoints.
+var searchableStates = map[string]bool{
+	"active":      true,
+	"pending":     true,
+	"scheduled":   true,
+	"retry":       true,
+	"archived":    true,
+	"completed":   true,
+	"aggregating": true,
+}
 
 // searchTask is a unified, state-agnostic task shape returned by the search
 // endpoint. JSON tags match the frontend TaskInfo interface.
@@ -39,6 +66,12 @@ type searchTask struct {
 	NextProcessAt string `json:"next_process_at"`
 	LastFailedAt  string `json:"last_failed_at"`
 	CompletedAt   string `json:"completed_at"`
+
+	// rawPayload is the full, untruncated payload used for matching and facets.
+	// The Payload field above goes through the (possibly truncating) formatter
+	// and is for display only — filtering on it would silently miss tasks whose
+	// payload exceeds the truncation limit.
+	rawPayload string
 }
 
 type searchTasksResponse struct {
@@ -76,11 +109,12 @@ func toSearchTask(ti *asynq.TaskInfo, pf PayloadFormatter) *searchTask {
 		NextProcessAt: fmtTime(ti.NextProcessAt),
 		LastFailedAt:  fmtTime(ti.LastFailedAt),
 		CompletedAt:   fmtTime(ti.CompletedAt),
+		rawPayload:    DefaultPayloadFormatter.FormatPayload(ti.Type, ti.Payload),
 	}
 }
 
 // taskMatchesSearch reports whether the task matches the free-text query
-// (case-insensitive substring over id, type, queue, and payload).
+// (case-insensitive substring over id, type, queue, and the full raw payload).
 func taskMatchesSearch(t *searchTask, q string) bool {
 	if q == "" {
 		return true
@@ -89,7 +123,7 @@ func taskMatchesSearch(t *searchTask, q string) bool {
 	return strings.Contains(strings.ToLower(t.ID), q) ||
 		strings.Contains(strings.ToLower(t.Type), q) ||
 		strings.Contains(strings.ToLower(t.Queue), q) ||
-		strings.Contains(strings.ToLower(t.Payload), q)
+		strings.Contains(strings.ToLower(t.rawPayload), q)
 }
 
 // taskMatchesMeta reports whether the task's JSON payload contains every
@@ -149,7 +183,8 @@ func parseMetaFilters(values []string) []metaFilter {
 }
 
 // listTasksByState returns a page of tasks for the given state.
-func listTasksByState(inspector *asynq.Inspector, qname, state string, page, size int) ([]*asynq.TaskInfo, error) {
+// gname is only used for the "aggregating" state.
+func listTasksByState(inspector *asynq.Inspector, qname, gname, state string, page, size int) ([]*asynq.TaskInfo, error) {
 	opts := []asynq.ListOption{asynq.Page(page), asynq.PageSize(size)}
 	switch state {
 	case "active":
@@ -164,8 +199,10 @@ func listTasksByState(inspector *asynq.Inspector, qname, state string, page, siz
 		return inspector.ListArchivedTasks(qname, opts...)
 	case "completed":
 		return inspector.ListCompletedTasks(qname, opts...)
+	case "aggregating":
+		return inspector.ListAggregatingTasks(qname, gname, opts...)
 	default:
-		return nil, nil
+		return nil, fmt.Errorf("unsupported task state %q", state)
 	}
 }
 
@@ -182,6 +219,10 @@ func resolveQueues(inspector *asynq.Inspector, queueParam string) ([]string, err
 // and metadata filters, and returns all matches found within the per-queue
 // max_scan cap (along with how many tasks were examined and whether the cap was
 // hit). Shared by the search and facet endpoints.
+//
+// Queues removed mid-scan are skipped; any other error (e.g. a Redis outage)
+// aborts the request so the caller can surface it instead of silently
+// returning an empty result set.
 func scanMatchingTasks(
 	inspector *asynq.Inspector,
 	queues []string,
@@ -189,38 +230,58 @@ func scanMatchingTasks(
 	metaFilters []metaFilter,
 	maxScan int,
 	pf PayloadFormatter,
-) (matches []*searchTask, scanned int, truncated bool) {
+) (matches []*searchTask, scanned int, truncated bool, err error) {
 	matches = make([]*searchTask, 0)
 	for _, qname := range queues {
-		qScanned := 0
-		pageNum := 1
-		for qScanned < maxScan {
-			batch, err := listTasksByState(inspector, qname, state, pageNum, searchBatchSize)
-			if err != nil {
-				// Skip queues that error (e.g. removed mid-scan) rather than failing the whole request.
-				break
-			}
-			if len(batch) == 0 {
-				break
-			}
-			for _, ti := range batch {
-				st := toSearchTask(ti, pf)
-				if taskMatchesSearch(st, search) && taskMatchesMeta(st.Payload, metaFilters) {
-					matches = append(matches, st)
+		// The aggregating state is per-group; scan every group in the queue.
+		groups := []string{""}
+		if state == "aggregating" {
+			ginfos, gerr := inspector.Groups(qname)
+			if gerr != nil {
+				if errors.Is(gerr, asynq.ErrQueueNotFound) {
+					continue
 				}
+				return nil, scanned, truncated, gerr
 			}
-			scanned += len(batch)
-			qScanned += len(batch)
-			if len(batch) < searchBatchSize {
-				break // reached the end of this queue/state
+			groups = groups[:0]
+			for _, g := range ginfos {
+				groups = append(groups, g.Group)
 			}
-			pageNum++
+		}
+		qScanned := 0
+	queueScan:
+		for _, gname := range groups {
+			pageNum := 1
+			for qScanned < maxScan {
+				batch, lerr := listTasksByState(inspector, qname, gname, state, pageNum, searchBatchSize)
+				if lerr != nil {
+					if errors.Is(lerr, asynq.ErrQueueNotFound) {
+						break queueScan // queue removed mid-scan; skip it
+					}
+					return nil, scanned, truncated, lerr
+				}
+				if len(batch) == 0 {
+					break
+				}
+				for _, ti := range batch {
+					st := toSearchTask(ti, pf)
+					if taskMatchesSearch(st, search) && taskMatchesMeta(st.rawPayload, metaFilters) {
+						matches = append(matches, st)
+					}
+				}
+				scanned += len(batch)
+				qScanned += len(batch)
+				if len(batch) < searchBatchSize {
+					break // reached the end of this queue/group/state
+				}
+				pageNum++
+			}
 		}
 		if qScanned >= maxScan {
 			truncated = true
 		}
 	}
-	return matches, scanned, truncated
+	return matches, scanned, truncated, nil
 }
 
 func newSearchTasksHandlerFunc(inspector *asynq.Inspector, pf PayloadFormatter) http.HandlerFunc {
@@ -229,6 +290,10 @@ func newSearchTasksHandlerFunc(inspector *asynq.Inspector, pf PayloadFormatter) 
 		state := q.Get("state")
 		if state == "" {
 			state = "pending"
+		}
+		if !searchableStates[state] {
+			writeErrorMsg(w, http.StatusBadRequest, fmt.Sprintf("invalid state %q", state))
+			return
 		}
 		search := q.Get("q")
 		metaFilters := parseMetaFilters(q["meta"])
@@ -241,18 +306,22 @@ func newSearchTasksHandlerFunc(inspector *asynq.Inspector, pf PayloadFormatter) 
 		if size < 1 {
 			size = defaultSearchTop
 		}
-		maxScan := atoiDefault(q.Get("max_scan"), defaultMaxScan)
-		if maxScan < 1 {
-			maxScan = defaultMaxScan
+		if size > maxPageSize {
+			size = maxPageSize
 		}
+		maxScan := clampMaxScan(atoiDefault(q.Get("max_scan"), defaultMaxScan))
 
 		queues, err := resolveQueues(inspector, q.Get("queue"))
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			writeError(w, errorStatus(err), err)
 			return
 		}
 
-		matches, scanned, truncated := scanMatchingTasks(inspector, queues, state, search, metaFilters, maxScan, pf)
+		matches, scanned, truncated, err := scanMatchingTasks(inspector, queues, state, search, metaFilters, maxScan, pf)
+		if err != nil {
+			writeError(w, errorStatus(err), err)
+			return
+		}
 
 		total := len(matches)
 		start := (page - 1) * size
@@ -303,7 +372,7 @@ func collectFacets(matches []*searchTask, limit int) []metaFacet {
 	counts := make(map[string]*agg)
 	for _, t := range matches {
 		var obj map[string]interface{}
-		if err := json.Unmarshal([]byte(t.Payload), &obj); err != nil {
+		if err := json.Unmarshal([]byte(t.rawPayload), &obj); err != nil {
 			continue
 		}
 		for k, v := range obj {
@@ -408,16 +477,17 @@ func newTaskAggregateHandlerFunc(inspector *asynq.Inspector, pf PayloadFormatter
 		if state == "" {
 			state = "retry"
 		}
+		if !searchableStates[state] {
+			writeErrorMsg(w, http.StatusBadRequest, fmt.Sprintf("invalid state %q", state))
+			return
+		}
 		by := q.Get("by")
 		if by == "" {
 			by = "type"
 		}
 		search := q.Get("q")
 		metaFilters := parseMetaFilters(q["meta"])
-		maxScan := atoiDefault(q.Get("max_scan"), defaultMaxScan)
-		if maxScan < 1 {
-			maxScan = defaultMaxScan
-		}
+		maxScan := clampMaxScan(atoiDefault(q.Get("max_scan"), defaultMaxScan))
 		limit := atoiDefault(q.Get("limit"), defaultFacetLimit)
 		if limit < 1 {
 			limit = defaultFacetLimit
@@ -425,11 +495,15 @@ func newTaskAggregateHandlerFunc(inspector *asynq.Inspector, pf PayloadFormatter
 
 		queues, err := resolveQueues(inspector, q.Get("queue"))
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			writeError(w, errorStatus(err), err)
 			return
 		}
 
-		matches, scanned, truncated := scanMatchingTasks(inspector, queues, state, search, metaFilters, maxScan, pf)
+		matches, scanned, truncated, err := scanMatchingTasks(inspector, queues, state, search, metaFilters, maxScan, pf)
+		if err != nil {
+			writeError(w, errorStatus(err), err)
+			return
+		}
 		writeResponseJSON(w, taskAggregateResponse{
 			By:        by,
 			Groups:    aggregateBy(matches, by, limit),
@@ -452,12 +526,13 @@ func newTaskMetadataHandlerFunc(inspector *asynq.Inspector, pf PayloadFormatter)
 		if state == "" {
 			state = "pending"
 		}
+		if !searchableStates[state] {
+			writeErrorMsg(w, http.StatusBadRequest, fmt.Sprintf("invalid state %q", state))
+			return
+		}
 		search := q.Get("q")
 		metaFilters := parseMetaFilters(q["meta"])
-		maxScan := atoiDefault(q.Get("max_scan"), defaultMaxScan)
-		if maxScan < 1 {
-			maxScan = defaultMaxScan
-		}
+		maxScan := clampMaxScan(atoiDefault(q.Get("max_scan"), defaultMaxScan))
 		limit := atoiDefault(q.Get("limit"), defaultFacetLimit)
 		if limit < 1 {
 			limit = defaultFacetLimit
@@ -465,11 +540,15 @@ func newTaskMetadataHandlerFunc(inspector *asynq.Inspector, pf PayloadFormatter)
 
 		queues, err := resolveQueues(inspector, q.Get("queue"))
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			writeError(w, errorStatus(err), err)
 			return
 		}
 
-		matches, scanned, truncated := scanMatchingTasks(inspector, queues, state, search, metaFilters, maxScan, pf)
+		matches, scanned, truncated, err := scanMatchingTasks(inspector, queues, state, search, metaFilters, maxScan, pf)
+		if err != nil {
+			writeError(w, errorStatus(err), err)
+			return
+		}
 
 		writeResponseJSON(w, taskMetadataResponse{
 			Facets:    collectFacets(matches, limit),
@@ -507,31 +586,36 @@ func newBulkFilteredTasksHandlerFunc(inspector *asynq.Inspector, pf PayloadForma
 		dec.DisallowUnknownFields()
 		var req bulkFilteredRequest
 		if err := dec.Decode(&req); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
+			writeError(w, http.StatusBadRequest, err)
 			return
 		}
 		switch req.Action {
 		case "delete", "run", "archive", "cancel":
 		default:
-			http.Error(w, "invalid action (want delete|run|archive|cancel)", http.StatusBadRequest)
+			writeErrorMsg(w, http.StatusBadRequest, "invalid action (want delete|run|archive|cancel)")
 			return
 		}
 		if req.State == "" {
-			http.Error(w, "state is required", http.StatusBadRequest)
+			writeErrorMsg(w, http.StatusBadRequest, "state is required")
 			return
 		}
-		maxScan := req.MaxScan
-		if maxScan < 1 {
-			maxScan = defaultMaxScan
+		if !searchableStates[req.State] {
+			writeErrorMsg(w, http.StatusBadRequest, fmt.Sprintf("invalid state %q", req.State))
+			return
 		}
+		maxScan := clampMaxScan(req.MaxScan)
 
 		queues, err := resolveQueues(inspector, req.Queue)
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			writeError(w, errorStatus(err), err)
 			return
 		}
 
-		matches, scanned, truncated := scanMatchingTasks(inspector, queues, req.State, req.Q, parseMetaFilters(req.Meta), maxScan, pf)
+		matches, scanned, truncated, err := scanMatchingTasks(inspector, queues, req.State, req.Q, parseMetaFilters(req.Meta), maxScan, pf)
+		if err != nil {
+			writeError(w, errorStatus(err), err)
+			return
+		}
 
 		processed, errCount := 0, 0
 		for _, t := range matches {
