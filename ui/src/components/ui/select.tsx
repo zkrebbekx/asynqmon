@@ -60,7 +60,11 @@ export function Select({ value, defaultValue, onValueChange, disabled, children 
         onChange={(e) => onValueChange?.(e.target.value)}
         disabled={disabled}
         className={cn(
-          "appearance-none h-9 w-full rounded-md border border-[hsl(var(--input))] bg-[hsl(var(--background))] text-[hsl(var(--foreground))] px-3 py-2 pr-8 text-sm shadow-sm focus:outline-none focus:ring-1 focus:ring-[hsl(var(--ring))] disabled:cursor-not-allowed disabled:opacity-50 cursor-pointer",
+          // No vertical padding: callers override the height (h-7/h-8) but not
+          // the padding, and a fixed py-* leaves a content box shorter than the
+          // line box, which a native <select> clips rather than overflows.
+          // Browsers center a select's text within its height anyway.
+          "appearance-none h-9 w-full rounded-md border border-[hsl(var(--input))] bg-[hsl(var(--background))] text-[hsl(var(--foreground))] px-3 pr-8 text-sm shadow-sm focus:outline-none focus:ring-1 focus:ring-[hsl(var(--ring))] disabled:cursor-not-allowed disabled:opacity-50 cursor-pointer",
           triggerClassName
         )}
       >
