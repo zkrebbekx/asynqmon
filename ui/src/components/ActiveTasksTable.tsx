@@ -8,7 +8,7 @@ import {
 } from "../actions/tasksActions";
 import { taskRowsPerPageChange } from "../actions/settingsActions";
 import { taskDetailsPath } from "../paths";
-import { prettifyPayload, timeAgo, uuidPrefix, durationBefore } from "../utils";
+import { prettifyPayload, uuidPrefix, durationBefore, durationSince, formatTimestamp } from "../utils";
 import TasksTable, { RowProps } from "./TasksTable";
 import { TableCell, TableRow } from "./ui/table";
 import { Button } from "./ui/button";
@@ -27,7 +27,7 @@ const columns = [
   { key: "type", label: "Type", align: "left" as const },
   { key: "payload", label: "Payload", align: "left" as const },
   { key: "status", label: "Status", align: "left" as const },
-  { key: "started", label: "Started", align: "left" as const },
+  { key: "running-for", label: "Running For", align: "left" as const },
   { key: "deadline", label: "Deadline", align: "left" as const },
   ...(!window.READ_ONLY ? [{ key: "actions", label: "Actions", align: "center" as const }] : []),
 ];
@@ -66,7 +66,12 @@ function Row({ task, isSelected, onSelectChange }: RowProps) {
           <Badge variant="info">active</Badge>
         )}
       </TableCell>
-      <TableCell className="text-xs text-[hsl(var(--muted-foreground))]">{timeAgo(task.start_time)}</TableCell>
+      <TableCell
+        className="text-xs text-[hsl(var(--muted-foreground))]"
+        title={formatTimestamp(task.start_time)}
+      >
+        {durationSince(task.start_time)}
+      </TableCell>
       <TableCell className="text-xs text-[hsl(var(--muted-foreground))]">{durationBefore(task.deadline)}</TableCell>
       {!window.READ_ONLY && (
         <TableCell className="text-center" onClick={(e) => e.stopPropagation()}>

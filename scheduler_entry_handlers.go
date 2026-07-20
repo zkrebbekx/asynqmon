@@ -2,6 +2,7 @@ package asynqmon
 
 import (
 	"net/http"
+	"sort"
 
 	"github.com/gorilla/mux"
 
@@ -20,6 +21,9 @@ func newListSchedulerEntriesHandlerFunc(inspector *asynq.Inspector, pf PayloadFo
 			writeError(w, errorStatus(err), err)
 			return
 		}
+		// Entries are stored in a sorted set scored by heartbeat expiry, so the
+		// order changes on every scheduler heartbeat. Sort by ID for stability.
+		sort.Slice(entries, func(i, j int) bool { return entries[i].ID < entries[j].ID })
 		payload := make(map[string]interface{})
 		if len(entries) == 0 {
 			// avoid nil for the entries field in json output.

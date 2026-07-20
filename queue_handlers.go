@@ -3,6 +3,7 @@ package asynqmon
 import (
 	"errors"
 	"net/http"
+	"sort"
 	"sync"
 
 	"github.com/gorilla/mux"
@@ -22,6 +23,10 @@ func newListQueuesHandlerFunc(inspector *asynq.Inspector) http.HandlerFunc {
 			writeError(w, errorStatus(err), err)
 			return
 		}
+		// Queues() is backed by a Redis SMEMBERS, whose order is unspecified and
+		// varies between calls. Sort so the dashboard rows and charts keep a
+		// stable order across polls instead of reshuffling.
+		sort.Strings(qnames)
 		// GetQueueInfo does several redis calls (incl. MEMORY USAGE sampling) per
 		// queue; fetch queues concurrently so the homepage stays fast with many queues.
 		snapshots := make([]*queueStateSnapshot, len(qnames))

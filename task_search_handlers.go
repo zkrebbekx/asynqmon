@@ -212,7 +212,16 @@ func resolveQueues(inspector *asynq.Inspector, queueParam string) ([]string, err
 	if queueParam != "" && queueParam != "all" {
 		return []string{queueParam}, nil
 	}
-	return inspector.Queues()
+	qnames, err := inspector.Queues()
+	if err != nil {
+		return nil, err
+	}
+	// Queues() order (Redis SMEMBERS) is unspecified. Scanning in a stable
+	// order matters here beyond cosmetics: results are concatenated per queue
+	// and then paginated, so an unstable order lets a task appear on two pages
+	// or on none.
+	sort.Strings(qnames)
+	return qnames, nil
 }
 
 // scanMatchingTasks scans the given queues/state in batches, applies the search
@@ -247,6 +256,8 @@ func scanMatchingTasks(
 			for _, g := range ginfos {
 				groups = append(groups, g.Group)
 			}
+			// Group listing is also SMEMBERS-backed; sort for stable pagination.
+			sort.Strings(groups)
 		}
 		qScanned := 0
 	queueScan:

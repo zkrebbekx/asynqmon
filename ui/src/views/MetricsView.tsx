@@ -20,7 +20,11 @@ export default function MetricsView() {
   const queuesData = useSelector((s: AppState) => s.queues.data);
   const queues = useMemo(() => queuesData.map((q) => q.name), [queuesData]);
   const pollInterval = useSelector((s: AppState) => s.settings.pollInterval);
-  const queuesKey = queues.join(",");
+  // Sort before joining: the key is only meant to change when the *set* of
+  // queues changes. An order-sensitive key would flip on any server-side
+  // reordering and retrigger the polling effect (an extra fetch + restarted
+  // interval) on every poll.
+  const queuesKey = useMemo(() => [...queues].sort().join(","), [queues]);
 
   // With no end_time pinned in the URL we're "live": each poll recomputes
   // "now" inside the fetch instead of freezing the window at mount time

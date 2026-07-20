@@ -4,10 +4,12 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"sort"
 	"strconv"
 	"time"
 
 	"github.com/gorilla/mux"
+	"github.com/redis/go-redis/v9"
 
 	"github.com/hibiken/asynq"
 )
@@ -148,7 +150,7 @@ func newBatchCancelActiveTasksHandlerFunc(inspector *asynq.Inspector) http.Handl
 	}
 }
 
-func newListPendingTasksHandlerFunc(inspector *asynq.Inspector, pf PayloadFormatter) http.HandlerFunc {
+func newListPendingTasksHandlerFunc(inspector *asynq.Inspector, rc redis.UniversalClient, pf PayloadFormatter) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		vars := mux.Vars(r)
 		qname := vars["qname"]
@@ -169,7 +171,20 @@ func newListPendingTasksHandlerFunc(inspector *asynq.Inspector, pf PayloadFormat
 			// avoid nil for the tasks field in json output.
 			payload["tasks"] = make([]*pendingTask, 0)
 		} else {
-			payload["tasks"] = toPendingTasks(tasks, pf)
+			pendingTasks := toPendingTasks(tasks, pf)
+			// How long each task has been queued is not part of TaskInfo; read
+			// it from redis. A lookup failure just leaves the field empty.
+			ids := make([]string, len(pendingTasks))
+			for i, t := range pendingTasks {
+				ids[i] = t.ID
+			}
+			since := pendingSinceTimes(r.Context(), rc, qname, ids)
+			for _, t := range pendingTasks {
+				if ts, ok := since[t.ID]; ok {
+					t.PendingSince = ts.Format(time.RFC3339)
+				}
+			}
+			payload["tasks"] = pendingTasks
 		}
 		payload["stats"] = toQueueStateSnapshot(qinfo)
 		writeResponseJSON(w, payload)
@@ -309,6 +324,9 @@ func newListAggregatingTasksHandlerFunc(inspector *asynq.Inspector, pf PayloadFo
 			writeError(w, errorStatus(err), err)
 			return
 		}
+		// See newListGroupsHandlerFunc: group order is unspecified, and the UI
+		// selects groups[0] by default.
+		sort.Slice(groups, func(i, j int) bool { return groups[i].Group < groups[j].Group })
 		payload := make(map[string]interface{})
 		if len(tasks) == 0 {
 			// avoid nil for the tasks field in json output.
