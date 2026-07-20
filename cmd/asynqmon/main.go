@@ -209,14 +209,14 @@ func main() {
 
 func payloadFormatterFunc(cfg *Config) func(string, []byte) string {
 	return func(taskType string, payload []byte) string {
-		payloadStr := asynqmon.DefaultPayloadFormatter.FormatPayload(taskType, payload)
+		payloadStr := asynqmon.SmartPayloadFormatter.FormatPayload(taskType, payload)
 		return truncate(payloadStr, cfg.MaxPayloadLength)
 	}
 }
 
 func resultFormatterFunc(cfg *Config) func(string, []byte) string {
 	return func(taskType string, result []byte) string {
-		resultStr := asynqmon.DefaultResultFormatter.FormatResult(taskType, result)
+		resultStr := asynqmon.SmartResultFormatter.FormatResult(taskType, result)
 		return truncate(resultStr, cfg.MaxResultLength)
 	}
 }
