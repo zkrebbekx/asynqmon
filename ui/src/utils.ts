@@ -60,6 +60,9 @@ function durationBetween(start: number, end: number): Duration {
 }
 
 export function stringifyDuration(d: Duration): string {
+  if (!Number.isFinite(d.totalSeconds)) {
+    return "-";
+  }
   if (d.hour > 24) {
     const n = Math.floor(d.hour / 24);
     return n + (n === 1 ? " day" : " days");
@@ -71,33 +74,57 @@ export function stringifyDuration(d: Duration): string {
   );
 }
 
-export function durationBefore(timestamp: string): string {
-  try {
-    const duration = durationBetween(Date.parse(timestamp), Date.now());
-    if (duration.totalSeconds < 1) {
-      return "now";
-    }
-    return "in " + stringifyDuration(duration);
-  } catch {
-    return "-";
+const zeroTimestamp = "0001-01-01T00:00:00Z";
+
+// parseTimestamp returns the epoch milliseconds for an RFC3339 timestamp, or
+// null when the value is missing, the Go zero time, or a placeholder the API
+// uses for unknown values (e.g. "-"). Date.parse returns NaN rather than
+// throwing on unparsable input, so callers must check for null explicitly.
+function parseTimestamp(timestamp: string): number | null {
+  if (!timestamp || timestamp === "-" || timestamp === zeroTimestamp) {
+    return null;
   }
+  const ms = Date.parse(timestamp);
+  return Number.isNaN(ms) ? null : ms;
 }
 
-const zeroTimestamp = "0001-01-01T00:00:00Z";
+export function durationBefore(timestamp: string): string {
+  const ms = parseTimestamp(timestamp);
+  if (ms === null) {
+    return "-";
+  }
+  const duration = durationBetween(ms, Date.now());
+  if (duration.totalSeconds < 1) {
+    return "now";
+  }
+  return "in " + stringifyDuration(duration);
+}
+
 export function timeAgo(timestamp: string): string {
-  if (timestamp === zeroTimestamp) {
+  const ms = parseTimestamp(timestamp);
+  if (ms === null) {
     return "-";
   }
-  try {
-    return timeAgoUnix(Date.parse(timestamp) / 1000);
-  } catch (error) {
-    console.error("Could not parse timestamp: ", timestamp, error);
+  return timeAgoUnix(ms / 1000);
+}
+
+// durationSince renders how much time has elapsed since the given timestamp as
+// a bare duration (e.g. "2h13m4s"), without the "ago" suffix timeAgo adds.
+// Used for "how long has this been running/queued" columns.
+export function durationSince(timestamp: string): string {
+  const ms = parseTimestamp(timestamp);
+  if (ms === null) {
     return "-";
   }
+  const duration = durationBetween(Date.now(), ms);
+  if (duration.totalSeconds < 1) {
+    return "0s";
+  }
+  return stringifyDuration(duration);
 }
 
 export function timeAgoUnix(unixtime: number): string {
-  if (unixtime === 0) {
+  if (!Number.isFinite(unixtime) || unixtime === 0) {
     return "";
   }
   const duration = durationBetween(Date.now(), unixtime * 1000);

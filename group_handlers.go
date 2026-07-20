@@ -2,6 +2,7 @@ package asynqmon
 
 import (
 	"net/http"
+	"sort"
 
 	"github.com/gorilla/mux"
 	"github.com/hibiken/asynq"
@@ -21,6 +22,10 @@ func newListGroupsHandlerFunc(inspector *asynq.Inspector) http.HandlerFunc {
 			writeError(w, errorStatus(err), err)
 			return
 		}
+		// Group names come back from a Redis set in unspecified order; the UI
+		// defaults to the first group, so an unstable order remounts the table
+		// on every poll.
+		sort.Slice(groups, func(i, j int) bool { return groups[i].Group < groups[j].Group })
 		qinfo, err := inspector.GetQueueInfo(qname)
 		if err != nil {
 			writeError(w, errorStatus(err), err)
