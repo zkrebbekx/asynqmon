@@ -288,6 +288,10 @@ func toActiveTasks(in []*asynq.TaskInfo, pf PayloadFormatter) []*activeTask {
 // TODO: Maybe we don't need state specific type, just use taskInfo
 type pendingTask struct {
 	*baseTask
+
+	// PendingSince is when the task entered the pending state, in RFC3339
+	// format, or empty string when asynq has no record of it.
+	PendingSince string `json:"pending_since"`
 }
 
 func toPendingTask(ti *asynq.TaskInfo, pf PayloadFormatter) *pendingTask {

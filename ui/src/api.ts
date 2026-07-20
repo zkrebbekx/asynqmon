@@ -340,6 +340,10 @@ export interface TaskInfo {
   payload: string;
   state: string;
   start_time: string; // Only applies to task.state == 'active'
+  // When the task entered the pending state. Only applies to
+  // task.state == 'pending'; asynq deletes the underlying record once a worker
+  // dequeues the task, so it is empty in every other state.
+  pending_since?: string;
   max_retry: number;
   retried: number;
   last_failed_at: string;

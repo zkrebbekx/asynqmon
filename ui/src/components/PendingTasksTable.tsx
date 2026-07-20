@@ -9,7 +9,7 @@ import {
 } from "../actions/tasksActions";
 import { taskRowsPerPageChange } from "../actions/settingsActions";
 import { taskDetailsPath } from "../paths";
-import { prettifyPayload, uuidPrefix } from "../utils";
+import { prettifyPayload, uuidPrefix, durationSince } from "../utils";
 import TasksTable, { RowProps } from "./TasksTable";
 import { TableCell, TableRow } from "./ui/table";
 import { Button } from "./ui/button";
@@ -24,6 +24,7 @@ const columns = [
   { key: "id", label: "ID", align: "left" as const },
   { key: "type", label: "Type", align: "left" as const },
   { key: "payload", label: "Payload", align: "left" as const },
+  { key: "queued-for", label: "Queued For", align: "left" as const },
   { key: "retried", label: "Retried", align: "left" as const },
   { key: "last-error", label: "Last Error", align: "left" as const },
   ...(!window.READ_ONLY ? [{ key: "actions", label: "Actions", align: "center" as const }] : []),
@@ -46,6 +47,7 @@ function Row({ task, isSelected, onSelectChange }: RowProps) {
           <SyntaxHighlighter>{prettifyPayload(task.payload)}</SyntaxHighlighter>
         </div>
       </TableCell>
+      <TableCell className="text-xs text-[hsl(var(--muted-foreground))]">{durationSince(task.pending_since ?? "")}</TableCell>
       <TableCell className="text-xs">{task.retried}/{task.max_retry}</TableCell>
       <TableCell className="text-xs text-[hsl(var(--muted-foreground))] max-w-xs truncate">{task.error_message || "–"}</TableCell>
       {!window.READ_ONLY && (
