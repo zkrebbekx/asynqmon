@@ -47,6 +47,26 @@ describe("Select (native wrapper)", () => {
     expect(option.textContent).toBe("Wrapped Label");
   });
 
+  // jsdom does no layout, so this asserts the cause rather than the clipping:
+  // callers shrink the control (h-7/h-8) without touching padding, so a fixed
+  // vertical padding leaves a content box shorter than the line box and the
+  // label gets sliced off top and bottom.
+  it("applies no vertical padding that a caller's height override would clip", () => {
+    render(
+      <Select value="last-7d">
+        <SelectTrigger className="w-32 h-7 text-xs">
+          <SelectValue />
+        </SelectTrigger>
+        <SelectContent>
+          <SelectItem value="last-7d">Last 7d</SelectItem>
+        </SelectContent>
+      </Select>
+    );
+    const select = screen.getByRole("combobox");
+    expect(select.className).not.toMatch(/(^|\s)(py|pt|pb)-(?!0)/);
+    expect(select.className).toContain("h-7");
+  });
+
   it("calls onValueChange with the selected value", async () => {
     const onChange = vi.fn();
     render(<Sample onChange={onChange} />);
