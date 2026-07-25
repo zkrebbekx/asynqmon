@@ -109,6 +109,86 @@ export function serializeConsoleState(
 }
 
 /**************************************************************
+              Queues Directory (`/queues`) state
+ **************************************************************/
+
+// Server-side sortable columns of GET /api/fleet/queues (frozen contract).
+export const DIRECTORY_SORT_KEYS = [
+  "name",
+  "pending",
+  "active",
+  "scheduled",
+  "retry",
+  "archived",
+  "completed",
+  "oldest_pending_age",
+  "latency",
+  "processed_today",
+  "failed_today",
+  "error_rate",
+  "consumers",
+] as const;
+export type DirectorySortKey = (typeof DIRECTORY_SORT_KEYS)[number];
+
+export type SortDir = "asc" | "desc";
+
+export const DIRECTORY_LIMITS = [50, 100, 200] as const;
+
+export interface DirectoryState {
+  sort: DirectorySortKey;
+  dir: SortDir;
+  f: string; // queue filter expression, passed to the API verbatim
+  cursor: string; // opaque server cursor ("" = first page)
+  limit: number;
+}
+
+// Default sort mirrors the approved mockup: worst queue first by oldest
+// pending age.
+export const DEFAULT_DIRECTORY_STATE: DirectoryState = {
+  sort: "oldest_pending_age",
+  dir: "desc",
+  f: "",
+  cursor: "",
+  limit: 100,
+};
+
+// Params owned by the directory; serializeDirectoryState clears exactly these
+// so params it doesn't own survive untouched (same contract as the console).
+const DIRECTORY_PARAMS = ["sort", "dir", "f", "cursor", "limit"];
+
+export function parseDirectoryState(params: URLSearchParams): DirectoryState {
+  const sort = params.get("sort") ?? "";
+  const dir = params.get("dir") ?? "";
+  const limit = Number(params.get("limit"));
+  return {
+    sort: (DIRECTORY_SORT_KEYS as readonly string[]).includes(sort)
+      ? (sort as DirectorySortKey)
+      : DEFAULT_DIRECTORY_STATE.sort,
+    dir: dir === "asc" || dir === "desc" ? dir : DEFAULT_DIRECTORY_STATE.dir,
+    f: params.get("f") ?? "",
+    cursor: params.get("cursor") ?? "",
+    limit: (DIRECTORY_LIMITS as readonly number[]).includes(limit)
+      ? limit
+      : DEFAULT_DIRECTORY_STATE.limit,
+  };
+}
+
+export function serializeDirectoryState(
+  state: DirectoryState,
+  base?: URLSearchParams
+): URLSearchParams {
+  const params = new URLSearchParams(base);
+  for (const key of DIRECTORY_PARAMS) params.delete(key);
+  if (state.sort !== DEFAULT_DIRECTORY_STATE.sort) params.set("sort", state.sort);
+  if (state.dir !== DEFAULT_DIRECTORY_STATE.dir) params.set("dir", state.dir);
+  if (state.f) params.set("f", state.f);
+  if (state.cursor) params.set("cursor", state.cursor);
+  if (state.limit !== DEFAULT_DIRECTORY_STATE.limit)
+    params.set("limit", String(state.limit));
+  return params;
+}
+
+/**************************************************************
                     Task drawer (`peek` param)
  **************************************************************/
 

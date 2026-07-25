@@ -1,0 +1,161 @@
+// Typed fetchers for the Fleet Console aggregate endpoints (build contract
+// §5.1/§5.2). These are served from the server-side stats cache — the browser
+// never enumerates queues itself. Response shapes are the frozen phase-2/4
+// backend contracts; every consumer must tolerate the endpoints being absent
+// (404/503) while the backend lands, so callers surface errors instead of
+// assuming data.
+
+import axios from "axios";
+import queryString from "query-string";
+
+// Same base-URL convention as api.ts: production serves the API on the same
+// origin; development proxies /api via vite.
+const getBaseUrl = () =>
+  import.meta.env.PROD
+    ? `${window.ROOT_PATH}/api`
+    : `${window.location.origin}${window.ROOT_PATH}/api`;
+
+/**************************************************************
+                    GET /api/fleet/overview
+ **************************************************************/
+
+export interface FleetStats {
+  queues_total: number;
+  paused_queues: number;
+  zero_consumer_queues: number;
+  pending: number;
+  active: number;
+  scheduled: number;
+  retry: number;
+  archived: number;
+  completed: number;
+  groups: number;
+  orphan_candidates: number;
+  past_due_scheduled: number;
+  processed_today: number;
+  failed_today: number;
+  error_rate: number;
+  servers: number;
+  workers_total: number;
+  workers_busy: number;
+  redis_memory_used_bytes: number;
+  redis_memory_max_bytes: number;
+}
+
+// Coverage stamp (honest-numbers rule §2): which fraction of the fleet the
+// totals actually cover, and when the cache was refreshed.
+export interface FleetCoverage {
+  tier: number;
+  queues_total: number;
+  refreshed_pct_5m: number;
+  updated_at: string; // RFC3339
+}
+
+export interface FleetOverviewResponse {
+  fleet: FleetStats;
+  coverage: FleetCoverage;
+}
+
+export async function getFleetOverview(): Promise<FleetOverviewResponse> {
+  const resp = await axios({ method: "get", url: `${getBaseUrl()}/fleet/overview` });
+  return resp.data;
+}
+
+/**************************************************************
+                    GET /api/fleet/queues
+ **************************************************************/
+
+export interface FleetQueueRow {
+  queue: string;
+  pending: number;
+  active: number;
+  scheduled: number;
+  retry: number;
+  archived: number;
+  completed: number;
+  groups: number;
+  paused: boolean;
+  paused_since?: string;
+  processed_today: number;
+  failed_today: number;
+  error_rate: number;
+  orphan_candidates: number;
+  next_retry_at?: string;
+  past_due_scheduled: number;
+  oldest_pending_since?: string;
+  oldest_pending_age_ms: number;
+  latency_ms: number;
+  consumers: number;
+  refreshed_at: string; // RFC3339 — drives the staleness dot
+}
+
+export interface FleetQueuesQuery {
+  sort?: string;
+  dir?: "asc" | "desc";
+  cursor?: string;
+  limit?: number;
+  f?: string; // queue filter expression, passed through verbatim
+}
+
+export interface FleetQueuesResponse {
+  queues: FleetQueueRow[];
+  total_matched: number;
+  next_cursor?: string;
+  // Set when the server could not apply (part of) the filter; the UI renders
+  // it as a dismissable note instead of silently showing unfiltered rows.
+  filter_ignored?: string;
+  coverage: FleetCoverage;
+}
+
+export async function listFleetQueues(
+  query: FleetQueuesQuery
+): Promise<FleetQueuesResponse> {
+  const url = queryString.stringifyUrl(
+    { url: `${getBaseUrl()}/fleet/queues`, query: { ...query } },
+    { skipEmptyString: true }
+  );
+  const resp = await axios({ method: "get", url });
+  return resp.data;
+}
+
+/**************************************************************
+                    GET /api/fleet/attention
+ **************************************************************/
+
+export interface AttentionFinding {
+  queue: string;
+  detector: string;
+  // 1 (hygiene) … 5 (work is not running) — see stats/attention.go.
+  severity: number;
+  sentence: string;
+  // The finding's key number: a count for count detectors, whole seconds for
+  // age detectors (PENDING_AGE, PAUSED_LONG, GROUP_STALL).
+  value: number;
+  chips: string[];
+  since: string; // RFC3339
+  // The query the system wrote for you — wired into /tasks or /queues.
+  suggested_query: string;
+}
+
+export interface FleetAttentionResponse {
+  findings: AttentionFinding[];
+  updated_at: string;
+  detectors_live: number;
+  detectors_learning: number;
+}
+
+export async function getFleetAttention(): Promise<FleetAttentionResponse> {
+  const resp = await axios({ method: "get", url: `${getBaseUrl()}/fleet/attention` });
+  return resp.data;
+}
+
+/**************************************************************
+                    SSE GET /api/fleet/events
+ **************************************************************/
+
+// Event stream carrying `overview` and `attention` events whose data payloads
+// are the same JSON bodies as the GET endpoints above. Consumed by
+// useFleetEvents, which falls back to polling the GETs when the stream errors.
+export function fleetEventsUrl(): string {
+  return `${getBaseUrl()}/fleet/events`;
+}

@@ -98,10 +98,6 @@ export interface RunAllTasksResponse {
   scheduled: number;
 }
 
-export interface ListQueueStatsResponse {
-  stats: { [qname: string]: DailyStat[] };
-}
-
 export interface ListGroupsResponse {
   stats: Queue;
   groups: GroupInfo[];
@@ -325,14 +321,6 @@ export interface Queue {
   timestamp: string;
 }
 
-export interface DailyStat {
-  queue: string;
-  date: string;
-  processed: number;
-  succeeded: number;
-  failed: number;
-}
-
 export interface TaskInfo {
   id: string;
   queue: string;
@@ -427,14 +415,6 @@ export async function resumeQueue(qname: string): Promise<void> {
     method: "post",
     url: `${getBaseUrl()}/queues/${qname}:resume`,
   });
-}
-
-export async function listQueueStats(): Promise<ListQueueStatsResponse> {
-  const resp = await axios({
-    method: "get",
-    url: `${getBaseUrl()}/queue_stats`,
-  });
-  return resp.data;
 }
 
 export async function listGroups(qname: string): Promise<ListGroupsResponse> {

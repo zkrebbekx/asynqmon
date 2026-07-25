@@ -7,6 +7,10 @@ import {
   parsePeek,
   serializePeek,
   serializeMetaPair,
+  DirectoryState,
+  DEFAULT_DIRECTORY_STATE,
+  parseDirectoryState,
+  serializeDirectoryState,
 } from "./urlstate";
 
 describe("parseConsoleState", () => {
@@ -96,6 +100,63 @@ describe("serializeConsoleState", () => {
 describe("serializeMetaPair", () => {
   it("uses the API's key:value wire format", () => {
     expect(serializeMetaPair({ key: "region", value: "eu" })).toBe("region:eu");
+  });
+});
+
+describe("parseDirectoryState", () => {
+  it("returns defaults for empty params", () => {
+    expect(parseDirectoryState(new URLSearchParams())).toEqual(DEFAULT_DIRECTORY_STATE);
+  });
+
+  it("reads every field from the URL", () => {
+    const params = new URLSearchParams(
+      "sort=consumers&dir=asc&f=consumers%3D0+pending%3E10000&cursor=abc123&limit=50"
+    );
+    expect(parseDirectoryState(params)).toEqual({
+      sort: "consumers",
+      dir: "asc",
+      f: "consumers=0 pending>10000",
+      cursor: "abc123",
+      limit: 50,
+    });
+  });
+
+  it("degrades invalid values to defaults instead of crashing", () => {
+    const params = new URLSearchParams("sort=bogus&dir=sideways&limit=7");
+    const state = parseDirectoryState(params);
+    expect(state.sort).toBe("oldest_pending_age");
+    expect(state.dir).toBe("desc");
+    expect(state.limit).toBe(100);
+  });
+});
+
+describe("serializeDirectoryState", () => {
+  it("omits default values so shared URLs stay short", () => {
+    expect(serializeDirectoryState(DEFAULT_DIRECTORY_STATE).toString()).toBe("");
+  });
+
+  it("round-trips a full state exactly", () => {
+    const state: DirectoryState = {
+      sort: "error_rate",
+      dir: "asc",
+      f: "name~email consumers=0",
+      cursor: "opaque/cursor+1==",
+      limit: 200,
+    };
+    expect(parseDirectoryState(serializeDirectoryState(state))).toEqual(state);
+  });
+
+  it("preserves params it does not own", () => {
+    const base = new URLSearchParams("peek=email/8f3a&sort=pending&cursor=old");
+    const params = serializeDirectoryState(
+      { ...DEFAULT_DIRECTORY_STATE, f: "consumers=0" },
+      base
+    );
+    expect(params.get("peek")).toBe("email/8f3a");
+    expect(params.get("f")).toBe("consumers=0");
+    // Stale directory params from the base are cleared, not merged.
+    expect(params.get("sort")).toBeNull();
+    expect(params.get("cursor")).toBeNull();
   });
 });
 

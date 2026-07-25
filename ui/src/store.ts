@@ -8,7 +8,6 @@ import groupsReducer from "./reducers/groupsReducer";
 import serversReducer from "./reducers/serversReducer";
 import schedulerEntriesReducer from "./reducers/schedulerEntriesReducer";
 import snackbarReducer from "./reducers/snackbarReducer";
-import queueStatsReducer from "./reducers/queueStatsReducer";
 import redisInfoReducer from "./reducers/redisInfoReducer";
 import metricsReducer from "./reducers/metricsReducer";
 import { loadState, saveState } from "./localStorage";
@@ -21,7 +20,6 @@ const rootReducer = combineReducers({
   servers: serversReducer,
   schedulerEntries: schedulerEntriesReducer,
   snackbar: snackbarReducer,
-  queueStats: queueStatsReducer,
   redis: redisInfoReducer,
   metrics: metricsReducer,
 });
