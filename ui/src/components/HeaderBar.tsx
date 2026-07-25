@@ -53,7 +53,14 @@ function useBreadcrumbs(): Crumb[] {
   return [{ label: "Fleet" }];
 }
 
-export default function HeaderBar() {
+// True on macOS/iOS — decides whether the palette hint shows ⌘K or Ctrl K.
+const IS_MAC = /Mac|iP(hone|ad|od)/.test(navigator.platform);
+
+interface Props {
+  onOpenPalette?: () => void;
+}
+
+export default function HeaderBar({ onOpenPalette }: Props) {
   const dispatch = useDispatch();
   const { pollingActive, lastUpdatedAt, pollInterval } = useSelector(
     (s: AppState) => s.settings
@@ -94,6 +101,20 @@ export default function HeaderBar() {
           </span>
         ))}
       </nav>
+
+      {/* ⌘K palette hint chip (build contract §2 chrome / §4.1) */}
+      {onOpenPalette && (
+        <button
+          onClick={onOpenPalette}
+          title="Open the command palette"
+          className="ml-2 flex items-center gap-2 rounded-md border border-[var(--fc-line)] bg-[var(--fc-raise)] px-2.5 py-1 text-xs text-[var(--fc-ink3)] hover:border-[var(--fc-ink3)] hover:text-[var(--fc-ink2)]"
+        >
+          Search or jump…
+          <kbd className="rounded border border-b-2 border-[var(--fc-line)] bg-[var(--fc-panel)] px-[5px] font-sans text-[10.5px] text-[var(--fc-ink2)]">
+            {IS_MAC ? "⌘K" : "Ctrl K"}
+          </kbd>
+        </button>
+      )}
 
       <div className="flex-1" />
 

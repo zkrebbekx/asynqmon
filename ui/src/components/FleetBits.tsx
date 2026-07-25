@@ -54,6 +54,20 @@ export function MicroLabel({ children, className }: { children: ReactNode; class
   );
 }
 
+// Keyboard-key chip, per the mockup's .kbd (palette hint, cheat-sheet).
+export function Kbd({ children, className }: { children: ReactNode; className?: string }) {
+  return (
+    <kbd
+      className={cn(
+        "rounded border border-b-2 border-[var(--fc-line)] bg-[var(--fc-panel)] px-[5px] font-sans text-[10.5px] text-[var(--fc-ink2)]",
+        className
+      )}
+    >
+      {children}
+    </kbd>
+  );
+}
+
 export const SEV_STRIPE: Record<string, string> = {
   crit: "bg-[var(--fc-crit)]",
   warn: "bg-[var(--fc-warn)]",

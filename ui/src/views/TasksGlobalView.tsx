@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState, useCallback, useRef } from "react";
 import { useSelector } from "react-redux";
 import { Link, useSearchParams } from "react-router-dom";
-import { Search, Play, Trash2, Archive, X, ChevronLeft, ChevronRight, Tag, AlertCircle } from "lucide-react";
+import { Search, Play, Trash2, Archive, X, ChevronLeft, ChevronRight, Tag, AlertCircle, BookmarkPlus } from "lucide-react";
 import { AppState, useAppDispatch } from "../store";
 import { listQueuesAsync } from "../actions/queuesActions";
 import * as api from "../api";
@@ -31,6 +31,9 @@ import {
 import { paths } from "../paths";
 import { cn, clickableRowClass, clickableRowProps } from "../lib/utils";
 import { usePolling } from "../hooks";
+import { useKeymap } from "../hooks/useKeymap";
+import { useFrozenData } from "../hooks/useFrozenData";
+import { STATE_BULK_VERBS } from "../lib/palette";
 import { Button } from "../components/ui/button";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "../components/ui/table";
 import { Alert, AlertDescription, AlertTitle } from "../components/ui/alert";
@@ -39,6 +42,8 @@ import SyntaxHighlighter from "../components/SyntaxHighlighter";
 import ConfirmDialog from "../components/ConfirmDialog";
 import BulkJobModal from "../components/BulkJobModal";
 import TaskDrawer, { PivotRequest } from "../components/TaskDrawer";
+import SaveViewModal from "../components/SaveViewModal";
+import UpdatesPausedPill from "../components/UpdatesPausedPill";
 
 type ActionFn = (qname: string, taskId: string) => Promise<unknown>;
 
@@ -59,15 +64,8 @@ const actionFns: Record<State, { run?: ActionFn; archive?: ActionFn; delete?: Ac
 
 // Bulk-on-filter capabilities per state (the backend acts by queue + task id,
 // which works for aggregating tasks even though per-row actions can't).
-const bulkCaps: Record<State, Array<"run" | "archive" | "delete" | "cancel">> = {
-  active: ["cancel"],
-  pending: ["archive", "delete"],
-  aggregating: ["run", "archive", "delete"],
-  scheduled: ["run", "archive", "delete"],
-  retry: ["run", "archive", "delete"],
-  archived: ["run", "delete"],
-  completed: ["delete"],
-};
+// Shared with the ⌘K palette's verb entries (lib/palette).
+const bulkCaps = STATE_BULK_VERBS;
 
 // Verb used for "Scan-to-completion as job": the LEAST destructive verb the
 // state supports — the point is the completed preview enumeration (exact
@@ -200,6 +198,18 @@ export default function TasksGlobalView() {
   const [bulkVerb, setBulkVerb] = useState<"run" | "archive" | "delete" | "cancel" | null>(null);
   // Row-level delete confirmation target.
   const [confirmDelete, setConfirmDelete] = useState<TaskInfo | null>(null);
+
+  // §4.5 keyboard model: focused row (j/k, visible ring), selection (x /
+  // shift-x range; keys are "<queue>/<id>"), and the selection-verb confirm
+  // (r/e/# — always through a confirm, never instant). §4.4 freeze input:
+  // hovering the rows table.
+  const [focusIdx, setFocusIdx] = useState(-1);
+  const [selected, setSelected] = useState<ReadonlySet<string>>(new Set());
+  const selectAnchor = useRef(-1);
+  const [selectionVerb, setSelectionVerb] = useState<"run" | "archive" | "delete" | null>(null);
+  const [hoveringTable, setHoveringTable] = useState(false);
+  // "Save view…" modal (§4.2).
+  const [saveViewOpen, setSaveViewOpen] = useState(false);
 
   // Cursor pagination (mode=cursor): the stack's top is the cursor of the
   // CURRENT page; [] = first page. Exact totals come with every response.
@@ -345,6 +355,9 @@ export default function TasksGlobalView() {
     setExtraMatches(0);
     setContCursor(null);
     setScanJobId(null);
+    setFocusIdx(-1);
+    setSelected(new Set());
+    selectAnchor.current = -1;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [filterKey]);
 
@@ -385,8 +398,14 @@ export default function TasksGlobalView() {
     } catch (e) {
       setError(toErrorString(e));
     }
+    // Mutations invalidate immediately (§4.4): the refetch bypasses an
+    // active freeze once. Assigned later (hoisted via ref-style flag).
+    applyNextChangeRef.current?.();
     fetchTasks();
   };
+  // applyNextChange comes from useFrozenData below; runAction is declared
+  // first, so it reaches it through a ref.
+  const applyNextChangeRef = useRef<(() => void) | null>(null);
 
   // Drawer pivots ("find all like this") compose into the query string.
   const handlePivot = (p: PivotRequest) => {
@@ -458,6 +477,139 @@ export default function TasksGlobalView() {
     return [...tasks, ...extraTasks.filter((t) => !seen.has(`${t.queue}:${t.id}`))];
   }, [tasks, extraTasks]);
 
+  // §4.4 freeze-on-interaction: hovering the table, holding a selection, or
+  // having the drawer open suspends ROW rendering — data is still fetched
+  // into the buffer, the pill counts the suspended changes, and counts
+  // (state pills, totals) stay live. Mutations flush via applyNextChange.
+  //
+  // Equality compares only the fields the table RENDERS (id/queue/type/
+  // payload/state + order): asynq recomputes e.g. next_process_at to "now"
+  // on every read of a pending task, and an invisible field must not count
+  // as a paused update.
+  const renderedRowsEqual = useCallback((a: TaskInfo[], b: TaskInfo[]) => {
+    if (a.length !== b.length) return false;
+    for (let i = 0; i < a.length; i++) {
+      const x = a[i];
+      const y = b[i];
+      if (
+        x.id !== y.id ||
+        x.queue !== y.queue ||
+        x.type !== y.type ||
+        x.payload !== y.payload ||
+        x.state !== y.state
+      ) {
+        return false;
+      }
+    }
+    return true;
+  }, []);
+  const frozen = hoveringTable || selected.size > 0 || peek !== null;
+  const {
+    data: rows,
+    pending: pausedUpdates,
+    apply: applyUpdates,
+    applyNextChange,
+  } = useFrozenData(visibleTasks, frozen, renderedRowsEqual, filterKey);
+  applyNextChangeRef.current = applyNextChange;
+
+  // Clamp the keyboard focus when the rendered set shrinks.
+  useEffect(() => {
+    setFocusIdx((i) => Math.min(i, rows.length - 1));
+  }, [rows.length]);
+
+  // ---- §4.5 selection + keyboard model over the RENDERED rows.
+  const rowKey = (t: TaskInfo) => `${t.queue}/${t.id}`;
+  const clearSelection = () => {
+    setSelected(new Set());
+    selectAnchor.current = -1;
+  };
+  const toggleSelect = (idx: number) => {
+    const t = rows[idx];
+    if (!t) return;
+    setSelected((prev) => {
+      const next = new Set(prev);
+      const k = rowKey(t);
+      if (next.has(k)) next.delete(k);
+      else next.add(k);
+      return next;
+    });
+    selectAnchor.current = idx;
+  };
+  const rangeSelect = (idx: number) => {
+    if (selectAnchor.current < 0) {
+      toggleSelect(idx);
+      return;
+    }
+    const a = Math.min(selectAnchor.current, idx);
+    const b = Math.max(selectAnchor.current, idx);
+    setSelected((prev) => {
+      const next = new Set(prev);
+      for (let i = a; i <= b && i < rows.length; i++) next.add(rowKey(rows[i]));
+      return next;
+    });
+  };
+  const moveFocus = (delta: number) => {
+    setFocusIdx((i) => {
+      if (rows.length === 0) return -1;
+      const next = i < 0 ? (delta > 0 ? 0 : rows.length - 1) : Math.max(0, Math.min(rows.length - 1, i + delta));
+      document.querySelector(`[data-task-row="${next}"]`)?.scrollIntoView({ block: "nearest" });
+      return next;
+    });
+  };
+  const selectedTasks = rows.filter((t) => selected.has(rowKey(t)));
+
+  // r/e/# act on the SELECTION and always route through the confirm dialog
+  // (never instant). Verbs the state doesn't support are silently inert.
+  const openSelectionVerb = (verb: "run" | "archive" | "delete") => {
+    if (window.READ_ONLY || selectedTasks.length === 0 || !acts[verb]) return;
+    setSelectionVerb(verb);
+  };
+  useKeymap(
+    {
+      j: () => moveFocus(1),
+      k: () => moveFocus(-1),
+      x: () => {
+        if (focusIdx >= 0) toggleSelect(focusIdx);
+      },
+      "shift+x": () => {
+        if (focusIdx >= 0) rangeSelect(focusIdx);
+      },
+      p: () => {
+        const t = rows[focusIdx];
+        if (t) setPeekParam({ queue: t.queue, id: t.id });
+      },
+      r: () => openSelectionVerb("run"),
+      e: () => openSelectionVerb("archive"),
+      "#": () => openSelectionVerb("delete"),
+    },
+    !isGroupMode
+  );
+
+  const runSelectionVerb = async () => {
+    const verb = selectionVerb;
+    setSelectionVerb(null);
+    if (!verb) return;
+    const fn = acts[verb];
+    if (!fn) return;
+    const targets = selectedTasks;
+    try {
+      await Promise.all(targets.map((t) => fn(t.queue, t.id)));
+      setError("");
+    } catch (e) {
+      setError(toErrorString(e));
+    }
+    clearSelection();
+    applyNextChange(); // mutations invalidate immediately (§4.4)
+    fetchTasks();
+  };
+
+  // The urlstate-owned params of the current console view, page stripped —
+  // what "Save view…" persists (§4.2; served back verbatim).
+  const consoleViewState = useMemo(() => {
+    const params = serializeConsoleState({ ...view, page: 0 });
+    return Object.fromEntries(params.entries());
+  }, [view]);
+
   const countLabel = (st: State): string => {
     const n = stateCounts?.[st];
     if (n === undefined) return "";
@@ -467,7 +619,21 @@ export default function TasksGlobalView() {
 
   return (
     <div className="max-w-7xl mx-auto px-4 py-6 space-y-4">
-      <h1 className="text-2xl font-semibold">Tasks</h1>
+      <div className="flex items-center justify-between">
+        <h1 className="text-2xl font-semibold">Tasks</h1>
+        {!window.READ_ONLY && (
+          <Button
+            size="sm"
+            variant="outline"
+            className="h-7 text-xs"
+            onClick={() => setSaveViewOpen(true)}
+            title="Save the current query as a server-side team view (launchable from ⌘K)"
+          >
+            <BookmarkPlus size={13} className="mr-1.5" />
+            Save view…
+          </Button>
+        )}
+      </div>
 
       {/* Query bar: AQL text input (single source of truth). Chips, pills
           and pivots all COMPOSE INTO this text. */}
@@ -477,6 +643,7 @@ export default function TasksGlobalView() {
             typeahead needs one) with the same visual classes. */}
         <input
           ref={inputRef}
+          data-fc-querybar
           placeholder='AQL — e.g. queue=email state=retry error~"gateway timeout"  ·  free text still works'
           value={searchInput}
           onChange={(e) => {
@@ -720,6 +887,7 @@ export default function TasksGlobalView() {
           onClose={() => setBulkVerb(null)}
           onStarted={() => {
             setBulkVerb(null);
+            applyNextChange(); // mutations invalidate immediately (§4.4)
             fetchTasks();
             fetchFacets();
             fetchAnalytics();
@@ -743,6 +911,63 @@ export default function TasksGlobalView() {
           budgeted, resumable scans.
         </div>
       )}
+
+      {/* Selection-scoped action bar (§4.5): x/shift-x build the selection;
+          r/e/# (or these buttons) act on it through the confirm dialog.
+          Selection-scoped — visually separate from the whole-scope bar. */}
+      {!window.READ_ONLY && !isGroupMode && selected.size > 0 && (
+        <div className="flex flex-wrap items-center gap-2 rounded-lg border border-[var(--fc-acc)]/40 bg-[var(--fc-acc-bg)]/50 px-4 py-2">
+          <span className="text-xs font-medium">
+            <span className="font-mono tabular-nums">{selected.size}</span> selected
+          </span>
+          {acts.run && (
+            <Button size="sm" variant="ghost" className="h-7 text-xs" onClick={() => openSelectionVerb("run")}>
+              Run <span className="ml-1 opacity-50">r</span>
+            </Button>
+          )}
+          {acts.archive && (
+            <Button size="sm" variant="ghost" className="h-7 text-xs" onClick={() => openSelectionVerb("archive")}>
+              Archive <span className="ml-1 opacity-50">e</span>
+            </Button>
+          )}
+          {acts.delete && (
+            <Button
+              size="sm"
+              variant="ghost"
+              className="h-7 text-xs text-red-500 hover:text-red-600"
+              onClick={() => openSelectionVerb("delete")}
+            >
+              Delete <span className="ml-1 opacity-50">#</span>
+            </Button>
+          )}
+          <span className="flex-1" />
+          <Button size="sm" variant="ghost" className="h-7 text-xs" onClick={clearSelection}>
+            Clear
+          </Button>
+        </div>
+      )}
+
+      {/* Selection verb confirm — r/e/# never act instantly (§4.5). */}
+      <ConfirmDialog
+        open={selectionVerb !== null}
+        title={
+          selectionVerb === "run"
+            ? "Run selected tasks"
+            : selectionVerb === "archive"
+              ? "Archive selected tasks"
+              : "Delete selected tasks"
+        }
+        description={
+          <>
+            {selectionVerb === "run" ? "Run" : selectionVerb === "archive" ? "Archive" : "Delete"}{" "}
+            <strong>{selectedTasks.length}</strong> selected task
+            {selectedTasks.length === 1 ? "" : "s"} in state <strong>{view.state}</strong>?
+            {selectionVerb === "delete" && " This action cannot be undone."}
+          </>
+        }
+        onConfirm={runSelectionVerb}
+        onClose={() => setSelectionVerb(null)}
+      />
 
       {isGroupMode ? (
         /* Group-by result mode: the aggregate IS the result set. */
@@ -787,11 +1012,16 @@ export default function TasksGlobalView() {
           </div>
         </div>
       ) : (
-        /* Rows result mode */
-        <div className="rounded-lg border border-[hsl(var(--border))] bg-[hsl(var(--card))]">
+        /* Rows result mode. Hover freezes row updates (§4.4). */
+        <div
+          className="rounded-lg border border-[hsl(var(--border))] bg-[hsl(var(--card))]"
+          onMouseEnter={() => setHoveringTable(true)}
+          onMouseLeave={() => setHoveringTable(false)}
+        >
           <Table>
             <TableHeader>
               <TableRow>
+                {!window.READ_ONLY && <TableHead className="w-8" aria-label="Select" />}
                 <TableHead>ID</TableHead>
                 <TableHead>Queue</TableHead>
                 <TableHead>Type</TableHead>
@@ -800,37 +1030,52 @@ export default function TasksGlobalView() {
               </TableRow>
             </TableHeader>
             <TableBody>
-              {loading && visibleTasks.length === 0 ? (
+              {loading && rows.length === 0 ? (
                 // Skeleton rows while the (re)filtered set loads, so the empty
                 // state doesn't flash before data arrives.
                 Array.from({ length: 5 }, (_, i) => (
                   <TableRow key={`skeleton-${i}`}>
-                    {Array.from({ length: window.READ_ONLY ? 4 : 5 }, (_, j) => (
+                    {Array.from({ length: window.READ_ONLY ? 4 : 6 }, (_, j) => (
                       <TableCell key={j}>
                         <div className="h-4 animate-pulse rounded bg-[hsl(var(--muted))]" />
                       </TableCell>
                     ))}
                   </TableRow>
                 ))
-              ) : visibleTasks.length === 0 ? (
+              ) : rows.length === 0 ? (
                 <TableRow>
-                  <TableCell colSpan={window.READ_ONLY ? 4 : 5} className="text-center py-8 text-[hsl(var(--muted-foreground))]">
+                  <TableCell colSpan={window.READ_ONLY ? 4 : 6} className="text-center py-8 text-[hsl(var(--muted-foreground))]">
                     No tasks
                   </TableCell>
                 </TableRow>
               ) : (
-                visibleTasks.map((t) => (
+                rows.map((t, i) => (
                   <TableRow
                     key={`${t.queue}:${t.id}`}
+                    data-task-row={i}
                     className={cn(
                       clickableRowClass,
-                      peek && peek.id === t.id && peek.queue === t.queue && "bg-[hsl(var(--primary))]/5"
+                      peek && peek.id === t.id && peek.queue === t.queue && "bg-[hsl(var(--primary))]/5",
+                      selected.has(rowKey(t)) && "bg-[var(--fc-acc-bg)]/50",
+                      // Visible keyboard-focus ring (§4.5 j/k).
+                      focusIdx === i && "shadow-[inset_0_0_0_1.5px_var(--fc-acc)]"
                     )}
                     // Rows open the peek drawer (deep-linkable) instead of
                     // navigating away — detail is a drawer, never a
                     // context-losing navigation.
                     {...clickableRowProps(() => setPeekParam({ queue: t.queue, id: t.id }))}
                   >
+                    {!window.READ_ONLY && (
+                      <TableCell className="w-8" onClick={(e) => e.stopPropagation()}>
+                        <input
+                          type="checkbox"
+                          aria-label={`Select task ${uuidPrefix(t.id)}`}
+                          checked={selected.has(rowKey(t))}
+                          onChange={() => toggleSelect(i)}
+                          className="accent-[var(--fc-acc)]"
+                        />
+                      </TableCell>
+                    )}
                     <TableCell className="font-mono text-xs">{uuidPrefix(t.id)}</TableCell>
                     <TableCell className="text-xs">{t.queue}</TableCell>
                     <TableCell className="text-xs font-medium">{t.type}</TableCell>
@@ -904,7 +1149,7 @@ export default function TasksGlobalView() {
           {isCursorMode ? (
             <div className="flex items-center justify-between px-4 py-3 border-t border-[hsl(var(--border))]">
               <span className="text-xs text-[hsl(var(--muted-foreground))]">
-                {visibleTasks.length} rows · <span className="font-mono tabular-nums">{total.toLocaleString()}</span> total · exact
+                {rows.length} rows · <span className="font-mono tabular-nums">{total.toLocaleString()}</span> total · exact
               </span>
               <div className="flex items-center gap-1">
                 <Button
@@ -961,16 +1206,29 @@ export default function TasksGlobalView() {
         </div>
       )}
 
-      {/* Task peek drawer (deep-linkable via the `peek` param) */}
+      {/* Task peek drawer (deep-linkable via the `peek` param). Prev/next
+          walk the FROZEN list (§3.5: cursor carried from the list — no
+          reshuffle while the drawer is open). */}
       {peek && (
         <TaskDrawer
           peek={peek}
-          resultList={visibleTasks}
+          resultList={rows}
           onClose={() => setPeekParam(null, { replace: true })}
           onPeek={(target) => setPeekParam(target, { replace: true })}
           onPivot={handlePivot}
         />
       )}
+
+      {/* §4.4 "N updates paused — refresh" pill. */}
+      <UpdatesPausedPill count={pausedUpdates} onRefresh={applyUpdates} />
+
+      {/* §4.2 "Save view…" — persists the urlstate-owned console params. */}
+      <SaveViewModal
+        open={saveViewOpen}
+        target="tasks"
+        state={consoleViewState}
+        onClose={() => setSaveViewOpen(false)}
+      />
     </div>
   );
 }

@@ -14,9 +14,10 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useSelector } from "react-redux";
 import { useNavigate, useSearchParams } from "react-router-dom";
-import { X } from "lucide-react";
+import { BookmarkPlus, X } from "lucide-react";
 import { AppState } from "../store";
 import { usePolling } from "../hooks";
+import { useFrozenData } from "../hooks/useFrozenData";
 import { listFleetQueues, FleetQueuesResponse, FleetQueueRow } from "../api-fleet";
 import { SeriesResponse, SeriesSpec, getSeriesBatch } from "../api-series";
 import {
@@ -32,6 +33,8 @@ import { timeAgo, toErrorString } from "../utils";
 import { cn, clickableRowClass, clickableRowProps } from "../lib/utils";
 import { FcChip } from "../components/FleetBits";
 import { LazyMount, Sparkline } from "../components/charts";
+import SaveViewModal from "../components/SaveViewModal";
+import UpdatesPausedPill from "../components/UpdatesPausedPill";
 
 const fmt = (n: number | undefined | null) =>
   n === undefined || n === null || !Number.isFinite(n) ? "—" : n.toLocaleString("en-US");
@@ -226,6 +229,11 @@ export default function QueuesDirectoryView() {
   const [filterInput, setFilterInput] = useState(view.f);
   useEffect(() => setFilterInput(view.f), [view.f]);
 
+  // §4.4 freeze-on-interaction: hovering the table suspends row updates
+  // (data still fetched; meta/coverage keep updating). §4.2 Save view….
+  const [hoveringTable, setHoveringTable] = useState(false);
+  const [saveViewOpen, setSaveViewOpen] = useState(false);
+
   // Staleness dots track wall-clock time, refreshed every 5s.
   const [now, setNow] = useState(Date.now());
   useEffect(() => {
@@ -303,8 +311,41 @@ export default function QueuesDirectoryView() {
     if (filterInput !== view.f) updateView({ f: filterInput, cursor: "" });
   };
 
-  const rows = resp?.queues ?? [];
+  // §4.4: rows render through the freeze buffer; the meta line (counts,
+  // coverage) stays live. Mutations don't originate here, so no flush path.
+  const liveRows = useMemo(() => resp?.queues ?? [], [resp]);
+  // Equality ignores refreshed_at (the cache stamp isn't rendered as a cell
+  // — an idle fleet must not count "updates" every sweep); everything else,
+  // including seconds-granular ages, is a visible row change.
+  const dirRowsEqual = useCallback((a: FleetQueueRow[], b: FleetQueueRow[]) => {
+    if (a.length !== b.length) return false;
+    for (let i = 0; i < a.length; i++) {
+      const { refreshed_at: _x, ...x } = a[i];
+      const { refreshed_at: _y, ...y } = b[i];
+      if (JSON.stringify(x) !== JSON.stringify(y)) return false;
+    }
+    return true;
+  }, []);
+  const {
+    data: rows,
+    pending: pausedUpdates,
+    apply: applyUpdates,
+  } = useFrozenData(
+    liveRows,
+    hoveringTable,
+    dirRowsEqual,
+    // Sort/filter/page changes are deliberate — they flush through the
+    // freeze (sort headers live INSIDE the hovered table).
+    `${view.sort}|${view.dir}|${view.f}|${view.cursor}|${view.limit}`
+  );
   const sortLabel = COLUMNS.find((c) => c.sortKey === view.sort)?.label ?? view.sort;
+
+  // The urlstate-owned directory params, cursor stripped — what "Save
+  // view…" persists (§4.2; served back verbatim).
+  const directoryViewState = useMemo(() => {
+    const params = serializeDirectoryState({ ...view, cursor: "" });
+    return Object.fromEntries(params.entries());
+  }, [view]);
 
   return (
     <div className="px-4 py-4">
@@ -316,6 +357,7 @@ export default function QueuesDirectoryView() {
           </span>
           <input
             value={filterInput}
+            data-fc-querybar
             onChange={(e) => setFilterInput(e.target.value)}
             onKeyDown={(e) => {
               if (e.key === "Enter") applyFilter();
@@ -326,6 +368,16 @@ export default function QueuesDirectoryView() {
           />
           <span className="text-[10.5px] text-[var(--fc-ink3)]">Enter to apply</span>
         </div>
+        {!window.READ_ONLY && (
+          <button
+            onClick={() => setSaveViewOpen(true)}
+            title="Save the current filter + sort as a server-side team view (launchable from ⌘K)"
+            className="flex items-center gap-1.5 rounded-md border border-[var(--fc-line)] bg-[var(--fc-raise)] px-3 py-2 text-xs font-semibold text-[var(--fc-ink)] hover:border-[var(--fc-ink3)]"
+          >
+            <BookmarkPlus size={13} />
+            Save view…
+          </button>
+        )}
         <select
           value={view.limit}
           onChange={(e) => updateView({ limit: Number(e.target.value), cursor: "" })}
@@ -385,8 +437,12 @@ export default function QueuesDirectoryView() {
         </span>
       </div>
 
-      {/* Table */}
-      <div className="overflow-x-auto rounded-lg border border-[var(--fc-line)] bg-[var(--fc-panel)]">
+      {/* Table — hover suspends row updates (§4.4) */}
+      <div
+        className="overflow-x-auto rounded-lg border border-[var(--fc-line)] bg-[var(--fc-panel)]"
+        onMouseEnter={() => setHoveringTable(true)}
+        onMouseLeave={() => setHoveringTable(false)}
+      >
         {!resp && loading ? (
           <div className="px-4 py-10 text-center text-xs text-[var(--fc-ink3)]">
             Loading queues…
@@ -487,6 +543,17 @@ export default function QueuesDirectoryView() {
           cursor pagination — stable across polls; use Back for the previous page
         </span>
       </div>
+
+      {/* §4.4 "N updates paused — refresh" pill. */}
+      <UpdatesPausedPill count={pausedUpdates} onRefresh={applyUpdates} />
+
+      {/* §4.2 "Save view…" — persists the urlstate-owned directory params. */}
+      <SaveViewModal
+        open={saveViewOpen}
+        target="queues"
+        state={directoryViewState}
+        onClose={() => setSaveViewOpen(false)}
+      />
     </div>
   );
 }
