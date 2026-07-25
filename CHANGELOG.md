@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- (docker): Multi-arch images — `linux/amd64` + `linux/arm64` manifests published by CI; Dockerfile cross-compiles via BuildKit `TARGETOS`/`TARGETARCH` (upstream hibiken/asynqmon#292)
+- (cmd): Added `--redis-username` / `REDIS_USERNAME` — redis ACL username for single, cluster, and sentinel modes (upstream hibiken/asynqmon#273)
+- (cmd): Added `--redis-sentinel-password` / `REDIS_SENTINEL_PASSWORD` — authenticates to the sentinel nodes, separate from `--redis-password` for the servers behind them (upstream hibiken/asynqmon#349)
+- (pkg/cmd): `GET /healthz` liveness/readiness probe — PINGs redis with a 2s budget, 200/503 JSON; Helm chart probes now point at it (upstream hibiken/asynqmon#276)
+- (pkg/cmd): Added `Options.PrometheusBasicAuth` and `--prometheus-basic-auth` / `PROMETHEUS_BASIC_AUTH` (`user:password`) — basic-auth on proxied Prometheus queries, never logged (upstream hibiken/asynqmon#248)
+- (pkg/cmd/ui): Full payload on the task DETAIL endpoint — `Options.DetailPayloadFormatter`/`DetailResultFormatter` + `--max-detail-payload-length` / `MAX_DETAIL_PAYLOAD_LENGTH` (default 262144, 0 = unlimited); list cells stay capped by `--max-payload-length`, the drawer shows the whole payload with an honest "truncated at N chars" note at the cap and a copy-payload button (upstream hibiken/asynqmon#301)
+- (pkg/ui): `POST /api/schedulers/{stable_key}/run` — run a scheduler entry's task NOW (fresh enqueue of the entry's type/payload, not a scheduler tick) through the flag-gated enqueue client; works on live and GONE entries, reconstructs queue/retry/timeout/retention/unique options, declares `applied_options`/`skipped_options`, gated by `--enable-enqueue` + not read-only, audit verb `run_scheduler_entry`; Schedulers screen grows a per-row Run-now with a two-step confirm (upstream hibiken/asynqmon#337)
+
 ## [0.7.0] - 2022-04-11
 
 Version 0.7 added support for [Task Aggregation](https://github.com/hibiken/asynq/wiki/Task-aggregation) feature

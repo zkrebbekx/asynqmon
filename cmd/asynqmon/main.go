@@ -34,10 +34,27 @@ type Config struct {
 	RedisInsecureTLS  bool
 	RedisClusterNodes string
 
+	// RedisUsername is the Redis 6 ACL username sent alongside RedisPassword
+	// in single, cluster, and sentinel modes (upstream hibiken/asynqmon#273).
+	RedisUsername string
+
+	// RedisSentinelPassword authenticates to the sentinel nodes themselves;
+	// the redis servers behind them keep using RedisPassword (upstream
+	// hibiken/asynqmon#349). Env-backed so it stays out of the redis-sentinel
+	// URL and process argv.
+	RedisSentinelPassword string
+
 	// UI related configs
 	ReadOnly         bool
 	MaxPayloadLength int
 	MaxResultLength  int
+
+	// MaxDetailPayloadLength caps the formatted payload/result served by the
+	// task DETAIL endpoint (GET /api/queues/{qname}/tasks/{task_id}) in utf8
+	// characters (upstream hibiken/asynqmon#301). Lists stay capped by
+	// MaxPayloadLength/MaxResultLength; the detail view gets the full value
+	// up to this safety cap. 0 = unlimited. Default 262144.
+	MaxDetailPayloadLength int
 
 	// Fleet stats sweeper configs
 	StatsInterval time.Duration
@@ -64,6 +81,11 @@ type Config struct {
 	EnableMetricsExporter bool
 	PrometheusServerAddr  string
 
+	// PrometheusBasicAuth is "user:password" credentials attached to every
+	// query proxied to PrometheusServerAddr (upstream hibiken/asynqmon#248).
+	// Never logged.
+	PrometheusBasicAuth string
+
 	// Args are the positional (non-flag) command line arguments
 	Args []string
 }
@@ -84,14 +106,18 @@ func parseFlags(progname string, args []string) (cfg *Config, output string, err
 	flags.StringVar(&conf.RedisAddr, "redis-addr", getEnvDefaultString("REDIS_ADDR", "127.0.0.1:6379"), "address of redis server to connect to")
 	flags.IntVar(&conf.RedisDB, "redis-db", getEnvOrDefaultInt("REDIS_DB", 0), "redis database number")
 	flags.StringVar(&conf.RedisPassword, "redis-password", getEnvDefaultString("REDIS_PASSWORD", ""), "password to use when connecting to redis server")
+	flags.StringVar(&conf.RedisUsername, "redis-username", getEnvDefaultString("REDIS_USERNAME", ""), "redis ACL username sent alongside --redis-password in single, cluster, and sentinel modes (upstream #273; this is the plain redis AUTH username, distinct from any cloud-IAM --redis-user identity)")
+	flags.StringVar(&conf.RedisSentinelPassword, "redis-sentinel-password", getEnvDefaultString("REDIS_SENTINEL_PASSWORD", ""), "password to authenticate to the sentinel nodes themselves; the redis servers behind them use --redis-password (upstream #349)")
 	flags.StringVar(&conf.RedisTLS, "redis-tls", getEnvDefaultString("REDIS_TLS", ""), "server name for TLS validation used when connecting to redis server")
 	flags.StringVar(&conf.RedisURL, "redis-url", getEnvDefaultString("REDIS_URL", ""), "URL to redis server")
 	flags.BoolVar(&conf.RedisInsecureTLS, "redis-insecure-tls", getEnvOrDefaultBool("REDIS_INSECURE_TLS", false), "disable TLS certificate host checks")
 	flags.StringVar(&conf.RedisClusterNodes, "redis-cluster-nodes", getEnvDefaultString("REDIS_CLUSTER_NODES", ""), "comma separated list of host:port addresses of cluster nodes")
 	flags.IntVar(&conf.MaxPayloadLength, "max-payload-length", getEnvOrDefaultInt("MAX_PAYLOAD_LENGTH", 200), "maximum number of utf8 characters printed in the payload cell in the Web UI")
 	flags.IntVar(&conf.MaxResultLength, "max-result-length", getEnvOrDefaultInt("MAX_RESULT_LENGTH", 200), "maximum number of utf8 characters printed in the result cell in the Web UI")
+	flags.IntVar(&conf.MaxDetailPayloadLength, "max-detail-payload-length", getEnvOrDefaultInt("MAX_DETAIL_PAYLOAD_LENGTH", 262144), "maximum number of utf8 characters of formatted payload/result served on the task DETAIL endpoint (upstream #301); list cells stay capped by --max-payload-length/--max-result-length; 0 = unlimited")
 	flags.BoolVar(&conf.EnableMetricsExporter, "enable-metrics-exporter", getEnvOrDefaultBool("ENABLE_METRICS_EXPORTER", false), "enable prometheus metrics exporter to expose queue metrics")
 	flags.StringVar(&conf.PrometheusServerAddr, "prometheus-addr", getEnvDefaultString("PROMETHEUS_ADDR", ""), "address of prometheus server to query time series")
+	flags.StringVar(&conf.PrometheusBasicAuth, "prometheus-basic-auth", getEnvDefaultString("PROMETHEUS_BASIC_AUTH", ""), "user:password basic-auth credentials sent with every query to --prometheus-addr (upstream #248); prefer the env var to keep the secret out of argv")
 	flags.BoolVar(&conf.ReadOnly, "read-only", getEnvOrDefaultBool("READ_ONLY", false), "restrict to read-only mode")
 	flags.DurationVar(&conf.StatsInterval, "stats-interval", getEnvOrDefaultDuration("STATS_INTERVAL", 5*time.Second), "interval between fleet stats sweeps (e.g. 5s, 30s)")
 	flags.BoolVar(&conf.DisableStats, "disable-stats", getEnvOrDefaultBool("DISABLE_STATS", false), "disable the background fleet stats sweeper and /api/fleet endpoints")
@@ -125,6 +151,7 @@ func makeRedisConnOpt(cfg *Config) (asynq.RedisConnOpt, error) {
 	if len(cfg.RedisClusterNodes) > 0 {
 		return asynq.RedisClusterClientOpt{
 			Addrs:     strings.Split(cfg.RedisClusterNodes, ","),
+			Username:  cfg.RedisUsername, // ACL username (upstream #273)
 			Password:  cfg.RedisPassword,
 			TLSConfig: makeTLSConfig(cfg),
 		}, nil
@@ -137,6 +164,22 @@ func makeRedisConnOpt(cfg *Config) (asynq.RedisConnOpt, error) {
 			return nil, err
 		}
 		connOpt := res.(asynq.RedisFailoverClientOpt) // safe to type-assert
+		// The userinfo password in a redis-sentinel:// URL authenticates to
+		// the sentinel nodes. --redis-sentinel-password / REDIS_SENTINEL_PASSWORD
+		// takes precedence over it, keeping the secret out of the URL
+		// (upstream hibiken/asynqmon#349).
+		if cfg.RedisSentinelPassword != "" {
+			connOpt.SentinelPassword = cfg.RedisSentinelPassword
+		}
+		// --redis-username / --redis-password authenticate to the redis
+		// servers behind the sentinels — distinct from the sentinel password
+		// above (upstream #349, #273).
+		if cfg.RedisUsername != "" {
+			connOpt.Username = cfg.RedisUsername
+		}
+		if cfg.RedisPassword != "" {
+			connOpt.Password = cfg.RedisPassword
+		}
 		connOpt.TLSConfig = makeTLSConfig(cfg)
 		return connOpt, nil
 	}
@@ -153,6 +196,11 @@ func makeRedisConnOpt(cfg *Config) (asynq.RedisConnOpt, error) {
 		connOpt.Addr = cfg.RedisAddr
 		connOpt.DB = cfg.RedisDB
 		connOpt.Password = cfg.RedisPassword
+	}
+	// ACL username (upstream #273). The explicit flag/env wins over anything
+	// a redis:// URL carried.
+	if cfg.RedisUsername != "" {
+		connOpt.Username = cfg.RedisUsername
 	}
 	if connOpt.TLSConfig == nil {
 		connOpt.TLSConfig = makeTLSConfig(cfg)
@@ -189,18 +237,28 @@ func main() {
 	}
 
 	h := asynqmon.New(asynqmon.Options{
-		RedisConnOpt:      redisConnOpt,
-		PayloadFormatter:  asynqmon.PayloadFormatterFunc(payloadFormatterFunc(cfg)),
-		ResultFormatter:   asynqmon.ResultFormatterFunc(resultFormatterFunc(cfg)),
-		PrometheusAddress: cfg.PrometheusServerAddr,
-		ReadOnly:          cfg.ReadOnly,
-		StatsInterval:     cfg.StatsInterval,
-		StatsDisabled:     cfg.DisableStats,
-		AuthHeader:        cfg.AuthHeader,
-		TrustedProxies:    trustedProxies,
-		RequireIdentity:   cfg.RequireIdentity,
-		EnableEnqueue:     cfg.EnableEnqueue,
-		CorrelationKeys:   correlationKeys,
+		RedisConnOpt:     redisConnOpt,
+		PayloadFormatter: asynqmon.PayloadFormatterFunc(payloadFormatterFunc(cfg)),
+		ResultFormatter:  asynqmon.ResultFormatterFunc(resultFormatterFunc(cfg)),
+		// Task DETAIL endpoint serves the full formatted payload/result up
+		// to --max-detail-payload-length; lists stay truncated (upstream
+		// hibiken/asynqmon#301). The limit is surfaced via /api/features so
+		// the drawer can label capped payloads honestly.
+		DetailPayloadFormatter: asynqmon.PayloadFormatterFunc(detailPayloadFormatterFunc(cfg)),
+		DetailResultFormatter:  asynqmon.ResultFormatterFunc(detailResultFormatterFunc(cfg)),
+		DetailPayloadLimit:     cfg.MaxDetailPayloadLength,
+		PrometheusAddress:      cfg.PrometheusServerAddr,
+		// Basic-auth credentials for the Prometheus proxy (upstream #248).
+		// Passed through verbatim and never logged.
+		PrometheusBasicAuth: cfg.PrometheusBasicAuth,
+		ReadOnly:            cfg.ReadOnly,
+		StatsInterval:       cfg.StatsInterval,
+		StatsDisabled:       cfg.DisableStats,
+		AuthHeader:          cfg.AuthHeader,
+		TrustedProxies:      trustedProxies,
+		RequireIdentity:     cfg.RequireIdentity,
+		EnableEnqueue:       cfg.EnableEnqueue,
+		CorrelationKeys:     correlationKeys,
 	})
 	defer h.Close()
 
@@ -254,6 +312,31 @@ func payloadFormatterFunc(cfg *Config) func(string, []byte) string {
 	return func(taskType string, payload []byte) string {
 		payloadStr := asynqmon.SmartPayloadFormatter.FormatPayload(taskType, payload)
 		return truncate(payloadStr, cfg.MaxPayloadLength)
+	}
+}
+
+// detailPayloadFormatterFunc formats payloads for the task DETAIL endpoint
+// (upstream hibiken/asynqmon#301): same smart formatting, but capped by
+// --max-detail-payload-length (0 = unlimited) instead of the list-cell cap.
+func detailPayloadFormatterFunc(cfg *Config) func(string, []byte) string {
+	return func(taskType string, payload []byte) string {
+		payloadStr := asynqmon.SmartPayloadFormatter.FormatPayload(taskType, payload)
+		if cfg.MaxDetailPayloadLength <= 0 {
+			return payloadStr
+		}
+		return truncate(payloadStr, cfg.MaxDetailPayloadLength)
+	}
+}
+
+// detailResultFormatterFunc is detailPayloadFormatterFunc for task results
+// (#301) — the same --max-detail-payload-length safety cap applies.
+func detailResultFormatterFunc(cfg *Config) func(string, []byte) string {
+	return func(taskType string, result []byte) string {
+		resultStr := asynqmon.SmartResultFormatter.FormatResult(taskType, result)
+		if cfg.MaxDetailPayloadLength <= 0 {
+			return resultStr
+		}
+		return truncate(resultStr, cfg.MaxDetailPayloadLength)
 	}
 }
 

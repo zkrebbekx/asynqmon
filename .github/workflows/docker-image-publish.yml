@@ -18,6 +18,12 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+      # QEMU lets buildx assemble the non-native (arm64) image layers
+      # (hibiken/asynqmon#292). Compilation itself cross-compiles natively via
+      # the Dockerfile's $BUILDPLATFORM/TARGETARCH split, so QEMU only backs
+      # the few non-build steps of the foreign-arch stages.
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
       - name: Docker meta
@@ -42,6 +48,8 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
+          # Publish amd64 + arm64 manifests (hibiken/asynqmon#292).
+          platforms: linux/amd64,linux/arm64
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}

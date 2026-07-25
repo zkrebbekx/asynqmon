@@ -95,15 +95,17 @@ securityContext:
     drop:
       - ALL
 
+# /healthz PINGs redis with a 2s budget: 200 ok / 503 unavailable
+# (upstream hibiken/asynqmon#276).
 livenessProbe:
   httpGet:
-    path: /
+    path: /healthz
     port: http
   initialDelaySeconds: 5
   periodSeconds: 15
 readinessProbe:
   httpGet:
-    path: /
+    path: /healthz
     port: http
   initialDelaySeconds: 3
   periodSeconds: 10

@@ -120,13 +120,19 @@ _Note_: Use `--redis-url` to specify address, db-number, and password with one f
 | `--redis-addr`(string)            | `REDIS_ADDR`              | address of redis server to connect to                                                                                        | "127.0.0.1:6379" |
 | `--redis-db`(int)                 | `REDIS_DB`                | redis database number                                                                                                        | 0                |
 | `--redis-password`(string)        | `REDIS_PASSWORD`          | password to use when connecting to redis server                                                                              | ""               |
+| `--redis-username`(string)        | `REDIS_USERNAME`          | redis ACL username sent alongside `--redis-password` in single, cluster, and sentinel modes (plain redis AUTH username, distinct from any cloud-IAM `--redis-user` identity) | ""               |
+| `--redis-sentinel-password`(string) | `REDIS_SENTINEL_PASSWORD` | password to authenticate to the sentinel nodes themselves; the redis servers behind them use `--redis-password`            | ""               |
 | `--redis-cluster-nodes`(string)   | `REDIS_CLUSTER_NODES`     | comma separated list of host:port addresses of cluster nodes                                                                 | ""               |
 | `--redis-tls`(string)             | `REDIS_TLS`               | server name for TLS validation used when connecting to redis server                                                          | ""               |
 | `--redis-insecure-tls`(bool)      | `REDIS_INSECURE_TLS`      | disable TLS certificate host checks                                                                                          | false            |
 | `--enable-metrics-exporter`(bool) | `ENABLE_METRICS_EXPORTER` | enable prometheus metrics exporter to expose queue metrics                                                                   | false            |
 | `--prometheus-addr`(string)       | `PROMETHEUS_ADDR`         | address of prometheus server to query time series                                                                            | ""               |
+| `--prometheus-basic-auth`(string) | `PROMETHEUS_BASIC_AUTH`   | `user:password` basic-auth credentials sent with every query to `--prometheus-addr` (prefer the env var to keep the secret out of argv) | ""               |
 | `--read-only`(bool)               | `READ_ONLY`               | use web UI in read-only mode                                                                                                 | false            |
-| `--enable-enqueue`(bool)          | `ENABLE_ENQUEUE`          | enable creating tasks from the web UI (`POST /api/queues/{qname}/tasks`, powers clone-and-edit); always excluded in read-only mode | false            |
+| `--max-payload-length`(int)       | `MAX_PAYLOAD_LENGTH`      | maximum number of utf8 characters printed in the payload cell in the Web UI (list rows)                                      | 200              |
+| `--max-result-length`(int)        | `MAX_RESULT_LENGTH`       | maximum number of utf8 characters printed in the result cell in the Web UI (list rows)                                       | 200              |
+| `--max-detail-payload-length`(int) | `MAX_DETAIL_PAYLOAD_LENGTH` | safety cap (utf8 chars) on the formatted payload/result served by the task DETAIL endpoint — the task drawer shows the full payload up to this cap while list cells stay capped by `--max-payload-length` (upstream [#301](https://github.com/hibiken/asynqmon/issues/301)); 0 = unlimited | 262144           |
+| `--enable-enqueue`(bool)          | `ENABLE_ENQUEUE`          | enable creating tasks from the web UI (`POST /api/queues/{qname}/tasks`, powers clone-and-edit and the Schedulers screen's Run-now, upstream [#337](https://github.com/hibiken/asynqmon/issues/337)); always excluded in read-only mode | false            |
 | `--correlation-keys`(string)      | `CORRELATION_KEYS`        | comma separated list of payload keys the task drawer's Flow view recognizes as correlation ids, in priority order ([details](#flow-view--correlation-keys)) | "trace_id,correlation_id,request_id" |
 | `--cors-allowed-origins`(string)  | `CORS_ALLOWED_ORIGINS`    | comma separated list of origins allowed to make cross-origin requests (empty = same-origin only; cross-origin mutations are rejected) | ""               |
 
@@ -150,6 +156,18 @@ Example:
 $ ./asynqmon --redis-url=redis-sentinel://:mypassword@localhost:5000,localhost:5001,localhost:5002?master=mymaster
 ```
 
+The password in the `redis-sentinel://` URL authenticates to the **sentinel
+nodes**. To keep that secret out of the URL, provide it via
+`--redis-sentinel-password` or the `REDIS_SENTINEL_PASSWORD` env var instead
+(it takes precedence over the URL). The redis servers *behind* the sentinels
+authenticate separately with `--redis-username`/`--redis-password`
+(`REDIS_USERNAME`/`REDIS_PASSWORD`):
+
+```sh
+$ REDIS_SENTINEL_PASSWORD=sentinelpass REDIS_PASSWORD=redispass \
+    ./asynqmon --redis-url=redis-sentinel://localhost:5000,localhost:5001,localhost:5002?master=mymaster
+```
+
 To connect to a **redis-cluster**, use `--redis-cluster-nodes`.
 
 Example:
@@ -157,6 +175,17 @@ Example:
 ```sh
 $ ./asynqmon --redis-cluster-nodes=localhost:7000,localhost:7001,localhost:7002,localhost:7003,localhost:7004,localhost:7006
 ```
+
+### Health check endpoint
+
+The server exposes `GET /healthz` (outside `/api`, no auth, no side effects)
+for orchestrator liveness/readiness probes. It PINGs Redis with a 2-second
+budget and answers:
+
+- `200 {"status":"ok"}` — Redis reachable
+- `503 {"status":"unavailable","error":"..."}` — Redis unreachable
+
+The bundled Helm chart points its `livenessProbe`/`readinessProbe` at it.
 
 ### Integration with Prometheus
 
@@ -167,6 +196,11 @@ The metrics data is now available under `/metrics` for Prometheus server to scra
 
 Once the metrics data is collected by a Prometheus server, you can pass the address of the Prometheus server to asynqmon to query the time-series data.
 The address can be specified via `--prometheus-addr`. This enables the metrics view on the Web UI.
+
+If your Prometheus sits behind HTTP basic auth, provide the credentials as
+`user:password` via `--prometheus-basic-auth` or (preferably) the
+`PROMETHEUS_BASIC_AUTH` env var; asynqmon attaches them to every proxied
+query. The credentials are never logged.
 
 ![Web UI Metrics View](./docs/screenshots/metrics.png)
 

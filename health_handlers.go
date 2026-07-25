@@ -1,6 +1,8 @@
 package asynqmon
 
 import (
+	"context"
+	"encoding/json"
 	"net/http"
 	"time"
 
@@ -14,6 +16,8 @@ import (
 
 // ****************************************************************************
 // This file defines:
+//   - GET /healthz — orchestrator liveness/readiness probe (upstream
+//     hibiken/asynqmon#276): PING redis with a 2s budget; 200 or 503.
 //   - GET /api/health/roles — the Settings › Health readout (build contract
 //     §3.12, phase 12): per singleton role (§5.13) the lease holder instance,
 //     TTL and fencing counter; for the stats engine additionally the §5.1
@@ -30,6 +34,33 @@ import (
 // a process singleton — execution is claimed per job with its own fencing
 // token (§5.13), visible per job on the Operations screen.
 // ****************************************************************************
+
+// healthzResponse is the GET /healthz probe body (upstream
+// hibiken/asynqmon#276).
+type healthzResponse struct {
+	Status string `json:"status"`          // "ok" | "unavailable"
+	Error  string `json:"error,omitempty"` // redis error when unavailable
+}
+
+// newHealthzHandlerFunc serves GET /healthz (upstream hibiken/asynqmon#276):
+// a liveness/readiness probe that PINGs redis with a 2-second budget so a
+// hung Redis cannot stall the orchestrator's probe loop. 200 {"status":"ok"}
+// when redis answers, 503 {"status":"unavailable","error":...} otherwise.
+// Registered on the parent router (outside /api): no auth, no read-only
+// filter, no side effects.
+func newHealthzHandlerFunc(rc redis.UniversalClient) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+		defer cancel()
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		if err := rc.Ping(ctx).Err(); err != nil {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_ = json.NewEncoder(w).Encode(healthzResponse{Status: "unavailable", Error: err.Error()})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(healthzResponse{Status: "ok"})
+	}
+}
 
 // healthRole is one §5.13 singleton role's lease state.
 type healthRole struct {
@@ -50,12 +81,12 @@ type healthRole struct {
 
 // healthSweep is the holder-local last-sweep cost.
 type healthSweep struct {
-	At        string `json:"at"` // RFC3339
-	Queues    int    `json:"queues"`
-	Refreshed int    `json:"refreshed"`
-	ReadCmds  int    `json:"read_cmds"`
-	WriteCmds int    `json:"write_cmds"`
-	DurationMs int64 `json:"duration_ms"`
+	At         string `json:"at"` // RFC3339
+	Queues     int    `json:"queues"`
+	Refreshed  int    `json:"refreshed"`
+	ReadCmds   int    `json:"read_cmds"`
+	WriteCmds  int    `json:"write_cmds"`
+	DurationMs int64  `json:"duration_ms"`
 }
 
 // healthSeries describes the §5.8 sampler's current mode.
