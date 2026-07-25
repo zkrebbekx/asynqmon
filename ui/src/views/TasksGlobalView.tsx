@@ -1,14 +1,25 @@
-import { useEffect, useMemo, useState, useCallback } from "react";
+import { useEffect, useMemo, useState, useCallback, useRef } from "react";
 import { useSelector } from "react-redux";
-import { useNavigate } from "react-router-dom";
+import { useSearchParams } from "react-router-dom";
 import { Search, Play, Trash2, Archive, X, ChevronLeft, ChevronRight, Tag, AlertCircle, AlertTriangle } from "lucide-react";
 import { AppState, useAppDispatch } from "../store";
 import { listQueuesAsync } from "../actions/queuesActions";
 import * as api from "../api";
 import { TaskInfo } from "../api";
-import { taskDetailsPath } from "../paths";
 import { prettifyPayload, toErrorString, uuidPrefix } from "../utils";
 import { metaId, MetaPair } from "../lib/metadata";
+import {
+  ConsoleState,
+  CONSOLE_STATES,
+  PAGE_SIZES,
+  RESULT_MODES,
+  parseConsoleState,
+  serializeConsoleState,
+  parsePeek,
+  serializePeek,
+  serializeMetaPair,
+  PeekTarget,
+} from "../lib/urlstate";
 import { cn, clickableRowClass, clickableRowProps } from "../lib/utils";
 import { usePolling } from "../hooks";
 import { Input } from "../components/ui/input";
@@ -18,11 +29,11 @@ import { Alert, AlertDescription, AlertTitle } from "../components/ui/alert";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "../components/ui/tooltip";
 import SyntaxHighlighter from "../components/SyntaxHighlighter";
 import ConfirmDialog from "../components/ConfirmDialog";
+import TaskDrawer, { PivotRequest } from "../components/TaskDrawer";
 
 type ActionFn = (qname: string, taskId: string) => Promise<unknown>;
 
-const STATES = ["active", "pending", "aggregating", "scheduled", "retry", "archived", "completed"] as const;
-type State = (typeof STATES)[number];
+type State = (typeof CONSOLE_STATES)[number];
 
 // Per-row actions. Aggregating tasks have none here: acting on one requires
 // its group name, which the cross-queue search response doesn't carry —
@@ -49,11 +60,8 @@ const bulkCaps: Record<State, Array<"run" | "archive" | "delete" | "cancel">> = 
   completed: ["delete"],
 };
 
-const PAGE_SIZE = 20;
-
 export default function TasksGlobalView() {
   const dispatch = useAppDispatch();
-  const navigate = useNavigate();
   // Select the stable data reference and derive names in a memo — mapping
   // inside the selector returns a fresh array per dispatch and re-renders
   // this view on every poll tick of unrelated slices.
@@ -61,18 +69,63 @@ export default function TasksGlobalView() {
   const queues = useMemo(() => queuesData.map((q) => q.name), [queuesData]);
   const pollInterval = useSelector((s: AppState) => s.settings.pollInterval);
 
-  const [selectedQueue, setSelectedQueue] = useState<string>("all");
-  const [selectedState, setSelectedState] = useState<State>("pending");
-  const [search, setSearch] = useState("");
-  const [debouncedSearch, setDebouncedSearch] = useState("");
-  const [metaFilters, setMetaFilters] = useState<MetaPair[]>([]);
+  // All console state lives in the URL (build contract §2): back/forward
+  // works, refresh restores the view, and the URL alone reproduces it.
+  const [searchParams, setSearchParams] = useSearchParams();
+  const view = useMemo(() => parseConsoleState(searchParams), [searchParams]);
+  const peek = useMemo(() => parsePeek(searchParams.get("peek")), [searchParams]);
+
+  // updateView merges console-state changes into the URL, preserving params
+  // it doesn't own (peek). Discrete changes (tabs, chips, paging) push a
+  // history entry; keystroke-driven changes replace instead.
+  const updateView = useCallback(
+    (updates: Partial<ConsoleState>, opts?: { replace?: boolean }) => {
+      setSearchParams(
+        (prev) => serializeConsoleState({ ...parseConsoleState(prev), ...updates }, prev),
+        { replace: opts?.replace ?? false }
+      );
+    },
+    [setSearchParams]
+  );
+
+  // Drawer open/close/navigate is the `peek` param. Opening pushes (Back
+  // closes the drawer); prev/next and close replace so walking a result list
+  // doesn't bloat history.
+  const setPeekParam = useCallback(
+    (target: PeekTarget | null, opts?: { replace?: boolean }) => {
+      setSearchParams(
+        (prev) => {
+          const next = new URLSearchParams(prev);
+          if (target) next.set("peek", serializePeek(target));
+          else next.delete("peek");
+          return next;
+        },
+        { replace: opts?.replace ?? false }
+      );
+    },
+    [setSearchParams]
+  );
+
+  // The search box needs immediate local echo; the URL write is debounced so
+  // typing doesn't hammer the server-side scan or spam history (replace).
+  const [searchInput, setSearchInput] = useState(view.q);
+  useEffect(() => {
+    // Sync from the URL when it changes externally (back/forward, pivots).
+    setSearchInput(view.q);
+  }, [view.q]);
+  useEffect(() => {
+    if (searchInput === view.q) return;
+    const id = setTimeout(() => updateView({ q: searchInput, page: 0 }, { replace: true }), 300);
+    return () => clearTimeout(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchInput]);
+
   const [tasks, setTasks] = useState<TaskInfo[]>([]);
   const [loading, setLoading] = useState(true);
   const [total, setTotal] = useState(0);
   const [truncated, setTruncated] = useState(false);
   const [facets, setFacets] = useState<{ key: string; value: string; count: number }[]>([]);
   const [error, setError] = useState("");
-  const [page, setPage] = useState(0);
   // Failure-analytics groupings (only for retry/archived).
   const [errorGroups, setErrorGroups] = useState<{ label: string; count: number }[]>([]);
   const [typeGroups, setTypeGroups] = useState<{ label: string; count: number }[]>([]);
@@ -82,51 +135,59 @@ export default function TasksGlobalView() {
   // Row-level delete confirmation target.
   const [confirmDelete, setConfirmDelete] = useState<TaskInfo | null>(null);
 
+  // After a drawer pivot, close the drawer if the peeked task fell out of
+  // the visible results (kept open when it survived the new filter).
+  const pivotPending = useRef(false);
+  const peekRef = useRef(peek);
+  peekRef.current = peek;
+
   useEffect(() => {
     dispatch(listQueuesAsync());
   }, [dispatch]);
 
-  // Debounce the search box so typing doesn't hammer the server-side scan.
-  useEffect(() => {
-    const id = setTimeout(() => setDebouncedSearch(search), 300);
-    return () => clearTimeout(id);
-  }, [search]);
-
-  const metaParam = metaFilters.map((p) => `${p.key}:${p.value}`);
+  const metaParam = view.meta.map(serializeMetaPair);
   const metaKey = metaParam.join("|");
 
   const fetchTasks = useCallback(async () => {
     try {
       const resp = await api.searchTasks({
-        queue: selectedQueue,
-        state: selectedState,
-        q: debouncedSearch,
+        queue: view.queue,
+        state: view.state,
+        q: view.q,
         meta: metaParam,
-        page: page + 1,
-        size: PAGE_SIZE,
+        page: view.page + 1,
+        size: view.size,
       });
-      setTasks(resp.tasks ?? []);
+      const rows = resp.tasks ?? [];
+      setTasks(rows);
       setTotal(resp.total);
       setTruncated(resp.truncated);
       setError("");
+      if (pivotPending.current) {
+        pivotPending.current = false;
+        const pk = peekRef.current;
+        if (pk && !rows.some((t) => t.id === pk.id && t.queue === pk.queue)) {
+          setPeekParam(null, { replace: true });
+        }
+      }
     } catch (e) {
       setError(toErrorString(e));
     }
     setLoading(false);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedQueue, selectedState, debouncedSearch, metaKey, page]);
+  }, [view.queue, view.state, view.q, metaKey, view.page, view.size]);
 
   // usePolling gives pause-on-hidden-tab and the shared "Updated Ns ago"
   // indicator for free; the fetch key refetches immediately on filter change.
-  usePolling(fetchTasks, pollInterval, [selectedQueue, selectedState, debouncedSearch, metaKey, page]);
+  usePolling(fetchTasks, pollInterval, [view.queue, view.state, view.q, metaKey, view.page, view.size]);
 
   // Global metadata facets (across the whole filtered set, not just this page).
   const fetchFacets = useCallback(async () => {
     try {
       const resp = await api.taskMetadata({
-        queue: selectedQueue,
-        state: selectedState,
-        q: debouncedSearch,
+        queue: view.queue,
+        state: view.state,
+        q: view.q,
         meta: metaParam,
       });
       setFacets(resp.facets);
@@ -134,24 +195,27 @@ export default function TasksGlobalView() {
       setFacets([]);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedQueue, selectedState, debouncedSearch, metaKey]);
+  }, [view.queue, view.state, view.q, metaKey]);
 
   useEffect(() => {
     fetchFacets();
   }, [fetchFacets]);
 
-  // Failure analytics: group retry/archived tasks by error + type.
-  const isFailureState = selectedState === "retry" || selectedState === "archived";
+  // Failure analytics: group retry/archived tasks by error + type. In a
+  // group result mode the groups ARE the result set, so fetch more of them.
+  const isFailureState = view.state === "retry" || view.state === "archived";
+  const isGroupMode = isFailureState && view.mode !== "rows";
   const fetchAnalytics = useCallback(async () => {
     if (!isFailureState) {
       setErrorGroups([]);
       setTypeGroups([]);
       return;
     }
+    const limit = isGroupMode ? 50 : 8;
     try {
       const [byError, byType] = await Promise.all([
-        api.taskAggregate({ queue: selectedQueue, state: selectedState, q: debouncedSearch, meta: metaParam, by: "error", limit: 8 }),
-        api.taskAggregate({ queue: selectedQueue, state: selectedState, q: debouncedSearch, meta: metaParam, by: "type", limit: 8 }),
+        api.taskAggregate({ queue: view.queue, state: view.state, q: view.q, meta: metaParam, by: "error", limit }),
+        api.taskAggregate({ queue: view.queue, state: view.state, q: view.q, meta: metaParam, by: "type", limit }),
       ]);
       setErrorGroups(byError.groups);
       setTypeGroups(byType.groups);
@@ -160,42 +224,46 @@ export default function TasksGlobalView() {
       setTypeGroups([]);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isFailureState, selectedQueue, selectedState, debouncedSearch, metaKey]);
+  }, [isFailureState, isGroupMode, view.queue, view.state, view.q, metaKey]);
 
   useEffect(() => {
     fetchAnalytics();
   }, [fetchAnalytics]);
 
-  // Reset to first page when filters change (page itself is excluded), and
-  // drop the now-mismatched rows so the old filter's results don't linger
-  // while the new ones load.
+  // Drop the now-mismatched rows when the filter changes so the old filter's
+  // results don't linger while the new ones load. (The page itself is URL
+  // state: filter-changing writes reset it to 0 at the source.)
   useEffect(() => {
-    setPage(0);
     setTasks([]);
     setLoading(true);
-  }, [selectedQueue, selectedState, debouncedSearch, metaKey]);
+  }, [view.queue, view.state, view.q, metaKey, view.size]);
 
   // Chips = global facets minus already-active filters.
-  const activeIds = new Set(metaFilters.map(metaId));
+  const activeIds = new Set(view.meta.map(metaId));
   const chips = useMemo(
     () => facets.filter((p) => !activeIds.has(metaId(p))),
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [facets, metaKey]
   );
 
-  const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
+  const totalPages = Math.max(1, Math.ceil(total / view.size));
 
   // Clamp the page when the filtered total shrinks (bulk actions, drains) so
   // the user is never stranded on an empty out-of-range page.
   useEffect(() => {
-    if (page > totalPages - 1) setPage(totalPages - 1);
-  }, [page, totalPages]);
+    if (!loading && view.page > totalPages - 1) {
+      updateView({ page: totalPages - 1 }, { replace: true });
+    }
+  }, [loading, view.page, totalPages, updateView]);
 
-  const addFilter = (p: MetaPair) => setMetaFilters((prev) => [...prev, p]);
+  const addFilter = (p: MetaPair) => {
+    if (view.meta.some((x) => metaId(x) === metaId(p))) return;
+    updateView({ meta: [...view.meta, p], page: 0 });
+  };
   const removeFilter = (p: MetaPair) =>
-    setMetaFilters((prev) => prev.filter((x) => metaId(x) !== metaId(p)));
+    updateView({ meta: view.meta.filter((x) => metaId(x) !== metaId(p)), page: 0 });
 
-  const acts = actionFns[selectedState];
+  const acts = actionFns[view.state];
   const runAction = async (fn: ActionFn, queue: string, id: string) => {
     try {
       await fn(queue, id);
@@ -210,9 +278,9 @@ export default function TasksGlobalView() {
     setBulkBusy(true);
     try {
       await api.bulkFilteredTasks({
-        queue: selectedQueue,
-        state: selectedState,
-        q: debouncedSearch,
+        queue: view.queue,
+        state: view.state,
+        q: view.q,
         meta: metaParam,
         action,
       });
@@ -227,11 +295,25 @@ export default function TasksGlobalView() {
     fetchAnalytics();
   };
 
+  // Drawer pivots ("find all like this") compose into the console filters.
+  const handlePivot = (p: PivotRequest) => {
+    pivotPending.current = true;
+    const updates: Partial<ConsoleState> = { page: 0 };
+    if (p.q !== undefined) updates.q = p.q;
+    if (p.queue) updates.queue = p.queue;
+    if (p.meta && !view.meta.some((x) => metaId(x) === metaId(p.meta!))) {
+      updates.meta = [...view.meta, p.meta];
+    }
+    updateView(updates);
+  };
+
   // Which bulk actions are valid for the current state.
-  const bulkActions = bulkCaps[selectedState].map((action) => ({
+  const bulkActions = bulkCaps[view.state].map((action) => ({
     action,
     label: action.charAt(0).toUpperCase() + action.slice(1),
   }));
+
+  const groupRows = view.mode === "group:error" ? errorGroups : typeGroups;
 
   return (
     <div className="max-w-7xl mx-auto px-4 py-6 space-y-4">
@@ -242,8 +324,8 @@ export default function TasksGlobalView() {
         <div className="flex items-center gap-1.5">
           <span className="text-xs text-[hsl(var(--muted-foreground))]">Queue</span>
           <select
-            value={selectedQueue}
-            onChange={(e) => setSelectedQueue(e.target.value)}
+            value={view.queue}
+            onChange={(e) => updateView({ queue: e.target.value, page: 0 })}
             className="h-8 rounded-md border border-[hsl(var(--input))] bg-[hsl(var(--background))] px-2 text-xs"
           >
             <option value="all">All queues</option>
@@ -254,29 +336,49 @@ export default function TasksGlobalView() {
         </div>
 
         <div className="flex items-center gap-1 flex-wrap">
-          {STATES.map((st) => (
+          {CONSOLE_STATES.map((st) => (
             <button
               key={st}
-              onClick={() => setSelectedState(st)}
+              onClick={() => updateView({ state: st, page: 0 })}
               className={cn(
                 "inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-medium border transition-colors capitalize",
-                selectedState === st
+                view.state === st
                   ? "bg-[hsl(var(--primary))] text-[hsl(var(--primary-foreground))] border-[hsl(var(--primary))]"
                   : "border-[hsl(var(--border))] text-[hsl(var(--muted-foreground))] hover:border-[hsl(var(--primary))] hover:text-[hsl(var(--foreground))]"
               )}
             >
               {st}
-              {selectedState === st && <span className="opacity-70">{total}</span>}
+              {view.state === st && <span className="opacity-70">{total}</span>}
             </button>
           ))}
         </div>
+
+        {/* Result mode (failure states only — group-by error/type) */}
+        {isFailureState && (
+          <div className="flex items-center gap-0.5 rounded-full border border-[hsl(var(--border))] p-0.5">
+            {RESULT_MODES.map((m) => (
+              <button
+                key={m}
+                onClick={() => updateView({ mode: m })}
+                className={cn(
+                  "px-2.5 py-0.5 rounded-full text-xs transition-colors",
+                  view.mode === m
+                    ? "bg-[hsl(var(--primary))]/10 text-[hsl(var(--primary))] font-medium"
+                    : "text-[hsl(var(--muted-foreground))] hover:text-[hsl(var(--foreground))]"
+                )}
+              >
+                {m === "rows" ? "rows" : m === "group:error" ? "group: error" : "group: type"}
+              </button>
+            ))}
+          </div>
+        )}
 
         <div className="relative ml-auto">
           <Search size={13} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-[hsl(var(--muted-foreground))]" />
           <Input
             placeholder="Search name, queue, metadata"
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
+            value={searchInput}
+            onChange={(e) => setSearchInput(e.target.value)}
             className="pl-7 h-8 w-64 text-xs"
           />
         </div>
@@ -285,7 +387,7 @@ export default function TasksGlobalView() {
       {/* Metadata filter chips */}
       <div className="flex flex-wrap items-center gap-1.5">
         <Tag size={13} className="text-[hsl(var(--muted-foreground))]" />
-        {metaFilters.map((p) => (
+        {view.meta.map((p) => (
           <button
             key={metaId(p)}
             onClick={() => removeFilter(p)}
@@ -305,13 +407,13 @@ export default function TasksGlobalView() {
             <span className="opacity-60">{p.count}</span>
           </button>
         ))}
-        {metaFilters.length === 0 && chips.length === 0 && (
+        {view.meta.length === 0 && chips.length === 0 && (
           <span className="text-xs text-[hsl(var(--muted-foreground))]">No metadata to filter on</span>
         )}
       </div>
 
-      {/* Failure analytics (retry/archived) */}
-      {isFailureState && (errorGroups.length > 0 || typeGroups.length > 0) && (
+      {/* Failure analytics cards (rows mode; group mode shows the full table) */}
+      {isFailureState && !isGroupMode && (errorGroups.length > 0 || typeGroups.length > 0) && (
         <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
           <div className="rounded-lg border border-[hsl(var(--border))] bg-[hsl(var(--card))] p-4">
             <h3 className="mb-2 text-sm font-semibold">Top errors</h3>
@@ -332,7 +434,7 @@ export default function TasksGlobalView() {
               {typeGroups.map((g) => (
                 <button
                   key={g.label}
-                  onClick={() => setSearch(g.label)}
+                  onClick={() => updateView({ q: g.label, page: 0 })}
                   className="flex w-full items-center justify-between gap-3 text-xs hover:text-[hsl(var(--primary))]"
                   title={`Filter by ${g.label}`}
                 >
@@ -394,129 +496,200 @@ export default function TasksGlobalView() {
         </div>
       )}
 
-      {/* Table */}
-      <div className="rounded-lg border border-[hsl(var(--border))] bg-[hsl(var(--card))]">
-        <Table>
-          <TableHeader>
-            <TableRow>
-              <TableHead>ID</TableHead>
-              <TableHead>Queue</TableHead>
-              <TableHead>Type</TableHead>
-              <TableHead>Payload</TableHead>
-              {!window.READ_ONLY && <TableHead className="text-center">Actions</TableHead>}
-            </TableRow>
-          </TableHeader>
-          <TableBody>
-            {loading && tasks.length === 0 ? (
-              // Skeleton rows while the (re)filtered set loads, so the empty
-              // state doesn't flash before data arrives.
-              Array.from({ length: 5 }, (_, i) => (
-                <TableRow key={`skeleton-${i}`}>
-                  {Array.from({ length: window.READ_ONLY ? 4 : 5 }, (_, j) => (
-                    <TableCell key={j}>
-                      <div className="h-4 animate-pulse rounded bg-[hsl(var(--muted))]" />
-                    </TableCell>
-                  ))}
-                </TableRow>
-              ))
-            ) : tasks.length === 0 ? (
+      {isGroupMode ? (
+        /* Group-by result mode: the aggregate IS the result set. */
+        <div className="rounded-lg border border-[hsl(var(--border))] bg-[hsl(var(--card))]">
+          <Table>
+            <TableHeader>
               <TableRow>
-                <TableCell colSpan={window.READ_ONLY ? 4 : 5} className="text-center py-8 text-[hsl(var(--muted-foreground))]">
-                  No tasks
-                </TableCell>
+                <TableHead>{view.mode === "group:error" ? "Error" : "Type"}</TableHead>
+                <TableHead className="text-right">Count</TableHead>
               </TableRow>
-            ) : (
-              tasks.map((t) => (
-                <TableRow
-                  key={`${t.queue}:${t.id}`}
-                  className={clickableRowClass}
-                  {...clickableRowProps(() => navigate(taskDetailsPath(t.queue, t.id)))}
-                >
-                  <TableCell className="font-mono text-xs">{uuidPrefix(t.id)}</TableCell>
-                  <TableCell className="text-xs">{t.queue}</TableCell>
-                  <TableCell className="text-xs font-medium">{t.type}</TableCell>
-                  <TableCell className="max-w-sm">
-                    <div className="max-h-16 overflow-hidden text-xs">
-                      <SyntaxHighlighter>{prettifyPayload(t.payload)}</SyntaxHighlighter>
-                    </div>
+            </TableHeader>
+            <TableBody>
+              {groupRows.length === 0 ? (
+                <TableRow>
+                  <TableCell colSpan={2} className="text-center py-8 text-[hsl(var(--muted-foreground))]">
+                    {loading ? "Loading…" : "No groups"}
                   </TableCell>
-                  {!window.READ_ONLY && (
-                    <TableCell className="text-center" onClick={(e) => e.stopPropagation()}>
-                      <TooltipProvider>
-                        <div className="flex items-center justify-center gap-1">
-                          {acts.run && (
-                            <Tooltip><TooltipTrigger asChild>
-                              <Button size="icon" variant="ghost" className="h-7 w-7" onClick={() => runAction(acts.run!, t.queue, t.id)}>
-                                <Play size={13} />
-                              </Button>
-                            </TooltipTrigger><TooltipContent>Run now</TooltipContent></Tooltip>
-                          )}
-                          {acts.cancel && (
-                            <Tooltip><TooltipTrigger asChild>
-                              <Button size="icon" variant="ghost" className="h-7 w-7" onClick={() => runAction(acts.cancel!, t.queue, t.id)}>
-                                <X size={13} />
-                              </Button>
-                            </TooltipTrigger><TooltipContent>Cancel</TooltipContent></Tooltip>
-                          )}
-                          {acts.archive && (
-                            <Tooltip><TooltipTrigger asChild>
-                              <Button size="icon" variant="ghost" className="h-7 w-7" onClick={() => runAction(acts.archive!, t.queue, t.id)}>
-                                <Archive size={13} />
-                              </Button>
-                            </TooltipTrigger><TooltipContent>Archive</TooltipContent></Tooltip>
-                          )}
-                          {acts.delete && (
-                            <Tooltip><TooltipTrigger asChild>
-                              <Button size="icon" variant="ghost" className="h-7 w-7 text-red-500" onClick={() => setConfirmDelete(t)}>
-                                <Trash2 size={13} />
-                              </Button>
-                            </TooltipTrigger><TooltipContent>Delete</TooltipContent></Tooltip>
-                          )}
-                        </div>
-                      </TooltipProvider>
-                    </TableCell>
-                  )}
                 </TableRow>
-              ))
-            )}
-          </TableBody>
-        </Table>
-
-        <ConfirmDialog
-          open={confirmDelete !== null}
-          title="Delete Task"
-          description={
-            <>
-              Delete task <strong>{confirmDelete ? uuidPrefix(confirmDelete.id) : ""}</strong> from
-              queue <strong>{confirmDelete?.queue}</strong>? This action cannot be undone.
-            </>
-          }
-          onConfirm={() => {
-            if (confirmDelete && acts.delete) {
-              runAction(acts.delete, confirmDelete.queue, confirmDelete.id);
-            }
-            setConfirmDelete(null);
-          }}
-          onClose={() => setConfirmDelete(null)}
-        />
-
-        {/* Pagination */}
-        {total > PAGE_SIZE && (
-          <div className="flex items-center justify-between px-4 py-3 border-t border-[hsl(var(--border))]">
-            <span className="text-xs text-[hsl(var(--muted-foreground))]">
-              {page * PAGE_SIZE + 1}–{Math.min((page + 1) * PAGE_SIZE, total)} of {truncated ? `${total}+` : total}
-            </span>
-            <div className="flex items-center gap-1">
-              <Button size="icon" variant="ghost" className="h-7 w-7" disabled={page === 0} onClick={() => setPage(page - 1)}>
-                <ChevronLeft size={14} />
-              </Button>
-              <Button size="icon" variant="ghost" className="h-7 w-7" disabled={page >= totalPages - 1} onClick={() => setPage(page + 1)}>
-                <ChevronRight size={14} />
-              </Button>
-            </div>
+              ) : (
+                groupRows.map((g) => (
+                  <TableRow
+                    key={g.label}
+                    className={view.mode === "group:type" ? clickableRowClass : undefined}
+                    {...(view.mode === "group:type"
+                      ? clickableRowProps(() => updateView({ q: g.label, mode: "rows", page: 0 }))
+                      : {})}
+                  >
+                    <TableCell className={cn("text-xs", view.mode === "group:error" && "text-red-500")}>
+                      {g.label || <span className="italic opacity-60">(empty)</span>}
+                    </TableCell>
+                    <TableCell className="text-right text-xs tabular-nums">{g.count}</TableCell>
+                  </TableRow>
+                ))
+              )}
+            </TableBody>
+          </Table>
+          <div className="px-4 py-2 border-t border-[hsl(var(--border))] text-xs text-[hsl(var(--muted-foreground))]">
+            Group counts inherit the scan cap — narrow the filter for exact totals.
+            {view.mode === "group:type" && " Click a type to open it as rows."}
           </div>
-        )}
-      </div>
+        </div>
+      ) : (
+        /* Rows result mode */
+        <div className="rounded-lg border border-[hsl(var(--border))] bg-[hsl(var(--card))]">
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>ID</TableHead>
+                <TableHead>Queue</TableHead>
+                <TableHead>Type</TableHead>
+                <TableHead>Payload</TableHead>
+                {!window.READ_ONLY && <TableHead className="text-center">Actions</TableHead>}
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {loading && tasks.length === 0 ? (
+                // Skeleton rows while the (re)filtered set loads, so the empty
+                // state doesn't flash before data arrives.
+                Array.from({ length: 5 }, (_, i) => (
+                  <TableRow key={`skeleton-${i}`}>
+                    {Array.from({ length: window.READ_ONLY ? 4 : 5 }, (_, j) => (
+                      <TableCell key={j}>
+                        <div className="h-4 animate-pulse rounded bg-[hsl(var(--muted))]" />
+                      </TableCell>
+                    ))}
+                  </TableRow>
+                ))
+              ) : tasks.length === 0 ? (
+                <TableRow>
+                  <TableCell colSpan={window.READ_ONLY ? 4 : 5} className="text-center py-8 text-[hsl(var(--muted-foreground))]">
+                    No tasks
+                  </TableCell>
+                </TableRow>
+              ) : (
+                tasks.map((t) => (
+                  <TableRow
+                    key={`${t.queue}:${t.id}`}
+                    className={cn(
+                      clickableRowClass,
+                      peek && peek.id === t.id && peek.queue === t.queue && "bg-[hsl(var(--primary))]/5"
+                    )}
+                    // Rows open the peek drawer (deep-linkable) instead of
+                    // navigating away — detail is a drawer, never a
+                    // context-losing navigation.
+                    {...clickableRowProps(() => setPeekParam({ queue: t.queue, id: t.id }))}
+                  >
+                    <TableCell className="font-mono text-xs">{uuidPrefix(t.id)}</TableCell>
+                    <TableCell className="text-xs">{t.queue}</TableCell>
+                    <TableCell className="text-xs font-medium">{t.type}</TableCell>
+                    <TableCell className="max-w-sm">
+                      <div className="max-h-16 overflow-hidden text-xs">
+                        <SyntaxHighlighter>{prettifyPayload(t.payload)}</SyntaxHighlighter>
+                      </div>
+                    </TableCell>
+                    {!window.READ_ONLY && (
+                      <TableCell className="text-center" onClick={(e) => e.stopPropagation()}>
+                        <TooltipProvider>
+                          <div className="flex items-center justify-center gap-1">
+                            {acts.run && (
+                              <Tooltip><TooltipTrigger asChild>
+                                <Button size="icon" variant="ghost" className="h-7 w-7" onClick={() => runAction(acts.run!, t.queue, t.id)}>
+                                  <Play size={13} />
+                                </Button>
+                              </TooltipTrigger><TooltipContent>Run now</TooltipContent></Tooltip>
+                            )}
+                            {acts.cancel && (
+                              <Tooltip><TooltipTrigger asChild>
+                                <Button size="icon" variant="ghost" className="h-7 w-7" onClick={() => runAction(acts.cancel!, t.queue, t.id)}>
+                                  <X size={13} />
+                                </Button>
+                              </TooltipTrigger><TooltipContent>Cancel</TooltipContent></Tooltip>
+                            )}
+                            {acts.archive && (
+                              <Tooltip><TooltipTrigger asChild>
+                                <Button size="icon" variant="ghost" className="h-7 w-7" onClick={() => runAction(acts.archive!, t.queue, t.id)}>
+                                  <Archive size={13} />
+                                </Button>
+                              </TooltipTrigger><TooltipContent>Archive</TooltipContent></Tooltip>
+                            )}
+                            {acts.delete && (
+                              <Tooltip><TooltipTrigger asChild>
+                                <Button size="icon" variant="ghost" className="h-7 w-7 text-red-500" onClick={() => setConfirmDelete(t)}>
+                                  <Trash2 size={13} />
+                                </Button>
+                              </TooltipTrigger><TooltipContent>Delete</TooltipContent></Tooltip>
+                            )}
+                          </div>
+                        </TooltipProvider>
+                      </TableCell>
+                    )}
+                  </TableRow>
+                ))
+              )}
+            </TableBody>
+          </Table>
+
+          <ConfirmDialog
+            open={confirmDelete !== null}
+            title="Delete Task"
+            description={
+              <>
+                Delete task <strong>{confirmDelete ? uuidPrefix(confirmDelete.id) : ""}</strong> from
+                queue <strong>{confirmDelete?.queue}</strong>? This action cannot be undone.
+              </>
+            }
+            onConfirm={() => {
+              if (confirmDelete && acts.delete) {
+                runAction(acts.delete, confirmDelete.queue, confirmDelete.id);
+              }
+              setConfirmDelete(null);
+            }}
+            onClose={() => setConfirmDelete(null)}
+          />
+
+          {/* Pagination + page size */}
+          {total > 0 && (
+            <div className="flex items-center justify-between px-4 py-3 border-t border-[hsl(var(--border))]">
+              <div className="flex items-center gap-3">
+                <span className="text-xs text-[hsl(var(--muted-foreground))]">
+                  {view.page * view.size + 1}–{Math.min((view.page + 1) * view.size, total)} of {truncated ? `${total}+` : total}
+                </span>
+                <select
+                  value={view.size}
+                  onChange={(e) => updateView({ size: Number(e.target.value), page: 0 })}
+                  aria-label="Page size"
+                  className="h-6 rounded-md border border-[hsl(var(--input))] bg-[hsl(var(--background))] px-1 text-xs"
+                >
+                  {PAGE_SIZES.map((s) => (
+                    <option key={s} value={s}>{s} / page</option>
+                  ))}
+                </select>
+              </div>
+              <div className="flex items-center gap-1">
+                <Button size="icon" variant="ghost" className="h-7 w-7" disabled={view.page === 0} onClick={() => updateView({ page: view.page - 1 })}>
+                  <ChevronLeft size={14} />
+                </Button>
+                <Button size="icon" variant="ghost" className="h-7 w-7" disabled={view.page >= totalPages - 1} onClick={() => updateView({ page: view.page + 1 })}>
+                  <ChevronRight size={14} />
+                </Button>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Task peek drawer (deep-linkable via the `peek` param) */}
+      {peek && (
+        <TaskDrawer
+          peek={peek}
+          resultList={tasks}
+          onClose={() => setPeekParam(null, { replace: true })}
+          onPeek={(target) => setPeekParam(target, { replace: true })}
+          onPivot={handlePivot}
+        />
+      )}
     </div>
   );
 }

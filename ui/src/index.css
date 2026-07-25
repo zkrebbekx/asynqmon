@@ -47,6 +47,73 @@
   }
 }
 
+/* ── Fleet Console design tokens ─────────────────────────────────────────
+   Palette from the approved fleet-console mockup, namespaced --fc-* so they
+   coexist with the shadcn tokens above. Raw color values (not HSL triplets):
+   new Fleet Console surfaces consume them directly via var(--fc-*).
+   Light theme is re-picked, not inverted. The steel-cyan accent is reserved
+   for interaction; status colors are always paired with a form cue.
+   New components use these — existing screens keep the shadcn tokens. */
+@layer base {
+  :root {
+    --fc-bg: #F2F4F7;
+    --fc-panel: #FFFFFF;
+    --fc-raise: #E9EDF2;
+    --fc-line: #D5DBE4;
+    --fc-line2: #E2E7EE;
+    --fc-ink: #1D2430;
+    --fc-ink2: #566071;
+    --fc-ink3: #8B95A7;
+    --fc-acc: #0E6EAD;
+    --fc-acc-dim: #7FB3D4;
+    --fc-acc-bg: rgba(14, 110, 173, 0.1);
+    --fc-good: #1F8A4C;
+    --fc-warn: #B07600;
+    --fc-crit: #C22F45;
+    --fc-good-bg: rgba(31, 138, 76, 0.11);
+    --fc-warn-bg: rgba(176, 118, 0, 0.12);
+    --fc-crit-bg: rgba(194, 47, 69, 0.1);
+    --fc-shadow: 0 12px 32px rgba(29, 36, 48, 0.14);
+  }
+
+  .dark {
+    --fc-bg: #12151B;
+    --fc-panel: #191D25;
+    --fc-raise: #20252F;
+    --fc-line: #2B323E;
+    --fc-line2: #242B36;
+    --fc-ink: #DDE3EC;
+    --fc-ink2: #8B95A7;
+    --fc-ink3: #5C6575;
+    --fc-acc: #58A6D6;
+    --fc-acc-dim: #2C5A75;
+    --fc-acc-bg: rgba(88, 166, 214, 0.12);
+    --fc-good: #4CBB78;
+    --fc-warn: #E0A32E;
+    --fc-crit: #E25D4A;
+    --fc-good-bg: rgba(76, 187, 120, 0.13);
+    --fc-warn-bg: rgba(224, 163, 46, 0.13);
+    --fc-crit-bg: rgba(226, 93, 74, 0.13);
+    --fc-shadow: 0 12px 32px rgba(0, 0, 0, 0.45);
+  }
+}
+
+/* Fleet Console motion: current-state pulse in the journey graph and the
+   task-drawer slide-in. Both disabled under prefers-reduced-motion. */
+@keyframes fc-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
+}
+@keyframes fc-slide-in {
+  from { transform: translateX(24px); opacity: 0; }
+  to { transform: none; opacity: 1; }
+}
+.fc-pulse { animation: fc-pulse 1.6s ease-in-out infinite; }
+.fc-slide-in { animation: fc-slide-in 0.18s ease; }
+@media (prefers-reduced-motion: reduce) {
+  .fc-pulse, .fc-slide-in { animation: none; }
+}
+
 @layer base {
   * {
     border-color: hsl(var(--border));
