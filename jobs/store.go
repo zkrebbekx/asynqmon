@@ -635,6 +635,9 @@ type AuditEntry struct {
 	Scope        Scope  `json:"scope"`
 	Reason       string `json:"reason"`
 	JobID        string `json:"job_id"`
+	// TaskID is the subject task for single-task events (§5.10 enqueue);
+	// empty on job-level entries.
+	TaskID       string `json:"task_id"`
 	PreviewCount int64  `json:"preview_count"`
 	Acted        int64  `json:"acted"`
 	Skipped      int64  `json:"skipped"`
@@ -644,8 +647,9 @@ type AuditEntry struct {
 
 // Audit events.
 const (
-	AuditJobCreated  = "job_created"
-	AuditJobFinished = "job_finished" // done, failed, or canceled — final counts attached
+	AuditJobCreated   = "job_created"
+	AuditJobFinished  = "job_finished" // done, failed, or canceled — final counts attached
+	AuditTaskEnqueued = "task_enqueued" // §5.10 single-task enqueue; TaskID set, Acted = 1
 )
 
 // AppendAudit writes one audit entry (XADD, MAXLEN ~10000).
@@ -666,6 +670,7 @@ func (s *Store) AppendAudit(ctx context.Context, e AuditEntry) error {
 			"scope":   string(scopeJSON),
 			"reason":  e.Reason,
 			"job_id":  e.JobID,
+			"task_id": e.TaskID,
 			"preview": strconv.FormatInt(e.PreviewCount, 10),
 			"acted":   strconv.FormatInt(e.Acted, 10),
 			"skipped": strconv.FormatInt(e.Skipped, 10),
@@ -698,6 +703,7 @@ func (s *Store) ReadAudit(ctx context.Context, limit int64) ([]AuditEntry, error
 		e.Verb = get("verb")
 		e.Reason = get("reason")
 		e.JobID = get("job_id")
+		e.TaskID = get("task_id")
 		e.At = get("at")
 		e.PreviewCount = parseInt64(get("preview"))
 		e.Acted = parseInt64(get("acted"))

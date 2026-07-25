@@ -48,6 +48,10 @@ type Config struct {
 	TrustedProxies  string
 	RequireIdentity bool
 
+	// Enqueue capability (Fleet Console §5.10). Default off; always
+	// excluded in read-only mode.
+	EnableEnqueue bool
+
 	// Comma-separated list of origins allowed to make cross-origin requests.
 	// Empty (the default) means same-origin only.
 	CorsAllowedOrigins string
@@ -90,6 +94,7 @@ func parseFlags(progname string, args []string) (cfg *Config, output string, err
 	flags.StringVar(&conf.AuthHeader, "auth-header", getEnvDefaultString("AUTH_HEADER", ""), "reverse-proxy header resolved as the acting user for the audit log (e.g. X-Auth-Request-User)")
 	flags.StringVar(&conf.TrustedProxies, "trusted-proxies", getEnvDefaultString("TRUSTED_PROXIES", ""), "comma separated CIDRs the auth header is trusted from (empty: trusted from any peer)")
 	flags.BoolVar(&conf.RequireIdentity, "require-identity", getEnvOrDefaultBool("REQUIRE_IDENTITY", false), "refuse mutating requests that carry no resolvable identity")
+	flags.BoolVar(&conf.EnableEnqueue, "enable-enqueue", getEnvOrDefaultBool("ENABLE_ENQUEUE", false), "enable creating tasks from the web ui (POST /api/queues/{qname}/tasks); always excluded in read-only mode")
 	flags.StringVar(&conf.CorsAllowedOrigins, "cors-allowed-origins", getEnvDefaultString("CORS_ALLOWED_ORIGINS", ""), "comma separated list of origins allowed to make cross-origin requests (default: same-origin only)")
 
 	err = flags.Parse(args)
@@ -182,6 +187,7 @@ func main() {
 		AuthHeader:        cfg.AuthHeader,
 		TrustedProxies:    trustedProxies,
 		RequireIdentity:   cfg.RequireIdentity,
+		EnableEnqueue:     cfg.EnableEnqueue,
 	})
 	defer h.Close()
 
