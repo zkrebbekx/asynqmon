@@ -1,6 +1,7 @@
 package asynqmon
 
 import (
+	"context"
 	"embed"
 	"fmt"
 	"net/http"
@@ -10,6 +11,8 @@ import (
 	"github.com/gorilla/mux"
 	"github.com/hibiken/asynq"
 	"github.com/redis/go-redis/v9"
+
+	"github.com/hibiken/asynqmon/stats"
 )
 
 // Options are used to configure HTTPHandler.
@@ -43,6 +46,17 @@ type Options struct {
 
 	// Set ReadOnly to true to restrict user to view-only mode.
 	ReadOnly bool
+
+	// StatsInterval is how often the background fleet-stats sweeper refreshes
+	// the shared snapshot cache backing the /api/fleet endpoints.
+	//
+	// This field is optional. Default is 5s.
+	StatsInterval time.Duration
+
+	// StatsDisabled turns off the background fleet-stats sweeper. The
+	// /api/fleet endpoints then respond 503. Stats collection is read-only,
+	// so it stays enabled in ReadOnly mode unless disabled here explicitly.
+	StatsDisabled bool
 }
 
 // HTTPHandler is a http.Handler for asynqmon application.
@@ -74,9 +88,27 @@ func New(opts Options) *HTTPHandler {
 	// Remove tailing slash from RootPath.
 	opts.RootPath = strings.TrimSuffix(opts.RootPath, "/")
 
+	closers := []func() error{rc.Close, i.Close}
+
+	// The stats engine runs its sweeper only on the replica that wins the
+	// Redis lease; every other replica's engine stands by and serves reads
+	// from the shared cache, so starting it unconditionally is safe in
+	// multi-replica deployments (§5.13).
+	var statsEngine *stats.Engine
+	if !opts.StatsDisabled {
+		statsEngine = stats.NewEngine(stats.Config{
+			RedisClient: rc,
+			Inspector:   i,
+			Interval:    opts.StatsInterval,
+		})
+		statsEngine.Start(context.Background())
+		// Stop the engine before the redis clients it uses are closed.
+		closers = append([]func() error{func() error { statsEngine.Stop(); return nil }}, closers...)
+	}
+
 	return &HTTPHandler{
-		router:   muxRouter(opts, rc, i),
-		closers:  []func() error{rc.Close, i.Close},
+		router:   muxRouter(opts, rc, i, statsEngine),
+		closers:  closers,
 		rootPath: opts.RootPath,
 	}
 }
@@ -100,7 +132,7 @@ func (h *HTTPHandler) RootPath() string {
 //go:embed ui/build/*
 var staticContents embed.FS
 
-func muxRouter(opts Options, rc redis.UniversalClient, inspector *asynq.Inspector) *mux.Router {
+func muxRouter(opts Options, rc redis.UniversalClient, inspector *asynq.Inspector, statsEngine *stats.Engine) *mux.Router {
 	router := mux.NewRouter().PathPrefix(opts.RootPath).Subrouter()
 
 	var payloadFmt PayloadFormatter = DefaultPayloadFormatter
@@ -114,6 +146,13 @@ func muxRouter(opts Options, rc redis.UniversalClient, inspector *asynq.Inspecto
 	}
 
 	api := router.PathPrefix("/api").Subrouter()
+
+	// Fleet Console endpoints (stats cache; §5.1). These serve exclusively
+	// from the sweeper's snapshot cache — never per-queue Redis reads per
+	// request. The legacy GET /api/queues below stays untouched for the
+	// shipping dashboard; the new directory reads /api/fleet/queues.
+	api.HandleFunc("/fleet/overview", newFleetOverviewHandlerFunc(statsEngine)).Methods("GET")
+	api.HandleFunc("/fleet/queues", newFleetQueuesHandlerFunc(statsEngine)).Methods("GET")
 
 	// Queue endpoints.
 	api.HandleFunc("/queues", newListQueuesHandlerFunc(inspector)).Methods("GET")

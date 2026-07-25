@@ -4,6 +4,7 @@ import (
 	"crypto/tls"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
@@ -33,6 +34,8 @@ func TestParseFlags(t *testing.T) {
 				EnableMetricsExporter: false,
 				PrometheusServerAddr:  "",
 				ReadOnly:              false,
+				StatsInterval:         5 * time.Second,
+				DisableStats:          false,
 
 				Args: []string{},
 			},
