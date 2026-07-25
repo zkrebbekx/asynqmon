@@ -561,13 +561,10 @@ type ProgressWrite struct {
 // the job's current fencing token. Returns false when the fence moved on —
 // the caller must stop working the job immediately.
 func (s *Store) WriteProgress(ctx context.Context, id string, token int64, w ProgressWrite) (bool, error) {
-	// Capacity is only a hint; clamp it so pathological batch sizes cannot
-	// overflow the arithmetic (append grows past the hint regardless).
-	hint := 4 + 2*len(w.Fields) + len(w.Candidates) + len(w.Sample) + len(w.Failures)
-	if hint < 0 || hint > 1<<16 {
-		hint = 1 << 16
-	}
-	args := make([]interface{}, 0, hint)
+	// No capacity hint: batch sizes are runner-bounded, and computing a
+	// capacity from data-derived lengths is an overflow liability for zero
+	// measurable gain (append grows the slice regardless).
+	args := make([]interface{}, 0)
 	args = append(args, strconv.FormatInt(token, 10))
 	args = append(args, strconv.Itoa(len(w.Fields)))
 	for k, v := range w.Fields {

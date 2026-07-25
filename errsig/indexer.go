@@ -298,13 +298,9 @@ func (ix *Indexer) standDown() {
 
 // hsetCmd flattens a field map into one HSET command.
 func hsetCmd(key string, fields map[string]interface{}) leasefence.Cmd {
-	// Capacity is only a hint; clamp so an absurd field count cannot overflow
-	// the arithmetic.
-	hint := 2 + 2*len(fields)
-	if hint < 0 || hint > 1<<12 {
-		hint = 1 << 12
-	}
-	cmd := make(leasefence.Cmd, 0, hint)
+	// No capacity hint: field maps are small and fixed-shape, and a
+	// data-derived capacity is an overflow liability for no measurable gain.
+	cmd := make(leasefence.Cmd, 0)
 	cmd = append(cmd, "HSET", key)
 	for f, v := range fields {
 		cmd = append(cmd, f, v)

@@ -259,14 +259,15 @@ func execCursorPlan(ctx context.Context, rc redis.UniversalClient, insp *asynq.I
 
 	// size is clamped by the handler, but this function is the allocation
 	// site: bound it locally so no caller can turn a request parameter into
-	// an arbitrary allocation.
+	// an arbitrary allocation. No capacity hint — append growth on a page-
+	// sized slice is noise, and a request-derived capacity is a liability.
 	if size < 0 {
 		size = 0
 	}
 	if size > maxPageSize {
 		size = maxPageSize
 	}
-	tasks = make([]*searchTask, 0, size)
+	tasks = make([]*searchTask, 0)
 	var last aql.Cursor
 	exhausted := true
 
