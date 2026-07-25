@@ -184,6 +184,17 @@ func decodeInt(v string) int64 {
 	return n
 }
 
+// decodeIntSized parses a cache field destined for a plain int. The cache is
+// asynqmon-owned, but it lives in a shared Redis — a corrupted or hostile
+// value must degrade to zero, not wrap around in a narrowing conversion.
+func decodeIntSized(v string) int {
+	n, err := strconv.ParseInt(v, 10, 32)
+	if err != nil {
+		return 0
+	}
+	return int(n)
+}
+
 func encodeBool(b bool) string {
 	if b {
 		return "1"
@@ -234,7 +245,7 @@ func queueSnapshotFromHash(h map[string]string) *QueueSnapshot {
 		RetryDueSoon:       decodeInt(h["retry_due_5m"]),
 		PastDueScheduled:   decodeInt(h["past_due_scheduled"]),
 		OldestPendingSince: decodeTime(h["oldest_pending_since"]),
-		Consumers:          int(decodeInt(h["consumers"])),
+		Consumers:          decodeIntSized(h["consumers"]),
 		RefreshedAt:        decodeTime(h["refreshed_at"]),
 	}
 }
@@ -270,9 +281,9 @@ func (f *FleetSnapshot) toHash() map[string]interface{} {
 
 func fleetSnapshotFromHash(h map[string]string) *FleetSnapshot {
 	return &FleetSnapshot{
-		QueuesTotal:        int(decodeInt(h["queues_total"])),
-		PausedQueues:       int(decodeInt(h["paused_queues"])),
-		ZeroConsumerQueues: int(decodeInt(h["zero_consumer_queues"])),
+		QueuesTotal:        decodeIntSized(h["queues_total"]),
+		PausedQueues:       decodeIntSized(h["paused_queues"]),
+		ZeroConsumerQueues: decodeIntSized(h["zero_consumer_queues"]),
 		Pending:            decodeInt(h["pending"]),
 		Active:             decodeInt(h["active"]),
 		Scheduled:          decodeInt(h["scheduled"]),
@@ -284,15 +295,15 @@ func fleetSnapshotFromHash(h map[string]string) *FleetSnapshot {
 		FailedToday:        decodeInt(h["failed_today"]),
 		OrphanCandidates:   decodeInt(h["orphan_candidates"]),
 		PastDueScheduled:   decodeInt(h["past_due_scheduled"]),
-		Servers:            int(decodeInt(h["servers"])),
-		WorkersTotal:       int(decodeInt(h["workers_total"])),
-		WorkersBusy:        int(decodeInt(h["workers_busy"])),
+		Servers:            decodeIntSized(h["servers"]),
+		WorkersTotal:       decodeIntSized(h["workers_total"]),
+		WorkersBusy:        decodeIntSized(h["workers_busy"]),
 		RedisMemoryUsed:    decodeInt(h["redis_memory_used"]),
 		RedisMemoryMax:     decodeInt(h["redis_memory_max"]),
-		Tier:               int(decodeInt(h["tier"])),
-		CommandBudget:      int(decodeInt(h["command_budget"])),
-		HotSetSize:         int(decodeInt(h["hot_set_size"])),
-		FullRotationEstSec: int(decodeInt(h["full_rotation_est_s"])),
+		Tier:               decodeIntSized(h["tier"]),
+		CommandBudget:      decodeIntSized(h["command_budget"]),
+		HotSetSize:         decodeIntSized(h["hot_set_size"]),
+		FullRotationEstSec: decodeIntSized(h["full_rotation_est_s"]),
 		RefreshedAt:        decodeTime(h["refreshed_at"]),
 	}
 }

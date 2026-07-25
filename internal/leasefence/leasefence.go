@@ -176,7 +176,12 @@ func (f *Fence) Exec(ctx context.Context, token int64, cmds []Cmd) (bool, error)
 			end = len(cmds)
 		}
 		chunk := cmds[start:end]
-		args := make([]interface{}, 0, 2+len(chunk)*8)
+		// chunk is bounded by execChunk; the hint stays well inside int range.
+		hint := 2 + len(chunk)*8
+		if hint < 0 || hint > 2+execChunk*8 {
+			hint = 2 + execChunk*8
+		}
+		args := make([]interface{}, 0, hint)
 		args = append(args, strconv.FormatInt(token, 10), strconv.Itoa(len(chunk)))
 		for _, c := range chunk {
 			args = append(args, strconv.Itoa(len(c)))
