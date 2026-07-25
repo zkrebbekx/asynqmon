@@ -12,6 +12,8 @@ import (
 	"time"
 
 	"github.com/hibiken/asynq"
+
+	"github.com/hibiken/asynqmon/aql"
 )
 
 // ****************************************************************************
@@ -87,9 +89,10 @@ type Matcher interface {
 	Matches(ti *asynq.TaskInfo) bool
 }
 
-// Scope is the v1 predicate — exactly the existing search endpoint's
-// vocabulary (queue, state, free-text q, meta key:value filters) so the
-// console's current filter state converts 1:1 into a job scope.
+// Scope is the job predicate — the existing search endpoint's vocabulary
+// (queue, state, free-text q, meta key:value filters) plus, since phase 6,
+// an AQL query compiled through the Matcher seam. Legacy fields keep
+// working; when Aql is set it is ANDed with them.
 type Scope struct {
 	// Queue is a queue name, or ""/"all" for every queue.
 	Queue string `json:"queue"`
@@ -101,6 +104,13 @@ type Scope struct {
 	// Meta are "key:value" payload constraints (AND, top-level JSON scalars),
 	// in the same wire format the search endpoint accepts.
 	Meta []string `json:"meta"`
+	// Aql is the console's AQL query (phase 6, §3.4). Compiled via
+	// aql.CompileMatcher at enumeration/execution start; env-dependent
+	// predicates (running>, deadline_pct>, orphaned, pending_age>,
+	// group_age>) are rejected at job-create time because the runner
+	// re-verifies from TaskInfo alone. Relative durations anchor to the
+	// moment the matcher is compiled.
+	Aql string `json:"aql,omitempty"`
 }
 
 // scopeStates mirrors the search endpoint's searchable states.
@@ -139,6 +149,63 @@ func ValidateScopeVerb(s Scope, v Verb) string {
 	return ""
 }
 
+// ValidateAql checks the scope's AQL clause: it must parse, be answerable
+// in the scope's state, and compile to an env-free matcher (the runner's
+// re-verification seam). Returns the positioned rejection for the HTTP 400
+// body, or nil.
+func (s Scope) ValidateAql() *aql.ParseError {
+	if s.Aql == "" {
+		return nil
+	}
+	q, perr := aql.Parse(s.Aql)
+	if perr != nil {
+		return perr
+	}
+	if st, ok := q.ExplicitState(); ok && st != s.State {
+		return &aql.ParseError{
+			Msg:  "scope state " + strconv.Quote(s.State) + " conflicts with the query's state=" + st,
+			Pos:  0,
+			Hint: "the scope's state and the query's state= clause must agree",
+		}
+	}
+	if _, perr := aql.CompileMatcher(q, s.State, time.Now()); perr != nil {
+		return perr
+	}
+	return nil
+}
+
+// Compile builds the scope's full predicate once: the legacy queue/state/
+// free-text/meta checks plus the compiled AQL matcher. The runner compiles
+// at enumeration/execution start so per-task re-verification never re-parses.
+func (s Scope) Compile() (Matcher, *aql.ParseError) {
+	var aqlMatch func(*asynq.TaskInfo) bool
+	if s.Aql != "" {
+		q, perr := aql.Parse(s.Aql)
+		if perr != nil {
+			return nil, perr
+		}
+		m, perr := aql.CompileMatcher(q, s.State, time.Now())
+		if perr != nil {
+			return nil, perr
+		}
+		aqlMatch = m
+	}
+	return compiledScope{scope: s, aqlMatch: aqlMatch}, nil
+}
+
+// compiledScope is Scope's Matcher: legacy predicate AND compiled AQL.
+type compiledScope struct {
+	scope    Scope
+	aqlMatch func(*asynq.TaskInfo) bool
+}
+
+func (m compiledScope) Matches(ti *asynq.TaskInfo) bool {
+	if !m.scope.matchesLegacy(ti) {
+		return false
+	}
+	return m.aqlMatch == nil || m.aqlMatch(ti)
+}
+
 // ComputeCostClass implements §5.4's rule: delete/archive on a LIST state
 // (pending/active) is a selective LREM — cost class list_removal; everything
 // else is cheap.
@@ -149,12 +216,24 @@ func ComputeCostClass(s Scope, v Verb) CostClass {
 	return CostCheap
 }
 
-// Matches reports whether the task matches the scope's free-text and meta
-// constraints. Queue/state are enumeration inputs, but they are re-checked
-// here too: execution re-fetches each task, and a task that changed state (or
-// was re-enqueued elsewhere) between preview and act must count as skipped,
-// never be acted on (§4.3 step 5 — the TOCTOU fix).
+// Matches reports whether the task matches the whole scope, including any
+// AQL clause (an unparsable AQL clause matches nothing — the create handler
+// validates it, so this only guards corrupted stored scopes). The runner
+// uses Compile once instead; this convenience form re-compiles per call.
 func (s Scope) Matches(ti *asynq.TaskInfo) bool {
+	m, perr := s.Compile()
+	if perr != nil {
+		return false
+	}
+	return m.Matches(ti)
+}
+
+// matchesLegacy is the pre-AQL predicate. Queue/state are enumeration
+// inputs, but they are re-checked here too: execution re-fetches each task,
+// and a task that changed state (or was re-enqueued elsewhere) between
+// preview and act must count as skipped, never be acted on (§4.3 step 5 —
+// the TOCTOU fix).
+func (s Scope) matchesLegacy(ti *asynq.TaskInfo) bool {
 	if ti == nil {
 		return false
 	}

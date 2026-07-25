@@ -31,6 +31,25 @@ export interface SearchTasksResponse {
   truncated: boolean;
   page: number;
   size: number;
+  // Phase 6 (AQL) additions — absent/zero on the legacy free-text path.
+  mode?: "cursor" | "scan" | "legacy";
+  exact?: boolean; // total is exact (cursor mode)
+  state?: string; // resolved state
+  cursor?: string; // cursor-mode next page ("" / absent = last page)
+  scan_cursor?: string; // scan-mode resume ("" / absent = scan complete)
+  candidate_estimate?: number;
+  budget?: number;
+}
+
+// The structured 400 rejection body for unanswerable AQL:
+// {error, position, hint} — rendered as the console's inline banner.
+export interface StateCountsResponse {
+  queue: string;
+  // counts[state]; aggregating is -1 when unknowable fleet-wide (the UI
+  // renders "—", never a guess).
+  counts: Record<string, number>;
+  source: "cache" | "live";
+  refreshed_at: string;
 }
 
 export interface TaskMetadataResponse {
@@ -431,11 +450,13 @@ export async function listGroups(qname: string): Promise<ListGroupsResponse> {
 export async function searchTasks(params: {
   queue?: string;
   state: string;
-  q?: string;
+  q?: string; // free text OR an AQL query (clause-shaped strings are parsed)
   meta?: string[];
   page?: number;
   size?: number;
   maxScan?: number;
+  cursor?: string; // cursor-mode page cursor
+  scanCursor?: string; // scan-mode resume cursor
 }): Promise<SearchTasksResponse> {
   const usp = new URLSearchParams();
   if (params.queue) usp.set("queue", params.queue);
@@ -445,9 +466,24 @@ export async function searchTasks(params: {
   if (params.page) usp.set("page", String(params.page));
   if (params.size) usp.set("size", String(params.size));
   if (params.maxScan) usp.set("max_scan", String(params.maxScan));
+  if (params.cursor) usp.set("cursor", params.cursor);
+  if (params.scanCursor) usp.set("scan_cursor", params.scanCursor);
   const resp = await axios({
     method: "get",
     url: `${getBaseUrl()}/tasks?${usp.toString()}`,
+  });
+  return resp.data;
+}
+
+// All seven per-state counts in one pipelined pass (state pills, §3.4).
+// Fleet-wide (queue omitted/"all") answers come from the stats cache sums.
+export async function taskStateCounts(queue?: string): Promise<StateCountsResponse> {
+  const usp = new URLSearchParams();
+  if (queue && queue !== "all") usp.set("queue", queue);
+  const qs = usp.toString();
+  const resp = await axios({
+    method: "get",
+    url: `${getBaseUrl()}/tasks/state_counts${qs ? `?${qs}` : ""}`,
   });
   return resp.data;
 }
@@ -1209,6 +1245,7 @@ export interface JobScope {
   state: string;
   q: string;
   meta: string[]; // "key:value" pairs, same wire format as searchTasks
+  aql?: string; // AQL predicate (phase 6) — ANDed with the legacy fields
 }
 
 export interface JobCounts {
@@ -1284,7 +1321,7 @@ export interface AuditEntry {
 
 export async function createJob(body: {
   verb: JobVerb;
-  scope: { queue?: string; state: string; q?: string; meta?: string[] };
+  scope: { queue?: string; state: string; q?: string; meta?: string[]; aql?: string };
   reason: string;
   throttle?: number;
 }): Promise<JobInfo> {

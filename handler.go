@@ -308,14 +308,20 @@ func muxRouter(opts Options, rc redis.UniversalClient, inspector *asynq.Inspecto
 
 	api.HandleFunc("/queues/{qname}/tasks/{task_id}", newGetTaskHandlerFunc(inspector, payloadFmt, resultFmt)).Methods("GET")
 
-	// Cross-queue server-side task search / filter / pagination.
-	api.HandleFunc("/tasks", newSearchTasksHandlerFunc(inspector, payloadFmt)).Methods("GET")
+	// Cross-queue server-side task search / filter / pagination. `q` accepts
+	// AQL (phase 6, §3.4): cursorable plans return exact totals + (score,id)
+	// cursor pages; scan plans return budgeted partial results + a resume
+	// scan_cursor; parse rejections are 400 {error, position, hint}.
+	api.HandleFunc("/tasks", newSearchTasksHandlerFunc(inspector, rc, payloadFmt)).Methods("GET")
+	// All seven per-state counts in one pipelined pass (state pills, §3.4);
+	// fleet-wide answers come from the stats cache sums.
+	api.HandleFunc("/tasks/state_counts", newStateCountsHandlerFunc(inspector, rc, statsEngine)).Methods("GET")
 	// Global metadata facets (distinct key=value chips) for the filtered set.
-	api.HandleFunc("/task_metadata", newTaskMetadataHandlerFunc(inspector, payloadFmt)).Methods("GET")
+	api.HandleFunc("/task_metadata", newTaskMetadataHandlerFunc(inspector, rc, payloadFmt)).Methods("GET")
 	// Failure/usage analytics: group the filtered set by type/error/queue.
-	api.HandleFunc("/task_aggregate", newTaskAggregateHandlerFunc(inspector, payloadFmt)).Methods("GET")
+	api.HandleFunc("/task_aggregate", newTaskAggregateHandlerFunc(inspector, rc, payloadFmt)).Methods("GET")
 	// Apply an action to every task matching a filter (not just the current page).
-	api.HandleFunc("/tasks:batch_filtered", newBulkFilteredTasksHandlerFunc(inspector, payloadFmt)).Methods("POST")
+	api.HandleFunc("/tasks:batch_filtered", newBulkFilteredTasksHandlerFunc(inspector, rc, payloadFmt)).Methods("POST")
 
 	// Groups endponts
 	api.HandleFunc("/queues/{qname}/groups", newListGroupsHandlerFunc(inspector)).Methods("GET")
@@ -333,6 +339,15 @@ func muxRouter(opts Options, rc redis.UniversalClient, inspector *asynq.Inspecto
 	// Scheduler Entry endpoints.
 	api.HandleFunc("/scheduler_entries", newListSchedulerEntriesHandlerFunc(inspector, payloadFmt)).Methods("GET")
 	api.HandleFunc("/scheduler_entries/{entry_id}/enqueue_events", newListSchedulerEnqueueEventsHandlerFunc(inspector)).Methods("GET")
+
+	// ── Schedulers screen routes (Fleet Console §3.8/§5.12) ──
+	// Stable-key snapshot merge (live ∪ persisted; SCHEDULER GONE rows) and
+	// per-entry outcome joins. Handlers live in scheduler_snapshot_handlers.go;
+	// the snapshot substrate is stats/scheduler.go. The legacy
+	// /scheduler_entries endpoints above stay for back-compat.
+	api.HandleFunc("/schedulers", newListSchedulersHandlerFunc(inspector, rc, payloadFmt, stats.DefaultSchedulerGoneAfter)).Methods("GET")
+	api.HandleFunc("/schedulers/{stable_key}/outcomes", newSchedulerOutcomesHandlerFunc(inspector, rc)).Methods("GET")
+	// ── end Schedulers screen routes ──
 
 	// Redis info endpoint.
 	switch c := rc.(type) {

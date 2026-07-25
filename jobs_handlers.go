@@ -130,6 +130,13 @@ func newCreateJobHandlerFunc(store *jobs.Store) http.HandlerFunc {
 			writeErrorMsg(w, http.StatusBadRequest, reason)
 			return
 		}
+		// AQL scopes (phase 6) are validated at create time: parse + state
+		// gating + the env-free matcher requirement. Rejections use the
+		// structured {error, position, hint} shape the console renders.
+		if perr := req.Scope.ValidateAql(); perr != nil {
+			writeAqlError(w, perr)
+			return
+		}
 		if strings.TrimSpace(req.Reason) == "" {
 			// Reason strings are mandatory regardless of identity mode (§5.11).
 			writeErrorMsg(w, http.StatusBadRequest, "reason is required — it goes to the audit log")

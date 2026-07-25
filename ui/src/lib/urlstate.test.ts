@@ -18,13 +18,13 @@ describe("parseConsoleState", () => {
     expect(parseConsoleState(new URLSearchParams())).toEqual(DEFAULT_CONSOLE_STATE);
   });
 
-  it("reads every field from the URL", () => {
+  it("migrates a legacy URL: queue/state/meta params are prepended into the AQL string once", () => {
     const params = new URLSearchParams(
       "q=email&state=retry&queue=billing&meta=region:eu&meta=tier:gold&page=3&size=50&mode=group:error"
     );
     expect(parseConsoleState(params)).toEqual({
-      q: "email",
-      state: "retry",
+      q: "queue=billing state=retry meta.region=eu meta.tier=gold email",
+      state: "retry", // derived from the migrated q
       queue: "billing",
       meta: [
         { key: "region", value: "eu" },
@@ -34,6 +34,29 @@ describe("parseConsoleState", () => {
       size: 50,
       mode: "group:error",
     });
+  });
+
+  it("reads a phase-6 URL: q carries AQL and state/queue/meta are derived from it", () => {
+    const params = new URLSearchParams();
+    params.set("q", 'queue=billing state=retry meta.region=eu error~"gateway timeout"');
+    params.set("size", "50");
+    const state = parseConsoleState(params);
+    expect(state.state).toBe("retry");
+    expect(state.queue).toBe("billing");
+    expect(state.meta).toEqual([{ key: "region", value: "eu" }]);
+    expect(state.size).toBe(50);
+  });
+
+  it("quotes migrated multi-word free text so it stays one clause", () => {
+    const params = new URLSearchParams("q=gateway+timeout&state=retry");
+    expect(parseConsoleState(params).q).toBe('state=retry "gateway timeout"');
+  });
+
+  it("does not duplicate clauses already present in q during migration", () => {
+    const params = new URLSearchParams("q=queue%3Dbilling&queue=other&state=retry");
+    const state = parseConsoleState(params);
+    expect(state.q).toBe("state=retry queue=billing");
+    expect(state.queue).toBe("billing"); // the q clause wins
   });
 
   it("degrades invalid values to defaults instead of crashing", () => {
@@ -60,10 +83,10 @@ describe("serializeConsoleState", () => {
     expect(serializeConsoleState(DEFAULT_CONSOLE_STATE).toString()).toBe("");
   });
 
-  it("round-trips a full state exactly", () => {
+  it("round-trips a full state exactly (q is the single source of truth)", () => {
     const state: ConsoleState = {
-      q: "gateway timeout",
-      state: "archived",
+      q: 'queue=billing:invoice state=archived meta.region=eu "gateway timeout"',
+      state: "archived", // derived from q
       queue: "billing:invoice",
       meta: [{ key: "region", value: "eu" }],
       page: 4,
@@ -87,13 +110,14 @@ describe("serializeConsoleState", () => {
     expect(params.get("state")).toBeNull();
   });
 
-  it("clears previous meta params before writing the new set", () => {
+  it("clears legacy meta params on write — chips live inside q now", () => {
     const base = new URLSearchParams("meta=old:1&meta=old:2");
     const params = serializeConsoleState(
-      { ...DEFAULT_CONSOLE_STATE, meta: [{ key: "new", value: "3" }] },
+      { ...DEFAULT_CONSOLE_STATE, q: "meta.new=3", meta: [{ key: "new", value: "3" }] },
       base
     );
-    expect(params.getAll("meta")).toEqual(["new:3"]);
+    expect(params.getAll("meta")).toEqual([]);
+    expect(params.get("q")).toBe("meta.new=3");
   });
 });
 

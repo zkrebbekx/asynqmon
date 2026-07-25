@@ -4,8 +4,6 @@
 // unit-testable without a router or a clock.
 
 import {
-  ConsoleTaskState,
-  CONSOLE_STATES,
   DEFAULT_CONSOLE_STATE,
   serializeConsoleState,
   serializeDirectoryState,
@@ -72,7 +70,12 @@ export function severityTone(severity: number): "crit" | "warn" | "info" {
 
 // Age detectors report `value` in whole seconds (stats/attention.go); count
 // detectors report a count. Render each as itself.
-const AGE_DETECTORS = new Set(["PENDING_AGE", "PAUSED_LONG", "GROUP_STALL"]);
+const AGE_DETECTORS = new Set([
+  "PENDING_AGE",
+  "PAUSED_LONG",
+  "GROUP_STALL",
+  "SCHEDULER_GONE",
+]);
 
 export function formatFindingValue(detector: string, value: number): string {
   if (!Number.isFinite(value)) return "—";
@@ -105,12 +108,13 @@ export function formatErrorRate(rate: number | undefined | null): string {
 
 // A finding's suggested_query is a space-separated clause list written by the
 // attention engine, e.g. "queue=search:reindex state=pending" or
-// "consumers=0 pending>0". Full AQL lands in phase 6; until then we route:
+// "consumers=0 pending>0". Since phase 6 the console speaks AQL, so:
 //
-//   - clauses with a `state=` (task-scoped) → the Tasks console, mapping the
-//     clauses today's console can answer (queue, state, error~/type~/payload~
-//     as free text) and dropping the rest — the console shows its own filter
-//     bar so nothing is hidden from the operator;
+//   - clauses with a `state=` (task-scoped) → the Tasks console with the
+//     query passed through VERBATIM as `q=` — the backend's suggested_query
+//     strings are AQL-shaped, and the console's parser owns validation (its
+//     rejection banner explains anything unanswerable). No clause is ever
+//     dropped;
 //   - everything else (queue-set predicates) → the Queues Directory with the
 //     query passed through verbatim as `f=` (the phase-2 endpoint owns it).
 //
@@ -118,7 +122,7 @@ export function formatErrorRate(rate: number | undefined | null): string {
 // window.ROOT_PATH via paths().
 
 export interface AttentionTarget {
-  kind: "tasks" | "queues";
+  kind: "tasks" | "queues" | "schedulers";
   search: string; // "" or "?..." ready to append to the path
 }
 
@@ -148,26 +152,25 @@ export function attentionTarget(suggestedQuery: string): AttentionTarget {
   const raw = (suggestedQuery ?? "").trim();
   if (raw === "") return { kind: "queues", search: "" };
 
+  // Scheduler-scoped queries ("schedulers type=report:nightly", written by
+  // SCHEDULER_GONE) route to the Schedulers screen with the entry filter
+  // prefilled — that screen owns the snapshot rows the finding points at.
+  if (raw === "schedulers" || raw.startsWith("schedulers ")) {
+    const type = parseClauses(raw).find((c) => c.key === "type" && c.op === "=")?.value ?? "";
+    const params = new URLSearchParams();
+    if (type !== "") params.set("filter", type);
+    const s = params.toString();
+    return { kind: "schedulers", search: s ? `?${s}` : "" };
+  }
+
   const clauses = parseClauses(raw);
   const stateClause = clauses.find((c) => c.key === "state" && c.op === "=");
 
   if (stateClause) {
-    const state = (CONSOLE_STATES as readonly string[]).includes(stateClause.value)
-      ? (stateClause.value as ConsoleTaskState)
-      : DEFAULT_CONSOLE_STATE.state;
-    const queue =
-      clauses.find((c) => c.key === "queue" && c.op === "=")?.value ??
-      DEFAULT_CONSOLE_STATE.queue;
-    // Substring-ish clauses map onto the console's free-text search.
-    const q =
-      clauses.find((c) => ["error", "type", "payload"].includes(c.key) && c.op === "~")
-        ?.value ?? "";
-    const params = serializeConsoleState({
-      ...DEFAULT_CONSOLE_STATE,
-      state,
-      queue,
-      q,
-    });
+    // Task-scoped: the whole AQL expression passes through verbatim as the
+    // console's query (single source of truth — the query bar shows exactly
+    // what the system wrote).
+    const params = serializeConsoleState({ ...DEFAULT_CONSOLE_STATE, q: raw });
     const s = params.toString();
     return { kind: "tasks", search: s ? `?${s}` : "" };
   }

@@ -109,9 +109,13 @@ func SortSnapshots(snaps []*QueueSnapshot, col SortColumn, desc bool, now time.T
 }
 
 // ----------------------------------------------------------------------------
-// Filter v1. This is NOT AQL — the full grammar with per-state gating arrives
-// in phase 6 and supersedes this. See the grammar comment on
-// newFleetQueuesHandlerFunc (stats_handlers.go) for the normative v1 syntax.
+// Filter v1. This is NOT AQL. Phase 6 shipped the AQL grammar (package aql)
+// for the TASKS console only — per-state gating, cursor plans, progressive
+// scans. This queue-DIRECTORY filter deliberately stays the lenient v1
+// syntax (see the grammar comment on newFleetQueuesHandlerFunc,
+// stats_handlers.go): its predicates are snapshot-column comparisons, not
+// task predicates, so the AQL field/state matrix does not apply. A later
+// phase may unify the surface syntax; until then AQL is console-only.
 // Parsing is deliberately lenient: tokens the parser does not understand are
 // collected in Ignored (surfaced to the caller for honesty) instead of
 // failing the request.

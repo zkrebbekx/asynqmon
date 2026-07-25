@@ -32,6 +32,8 @@ export interface BulkJobScope {
   state: string;
   q: string;
   meta: string[];
+  // AQL predicate (phase 6) — ANDed with the legacy fields server-side.
+  aql?: string;
 }
 
 interface Props {
@@ -86,6 +88,7 @@ export default function BulkJobModal({ open, verb, scope, onClose, onStarted }: 
         state: scope.state,
         q: scope.q || undefined,
         meta: scope.meta.length ? scope.meta : undefined,
+        aql: scope.aql || undefined,
       },
       reason: "(preview only — not yet confirmed)",
       throttle: DEFAULT_THROTTLE,
@@ -96,7 +99,7 @@ export default function BulkJobModal({ open, verb, scope, onClose, onStarted }: 
     setJob(detail);
     return j.id;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [verb, scope.queue, scope.state, scope.q, scope.meta.join("|")]);
+  }, [verb, scope.queue, scope.state, scope.q, scope.meta.join("|"), scope.aql]);
 
   // Open: reset and start the preview.
   useEffect(() => {

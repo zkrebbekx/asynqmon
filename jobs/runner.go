@@ -454,6 +454,15 @@ func (r *Runner) finalize(ctx context.Context, j *Job, token int64, state State,
 // persisted per batch, so a restarted replica claims and continues instead
 // of rescanning (§5.4). Returns true when enumeration ran to completion.
 func (r *Runner) enumerate(ctx context.Context, j *Job, token int64, cs *claimSession) bool {
+	// Compile the scope predicate once (legacy fields + AQL via the Matcher
+	// seam); a scope that no longer compiles is a failed job, never a
+	// silently-unfiltered one.
+	matcher, perr := j.Scope.Compile()
+	if perr != nil {
+		r.finalize(ctx, j, token, StateFailed, "compiling scope: "+perr.Msg)
+		return false
+	}
+
 	// First run: freeze the queue list + price the cost class.
 	if j.cursorQueues == nil {
 		queues, err := r.resolveQueues(j.Scope.Queue)
@@ -549,7 +558,7 @@ func (r *Runner) enumerate(ctx context.Context, j *Job, token int64, cs *claimSe
 				var refs []string
 				var sample []SampleRow
 				for _, ti := range batch {
-					if !j.Scope.Matches(ti) {
+					if !matcher.Matches(ti) {
 						continue
 					}
 					refs = append(refs, ti.Queue+candidateSep+ti.ID)
@@ -709,6 +718,13 @@ func mustJSON(v interface{}) string {
 // skipped, never acted on (§4.3 step 5). Per-item failures are recorded
 // (capped; overflow counted). Inter-batch sleep derives from the throttle.
 func (r *Runner) execute(ctx context.Context, j *Job, token int64, cs *claimSession) {
+	// Same compile-once seam as enumerate: re-verification must apply the
+	// full predicate, AQL included (§4.3 step 5).
+	matcher, perr := j.Scope.Compile()
+	if perr != nil {
+		r.finalize(ctx, j, token, StateFailed, "compiling scope: "+perr.Msg)
+		return
+	}
 	throttle := j.Throttle
 	if throttle <= 0 {
 		throttle = 200
@@ -749,7 +765,7 @@ func (r *Runner) execute(ctx context.Context, j *Job, token int64, cs *claimSess
 				failures = append(failures, ItemFailure{Queue: qname, ID: taskID, Error: "re-fetch: " + gerr.Error()})
 				continue
 			}
-			if !j.Scope.Matches(ti) {
+			if !matcher.Matches(ti) {
 				j.Counts.Skipped++
 				continue
 			}

@@ -142,22 +142,23 @@ describe("formatFindingValue", () => {
 });
 
 describe("attentionTarget (suggested_query → URL wiring)", () => {
-  it("routes task-scoped queries to the Tasks console with queue and state", () => {
+  it("routes task-scoped queries to the Tasks console with the AQL passed through verbatim", () => {
     const t = attentionTarget("queue=search:reindex state=pending");
     expect(t.kind).toBe("tasks");
     const params = new URLSearchParams(t.search);
-    expect(params.get("queue")).toBe("search:reindex");
-    // pending is the console default, so it's omitted from the URL.
+    // Phase 6: the whole suggested query IS the console query — no clause
+    // mapping, no separate queue/state params.
+    expect(params.get("q")).toBe("queue=search:reindex state=pending");
+    expect(params.get("queue")).toBeNull();
     expect(params.get("state")).toBeNull();
   });
 
-  it("carries a non-default state and maps error~ into free text", () => {
-    const t = attentionTarget('queue=billing:invoice state=retry error~"gateway timeout"');
+  it("keeps every clause — error~ and friends are no longer dropped or downgraded", () => {
+    const raw = 'queue=billing:invoice state=retry error~"gateway timeout"';
+    const t = attentionTarget(raw);
     expect(t.kind).toBe("tasks");
     const params = new URLSearchParams(t.search);
-    expect(params.get("queue")).toBe("billing:invoice");
-    expect(params.get("state")).toBe("retry");
-    expect(params.get("q")).toBe("gateway timeout");
+    expect(params.get("q")).toBe(raw);
   });
 
   it("routes queue-set predicates to the Queues Directory verbatim", () => {
@@ -173,15 +174,30 @@ describe("attentionTarget (suggested_query → URL wiring)", () => {
     expect(new URLSearchParams(t.search).get("f")).toBe("paused>7d");
   });
 
-  it("degrades an unknown state value to the console default instead of crashing", () => {
+  it("passes unknown state values through — the console's parser owns the rejection", () => {
     const t = attentionTarget("state=bogus queue=email");
     expect(t.kind).toBe("tasks");
     const params = new URLSearchParams(t.search);
-    expect(params.get("state")).toBeNull(); // default (pending) omitted
-    expect(params.get("queue")).toBe("email");
+    expect(params.get("q")).toBe("state=bogus queue=email");
   });
 
   it("handles empty input", () => {
     expect(attentionTarget("")).toEqual({ kind: "queues", search: "" });
+  });
+
+  it("routes scheduler-scoped queries to the Schedulers screen with the filter prefilled", () => {
+    const t = attentionTarget("schedulers type=report:nightly");
+    expect(t.kind).toBe("schedulers");
+    expect(new URLSearchParams(t.search).get("filter")).toBe("report:nightly");
+  });
+
+  it("routes a bare schedulers query without inventing a filter", () => {
+    expect(attentionTarget("schedulers")).toEqual({ kind: "schedulers", search: "" });
+  });
+});
+
+describe("formatFindingValue for SCHEDULER_GONE", () => {
+  it("renders the value as an age, not a count", () => {
+    expect(formatFindingValue("SCHEDULER_GONE", 7200)).toBe("2h");
   });
 });

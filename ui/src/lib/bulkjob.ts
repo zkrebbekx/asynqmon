@@ -16,12 +16,14 @@ export const TYPED_CONFIRM_THRESHOLD = 1000;
 export const ARCHIVE_TRIM_CAP = 10000;
 
 // scopeLabel renders a scope the way the Ops table and the modal echo it:
-// the console's filter vocabulary as query-ish tokens.
+// the console's filter vocabulary as query-ish tokens. An AQL clause is the
+// query — it is echoed verbatim after the enumeration scope.
 export function scopeLabel(scope: {
   queue?: string;
   state: string;
   q?: string;
   meta?: string[];
+  aql?: string;
 }): string {
   const parts = [`queue=${scope.queue || "all"}`, `state=${scope.state}`];
   for (const m of scope.meta ?? []) {
@@ -29,6 +31,7 @@ export function scopeLabel(scope: {
     if (i > 0) parts.push(`${m.slice(0, i)}=${m.slice(i + 1)}`);
   }
   if (scope.q) parts.push(`q~"${scope.q}"`);
+  if (scope.aql) parts.push(scope.aql);
   return parts.join(" ");
 }
 

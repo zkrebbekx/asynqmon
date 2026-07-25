@@ -5,10 +5,17 @@
 // exactly. Drawer state is the separate `peek` param so a task peek is
 // deep-linkable from any filter combination.
 //
+// Phase 6 (§3.4): the `q` param carries AQL and is the SINGLE SOURCE OF
+// TRUTH — queue, state, and metadata chips are all clauses of the query
+// string. Legacy URLs (`queue=X&state=Y&meta=k:v&q=free text`) are migrated
+// on parse: their params are prepended into the AQL string once, and only
+// `q` (plus page/size/mode) is ever written back.
+//
 // These are pure functions over URLSearchParams so round-tripping is
 // unit-testable without a router.
 
 import { MetaPair } from "./metadata";
+import { aqlFromLegacy, getClause, metaClausesOf } from "./aql";
 
 export const CONSOLE_STATES = [
   "active",
@@ -30,10 +37,10 @@ export const RESULT_MODES = ["rows", "group:error", "group:type"] as const;
 export type ResultMode = (typeof RESULT_MODES)[number];
 
 export interface ConsoleState {
-  q: string; // free-text query
-  state: ConsoleTaskState; // state tab
-  queue: string; // queue name, or "all"
-  meta: MetaPair[]; // metadata chips (AND semantics)
+  q: string; // AQL query — the single source of truth
+  state: ConsoleTaskState; // DERIVED from q's state= clause (default pending)
+  queue: string; // DERIVED from q's queue= clause, or "all"
+  meta: MetaPair[]; // DERIVED from q's meta.* clauses
   page: number; // 0-based page index (1-based in the URL for humans)
   size: number; // page size
   mode: ResultMode; // result rendering mode
@@ -51,6 +58,8 @@ export const DEFAULT_CONSOLE_STATE: ConsoleState = {
 
 // Params owned by the console; serializeConsoleState clears exactly these
 // before writing so params it doesn't own (e.g. `peek`) survive untouched.
+// `state`/`queue`/`meta` remain listed so migrated legacy params are removed
+// on the first write.
 const CONSOLE_PARAMS = ["q", "state", "queue", "meta", "page", "size", "mode"];
 
 // Meta chips use the same `key:value` wire format as the search API
@@ -65,20 +74,50 @@ export function serializeMetaPair(p: MetaPair): string {
   return `${p.key}:${p.value}`;
 }
 
-// parseConsoleState reads console state from URL search params. Missing or
-// invalid values (a hand-edited URL) degrade to defaults instead of crashing.
-export function parseConsoleState(params: URLSearchParams): ConsoleState {
-  const state = params.get("state") ?? "";
-  const mode = params.get("mode") ?? "";
-  const size = Number(params.get("size"));
-  const page = Number(params.get("page"));
+// deriveConsoleQuery computes the derived state/queue/meta fields from the
+// AQL string. Invalid state values degrade to the default — the backend's
+// rejection banner explains the real problem.
+function deriveFromQuery(q: string): Pick<ConsoleState, "state" | "queue" | "meta"> {
+  const stateClause = getClause(q, "state");
+  const queueClause = getClause(q, "queue");
+  const state = stateClause?.value ?? "";
   return {
-    q: params.get("q") ?? "",
     state: (CONSOLE_STATES as readonly string[]).includes(state)
       ? (state as ConsoleTaskState)
       : DEFAULT_CONSOLE_STATE.state,
-    queue: params.get("queue") || DEFAULT_CONSOLE_STATE.queue,
-    meta: params.getAll("meta").flatMap(parseMetaParam),
+    queue: queueClause?.value || DEFAULT_CONSOLE_STATE.queue,
+    meta: metaClausesOf(q),
+  };
+}
+
+// parseConsoleState reads console state from URL search params. Missing or
+// invalid values (a hand-edited URL) degrade to defaults instead of
+// crashing. Legacy URLs are migrated: queue=X / state=Y / meta=k:v params
+// are prepended into the AQL string once (§3.4 phase 6).
+export function parseConsoleState(params: URLSearchParams): ConsoleState {
+  const mode = params.get("mode") ?? "";
+  const size = Number(params.get("size"));
+  const page = Number(params.get("page"));
+
+  let q = params.get("q") ?? "";
+  const legacyState = params.get("state") ?? "";
+  const legacyQueue = params.get("queue") ?? "";
+  const legacyMeta = params.getAll("meta").flatMap(parseMetaParam);
+  if (legacyState !== "" || legacyQueue !== "" || legacyMeta.length > 0) {
+    q = aqlFromLegacy({
+      queue: getClause(q, "queue") ? undefined : legacyQueue,
+      state:
+        !getClause(q, "state") && (CONSOLE_STATES as readonly string[]).includes(legacyState)
+          ? legacyState
+          : undefined,
+      meta: legacyMeta.filter((p) => !metaClausesOf(q).some((x) => x.key === p.key && x.value === p.value)),
+      freeText: q,
+    });
+  }
+
+  return {
+    q,
+    ...deriveFromQuery(q),
     page: Number.isInteger(page) && page > 1 ? page - 1 : 0,
     size: (PAGE_SIZES as readonly number[]).includes(size)
       ? size
@@ -89,9 +128,11 @@ export function parseConsoleState(params: URLSearchParams): ConsoleState {
   };
 }
 
-// serializeConsoleState writes console state into search params. Values equal
-// to the defaults are omitted so shared URLs stay short; any params in `base`
-// that the console doesn't own (e.g. `peek`) are carried through.
+// serializeConsoleState writes console state into search params. Only `q`,
+// `page`, `size`, `mode` are ever written — state/queue/meta live INSIDE the
+// query string (single source of truth). Values equal to the defaults are
+// omitted so shared URLs stay short; any params in `base` that the console
+// doesn't own (e.g. `peek`) are carried through.
 export function serializeConsoleState(
   state: ConsoleState,
   base?: URLSearchParams
@@ -99,9 +140,6 @@ export function serializeConsoleState(
   const params = new URLSearchParams(base);
   for (const key of CONSOLE_PARAMS) params.delete(key);
   if (state.q) params.set("q", state.q);
-  if (state.state !== DEFAULT_CONSOLE_STATE.state) params.set("state", state.state);
-  if (state.queue !== DEFAULT_CONSOLE_STATE.queue) params.set("queue", state.queue);
-  for (const p of state.meta) params.append("meta", serializeMetaPair(p));
   if (state.page > 0) params.set("page", String(state.page + 1));
   if (state.size !== DEFAULT_CONSOLE_STATE.size) params.set("size", String(state.size));
   if (state.mode !== DEFAULT_CONSOLE_STATE.mode) params.set("mode", state.mode);

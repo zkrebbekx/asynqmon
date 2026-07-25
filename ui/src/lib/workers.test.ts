@@ -8,7 +8,7 @@ import {
   filterCoverageRows,
   activeTaskDrawerSearch,
 } from "./workers";
-import { parsePeek } from "./urlstate";
+import { parsePeek, parseConsoleState } from "./urlstate";
 import { ServerInfo, WorkerInfo } from "../api";
 import { CoverageRow } from "../api-fleet";
 
@@ -192,8 +192,11 @@ describe("activeTaskDrawerSearch (drawer deep link)", () => {
   it("opens the Tasks console on state=active for the queue with the task peeked", () => {
     const search = activeTaskDrawerSearch("media:transcode", "8f3a2c");
     const params = new URLSearchParams(search);
-    expect(params.get("state")).toBe("active");
-    expect(params.get("queue")).toBe("media:transcode");
+    // Phase 6: the filter travels as AQL clauses in q.
+    expect(params.get("q")).toBe("queue=media:transcode state=active");
+    const state = parseConsoleState(params);
+    expect(state.state).toBe("active");
+    expect(state.queue).toBe("media:transcode");
     expect(parsePeek(params.get("peek"))).toEqual({
       queue: "media:transcode",
       id: "8f3a2c",

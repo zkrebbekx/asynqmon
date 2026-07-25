@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState, useCallback, useRef } from "react";
 import { useSelector } from "react-redux";
-import { useSearchParams } from "react-router-dom";
-import { Search, Play, Trash2, Archive, X, ChevronLeft, ChevronRight, Tag, AlertCircle, AlertTriangle } from "lucide-react";
+import { Link, useSearchParams } from "react-router-dom";
+import { Search, Play, Trash2, Archive, X, ChevronLeft, ChevronRight, Tag, AlertCircle } from "lucide-react";
 import { AppState, useAppDispatch } from "../store";
 import { listQueuesAsync } from "../actions/queuesActions";
 import * as api from "../api";
@@ -17,12 +17,20 @@ import {
   serializeConsoleState,
   parsePeek,
   serializePeek,
-  serializeMetaPair,
   PeekTarget,
 } from "../lib/urlstate";
+import {
+  addMetaClause,
+  removeMetaClause,
+  setClause,
+  isAqlQuery,
+  isAqlRejection,
+  caretLine,
+  AqlRejection,
+} from "../lib/aql";
+import { paths } from "../paths";
 import { cn, clickableRowClass, clickableRowProps } from "../lib/utils";
 import { usePolling } from "../hooks";
-import { Input } from "../components/ui/input";
 import { Button } from "../components/ui/button";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "../components/ui/table";
 import { Alert, AlertDescription, AlertTitle } from "../components/ui/alert";
@@ -61,6 +69,29 @@ const bulkCaps: Record<State, Array<"run" | "archive" | "delete" | "cancel">> = 
   completed: ["delete"],
 };
 
+// Verb used for "Scan-to-completion as job": the LEAST destructive verb the
+// state supports — the point is the completed preview enumeration (exact
+// count on the Operations screen), never an execution.
+const scanJobVerb: Record<State, api.JobVerb> = {
+  active: "cancel",
+  pending: "archive",
+  aggregating: "archive",
+  scheduled: "archive",
+  retry: "archive",
+  archived: "run",
+  completed: "delete",
+};
+
+// AQL wire fields of one search response the console renders from.
+interface SearchMeta {
+  mode: "cursor" | "scan" | "legacy";
+  exact: boolean;
+  cursor: string;
+  scanCursor: string;
+  candidateEstimate: number;
+  scanned: number;
+}
+
 export default function TasksGlobalView() {
   const dispatch = useAppDispatch();
   // Select the stable data reference and derive names in a memo — mapping
@@ -70,11 +101,13 @@ export default function TasksGlobalView() {
   const queues = useMemo(() => queuesData.map((q) => q.name), [queuesData]);
   const pollInterval = useSelector((s: AppState) => s.settings.pollInterval);
 
-  // All console state lives in the URL (build contract §2): back/forward
-  // works, refresh restores the view, and the URL alone reproduces it.
+  // All console state lives in the URL (build contract §2); since phase 6
+  // the `q` param carries AQL and is the single source of truth — queue,
+  // state and metadata chips are clauses of the query string.
   const [searchParams, setSearchParams] = useSearchParams();
   const view = useMemo(() => parseConsoleState(searchParams), [searchParams]);
   const peek = useMemo(() => parsePeek(searchParams.get("peek")), [searchParams]);
+  const isAql = useMemo(() => isAqlQuery(view.q), [view.q]);
 
   // updateView merges console-state changes into the URL, preserving params
   // it doesn't own (peek). Discrete changes (tabs, chips, paging) push a
@@ -107,9 +140,10 @@ export default function TasksGlobalView() {
     [setSearchParams]
   );
 
-  // The search box needs immediate local echo; the URL write is debounced so
+  // The query bar needs immediate local echo; the URL write is debounced so
   // typing doesn't hammer the server-side scan or spam history (replace).
   const [searchInput, setSearchInput] = useState(view.q);
+  const inputRef = useRef<HTMLInputElement | null>(null);
   useEffect(() => {
     // Sync from the URL when it changes externally (back/forward, pivots).
     setSearchInput(view.q);
@@ -121,21 +155,67 @@ export default function TasksGlobalView() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [searchInput]);
 
+  // Queue typeahead: when the query ends in a partial `queue=` token, offer
+  // completions from the fleet queues cache. Selecting one edits the TEXT —
+  // chips and completions compose into the query, never beside it.
+  const [typeaheadOpen, setTypeaheadOpen] = useState(false);
+  const queuePrefix = useMemo(() => {
+    const m = /(?:^|\s)queue=(\S*)$/.exec(searchInput);
+    return m ? m[1] : null;
+  }, [searchInput]);
+  const queueSuggestions = useMemo(() => {
+    if (queuePrefix === null) return [];
+    const p = queuePrefix.toLowerCase();
+    return queues.filter((q) => q.toLowerCase().startsWith(p) && q !== queuePrefix).slice(0, 8);
+  }, [queuePrefix, queues]);
+  const applyQueueSuggestion = (name: string) => {
+    const next = searchInput.replace(/(?:^|\s)queue=\S*$/, (m) =>
+      m.startsWith(" ") ? ` queue=${name}` : `queue=${name}`
+    );
+    setSearchInput(next);
+    setTypeaheadOpen(false);
+    inputRef.current?.focus();
+  };
+
   const [tasks, setTasks] = useState<TaskInfo[]>([]);
   const [loading, setLoading] = useState(true);
   const [total, setTotal] = useState(0);
   const [truncated, setTruncated] = useState(false);
+  const [meta, setMeta] = useState<SearchMeta>({
+    mode: "legacy", exact: false, cursor: "", scanCursor: "", candidateEstimate: 0, scanned: 0,
+  });
   const [facets, setFacets] = useState<{ key: string; value: string; count: number }[]>([]);
   const [error, setError] = useState("");
+  // Structured AQL rejection ({error, position, hint}) rendered inline with
+  // a caret under the offending clause. Last-good results stay visible.
+  const [rejection, setRejection] = useState<(AqlRejection & { query: string }) | null>(null);
   // Failure-analytics groupings (only for retry/archived).
   const [errorGroups, setErrorGroups] = useState<{ label: string; count: number }[]>([]);
   const [typeGroups, setTypeGroups] = useState<{ label: string; count: number }[]>([]);
+  // All-seven state-pill counts (state_counts endpoint, polled).
+  const [stateCounts, setStateCounts] = useState<Record<string, number> | null>(null);
   // Whole-scope verbs open the §4.3 bulk-job modal (preview job + cost
   // disclosure + gated execute). Selection/row-scoped actions keep their
   // direct endpoints — cheap and exact.
   const [bulkVerb, setBulkVerb] = useState<"run" | "archive" | "delete" | "cancel" | null>(null);
   // Row-level delete confirmation target.
   const [confirmDelete, setConfirmDelete] = useState<TaskInfo | null>(null);
+
+  // Cursor pagination (mode=cursor): the stack's top is the cursor of the
+  // CURRENT page; [] = first page. Exact totals come with every response.
+  const [cursorStack, setCursorStack] = useState<string[]>([]);
+  const currentCursor = cursorStack[cursorStack.length - 1] ?? "";
+
+  // Progressive-scan continuation (§5.9): Continue extends coverage by
+  // feeding the resume cursor; results append below the first window.
+  const [extraTasks, setExtraTasks] = useState<TaskInfo[]>([]);
+  const [extraScanned, setExtraScanned] = useState(0);
+  const [extraMatches, setExtraMatches] = useState(0);
+  // null = not continued yet (follow the base response's cursor); "" = done.
+  const [contCursor, setContCursor] = useState<string | null>(null);
+  const [continuing, setContinuing] = useState(false);
+  // Scan-to-completion preview job handoff.
+  const [scanJobId, setScanJobId] = useState<string | null>(null);
 
   // After a drawer pivot, close the drawer if the peeked task fell out of
   // the visible results (kept open when it survived the new filter).
@@ -147,8 +227,7 @@ export default function TasksGlobalView() {
     dispatch(listQueuesAsync());
   }, [dispatch]);
 
-  const metaParam = view.meta.map(serializeMetaPair);
-  const metaKey = metaParam.join("|");
+  const filterKey = `${view.q}|${view.state}|${view.queue}|${view.size}`;
 
   const fetchTasks = useCallback(async () => {
     try {
@@ -156,15 +235,24 @@ export default function TasksGlobalView() {
         queue: view.queue,
         state: view.state,
         q: view.q,
-        meta: metaParam,
         page: view.page + 1,
         size: view.size,
+        cursor: currentCursor || undefined,
       });
       const rows = resp.tasks ?? [];
       setTasks(rows);
       setTotal(resp.total);
       setTruncated(resp.truncated);
+      setMeta({
+        mode: resp.mode ?? "legacy",
+        exact: resp.exact ?? false,
+        cursor: resp.cursor ?? "",
+        scanCursor: resp.scan_cursor ?? "",
+        candidateEstimate: resp.candidate_estimate ?? 0,
+        scanned: resp.scanned ?? 0,
+      });
       setError("");
+      setRejection(null);
       if (pivotPending.current) {
         pivotPending.current = false;
         const pk = peekRef.current;
@@ -173,15 +261,32 @@ export default function TasksGlobalView() {
         }
       }
     } catch (e) {
-      setError(toErrorString(e));
+      const data = (e as { response?: { status?: number; data?: unknown } })?.response;
+      if (data?.status === 400 && isAqlRejection(data.data)) {
+        setRejection({ ...data.data, query: view.q });
+        setError("");
+      } else {
+        setError(toErrorString(e));
+      }
     }
     setLoading(false);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [view.queue, view.state, view.q, metaKey, view.page, view.size]);
+  }, [view.queue, view.state, view.q, view.page, view.size, currentCursor]);
 
   // usePolling gives pause-on-hidden-tab and the shared "Updated Ns ago"
   // indicator for free; the fetch key refetches immediately on filter change.
-  usePolling(fetchTasks, pollInterval, [view.queue, view.state, view.q, metaKey, view.page, view.size]);
+  usePolling(fetchTasks, pollInterval, [view.queue, view.state, view.q, view.page, view.size, currentCursor]);
+
+  // All-seven state pill counts: one pipelined pass server-side, polled.
+  const fetchCounts = useCallback(async () => {
+    try {
+      const resp = await api.taskStateCounts(view.queue);
+      setStateCounts(resp.counts);
+    } catch {
+      /* keep the last counts — pills degrade to stale, not empty */
+    }
+  }, [view.queue]);
+  usePolling(fetchCounts, pollInterval, [view.queue]);
 
   // Global metadata facets (across the whole filtered set, not just this page).
   const fetchFacets = useCallback(async () => {
@@ -190,14 +295,12 @@ export default function TasksGlobalView() {
         queue: view.queue,
         state: view.state,
         q: view.q,
-        meta: metaParam,
       });
       setFacets(resp.facets);
     } catch {
       setFacets([]);
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [view.queue, view.state, view.q, metaKey]);
+  }, [view.queue, view.state, view.q]);
 
   useEffect(() => {
     fetchFacets();
@@ -216,8 +319,8 @@ export default function TasksGlobalView() {
     const limit = isGroupMode ? 50 : 8;
     try {
       const [byError, byType] = await Promise.all([
-        api.taskAggregate({ queue: view.queue, state: view.state, q: view.q, meta: metaParam, by: "error", limit }),
-        api.taskAggregate({ queue: view.queue, state: view.state, q: view.q, meta: metaParam, by: "type", limit }),
+        api.taskAggregate({ queue: view.queue, state: view.state, q: view.q, by: "error", limit }),
+        api.taskAggregate({ queue: view.queue, state: view.state, q: view.q, by: "type", limit }),
       ]);
       setErrorGroups(byError.groups);
       setTypeGroups(byType.groups);
@@ -225,23 +328,30 @@ export default function TasksGlobalView() {
       setErrorGroups([]);
       setTypeGroups([]);
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isFailureState, isGroupMode, view.queue, view.state, view.q, metaKey]);
+  }, [isFailureState, isGroupMode, view.queue, view.state, view.q]);
 
   useEffect(() => {
     fetchAnalytics();
   }, [fetchAnalytics]);
 
-  // Drop the now-mismatched rows when the filter changes so the old filter's
-  // results don't linger while the new ones load. (The page itself is URL
-  // state: filter-changing writes reset it to 0 at the source.)
+  // Drop the now-mismatched rows and all pagination/continuation state when
+  // the filter changes so stale windows don't linger.
   useEffect(() => {
     setTasks([]);
     setLoading(true);
-  }, [view.queue, view.state, view.q, metaKey, view.size]);
+    setCursorStack([]);
+    setExtraTasks([]);
+    setExtraScanned(0);
+    setExtraMatches(0);
+    setContCursor(null);
+    setScanJobId(null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [filterKey]);
 
-  // Chips = global facets minus already-active filters.
+  // Chips = global facets minus already-active clauses (view.meta derives
+  // from the query string's meta.* clauses).
   const activeIds = new Set(view.meta.map(metaId));
+  const metaKey = view.meta.map(metaId).join("|");
   const chips = useMemo(
     () => facets.filter((p) => !activeIds.has(metaId(p))),
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -249,21 +359,23 @@ export default function TasksGlobalView() {
   );
 
   const totalPages = Math.max(1, Math.ceil(total / view.size));
+  const isCursorMode = meta.mode === "cursor";
 
   // Clamp the page when the filtered total shrinks (bulk actions, drains) so
   // the user is never stranded on an empty out-of-range page.
   useEffect(() => {
-    if (!loading && view.page > totalPages - 1) {
+    if (!loading && !isCursorMode && view.page > totalPages - 1) {
       updateView({ page: totalPages - 1 }, { replace: true });
     }
-  }, [loading, view.page, totalPages, updateView]);
+  }, [loading, isCursorMode, view.page, totalPages, updateView]);
 
-  const addFilter = (p: MetaPair) => {
-    if (view.meta.some((x) => metaId(x) === metaId(p))) return;
-    updateView({ meta: [...view.meta, p], page: 0 });
-  };
+  // ---- All console mutations edit the QUERY STRING (single source of truth).
+  const setStateClause = (st: State) =>
+    updateView({ q: setClause(view.q, "state", "=", st), page: 0 });
+  const addFilter = (p: MetaPair) =>
+    updateView({ q: addMetaClause(view.q, p.key, p.value), page: 0 });
   const removeFilter = (p: MetaPair) =>
-    updateView({ meta: view.meta.filter((x) => metaId(x) !== metaId(p)), page: 0 });
+    updateView({ q: removeMetaClause(view.q, p.key, p.value), page: 0 });
 
   const acts = actionFns[view.state];
   const runAction = async (fn: ActionFn, queue: string, id: string) => {
@@ -276,16 +388,61 @@ export default function TasksGlobalView() {
     fetchTasks();
   };
 
-  // Drawer pivots ("find all like this") compose into the console filters.
+  // Drawer pivots ("find all like this") compose into the query string.
   const handlePivot = (p: PivotRequest) => {
     pivotPending.current = true;
-    const updates: Partial<ConsoleState> = { page: 0 };
-    if (p.q !== undefined) updates.q = p.q;
-    if (p.queue) updates.queue = p.queue;
-    if (p.meta && !view.meta.some((x) => metaId(x) === metaId(p.meta!))) {
-      updates.meta = [...view.meta, p.meta];
+    let q = view.q;
+    if (p.q !== undefined) q = setClause(q, "type", "=", p.q);
+    if (p.queue) q = setClause(q, "queue", "=", p.queue);
+    if (p.meta) q = addMetaClause(q, p.meta.key, p.meta.value);
+    updateView({ q, page: 0 });
+  };
+
+  // Scan continuation: feed the resume cursor, append the new window.
+  const effectiveScanCursor = contCursor ?? meta.scanCursor;
+  const scanPartial = meta.mode === "scan" && effectiveScanCursor !== "";
+  const scannedTotal = meta.scanned + extraScanned;
+  const continueScan = async () => {
+    if (!effectiveScanCursor || continuing) return;
+    setContinuing(true);
+    try {
+      const resp = await api.searchTasks({
+        queue: view.queue,
+        state: view.state,
+        q: view.q,
+        size: view.size,
+        scanCursor: effectiveScanCursor,
+      });
+      setExtraTasks((prev) => [...prev, ...(resp.tasks ?? [])]);
+      setExtraScanned((s) => s + (resp.scanned ?? 0));
+      setExtraMatches((m) => m + (resp.total ?? 0));
+      setContCursor(resp.scan_cursor ?? "");
+    } catch (e) {
+      setError(toErrorString(e));
     }
-    updateView(updates);
+    setContinuing(false);
+  };
+
+  // Scan-to-completion as a preview job: the job runner enumerates the whole
+  // scope server-side and reports the exact final count on /ops (§3.4 —
+  // exactness moves into the job, not the preview). Least-destructive verb;
+  // it is never executed from here.
+  const scanAsJob = async () => {
+    try {
+      const j = await api.createJob({
+        verb: scanJobVerb[view.state],
+        scope: {
+          queue: view.queue,
+          state: view.state,
+          q: !isAql && view.q ? view.q : undefined,
+          aql: isAql ? view.q : undefined,
+        },
+        reason: "Scan-to-completion count for console query (preview only)",
+      });
+      setScanJobId(j.id);
+    } catch (e) {
+      setError(toErrorString(e));
+    }
   };
 
   // Which bulk actions are valid for the current state.
@@ -295,32 +452,87 @@ export default function TasksGlobalView() {
   }));
 
   const groupRows = view.mode === "group:error" ? errorGroups : typeGroups;
+  const visibleTasks = useMemo(() => {
+    if (extraTasks.length === 0) return tasks;
+    const seen = new Set(tasks.map((t) => `${t.queue}:${t.id}`));
+    return [...tasks, ...extraTasks.filter((t) => !seen.has(`${t.queue}:${t.id}`))];
+  }, [tasks, extraTasks]);
+
+  const countLabel = (st: State): string => {
+    const n = stateCounts?.[st];
+    if (n === undefined) return "";
+    if (n < 0) return "—"; // unknowable (fleet-wide aggregating) — never a guess
+    return n.toLocaleString("en-US");
+  };
 
   return (
     <div className="max-w-7xl mx-auto px-4 py-6 space-y-4">
       <h1 className="text-2xl font-semibold">Tasks</h1>
 
-      {/* Controls */}
-      <div className="flex flex-wrap items-center gap-2">
-        <div className="flex items-center gap-1.5">
-          <span className="text-xs text-[hsl(var(--muted-foreground))]">Queue</span>
-          <select
-            value={view.queue}
-            onChange={(e) => updateView({ queue: e.target.value, page: 0 })}
-            className="h-8 rounded-md border border-[hsl(var(--input))] bg-[hsl(var(--background))] px-2 text-xs"
-          >
-            <option value="all">All queues</option>
-            {queues.map((q) => (
-              <option key={q} value={q}>{q}</option>
+      {/* Query bar: AQL text input (single source of truth). Chips, pills
+          and pivots all COMPOSE INTO this text. */}
+      <div className="relative">
+        <Search size={13} className="absolute left-3 top-1/2 -translate-y-1/2 text-[hsl(var(--muted-foreground))]" />
+        {/* Plain <input> (the shadcn Input doesn't forward refs, and the
+            typeahead needs one) with the same visual classes. */}
+        <input
+          ref={inputRef}
+          placeholder='AQL — e.g. queue=email state=retry error~"gateway timeout"  ·  free text still works'
+          value={searchInput}
+          onChange={(e) => {
+            setSearchInput(e.target.value);
+            setTypeaheadOpen(true);
+          }}
+          onFocus={() => setTypeaheadOpen(true)}
+          onBlur={() => setTimeout(() => setTypeaheadOpen(false), 150)}
+          className="flex h-9 w-full rounded-md border border-[hsl(var(--input))] bg-transparent py-1 pl-8 pr-3 font-mono text-xs shadow-sm transition-colors placeholder:text-[hsl(var(--muted-foreground))] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[hsl(var(--ring))]"
+          spellCheck={false}
+          autoComplete="off"
+        />
+        {/* queue= typeahead from the fleet queues cache */}
+        {typeaheadOpen && queueSuggestions.length > 0 && (
+          <div className="absolute z-20 mt-1 w-72 rounded-md border border-[hsl(var(--border))] bg-[hsl(var(--card))] shadow-lg">
+            {queueSuggestions.map((name) => (
+              <button
+                key={name}
+                onMouseDown={(e) => {
+                  e.preventDefault();
+                  applyQueueSuggestion(name);
+                }}
+                className="block w-full px-3 py-1.5 text-left font-mono text-xs hover:bg-[hsl(var(--muted))]"
+              >
+                queue=<span className="font-semibold">{name}</span>
+              </button>
             ))}
-          </select>
-        </div>
+          </div>
+        )}
+      </div>
 
+      {/* Inline AQL rejection: {error, position, hint} + caret (§3.4) */}
+      {rejection && (
+        <div className="rounded-lg border border-[var(--fc-crit)]/50 bg-[var(--fc-crit-bg)]/60 px-4 py-3 text-xs space-y-2">
+          <div className="flex items-start gap-2">
+            <span className="font-bold text-[var(--fc-crit)]">✗</span>
+            <div>
+              <span className="font-medium">{rejection.error}</span>
+              {rejection.hint && (
+                <span className="text-[hsl(var(--muted-foreground))]"> — {rejection.hint}</span>
+              )}
+            </div>
+          </div>
+          <pre className="overflow-x-auto rounded bg-[hsl(var(--muted))]/40 px-2 py-1 font-mono text-[11px] leading-4">
+            {rejection.query + "\n" + caretLine(rejection.query, rejection.position)}
+          </pre>
+        </div>
+      )}
+
+      {/* State pills — all seven counts always visible (state_counts, §3.4) */}
+      <div className="flex flex-wrap items-center gap-2">
         <div className="flex items-center gap-1 flex-wrap">
           {CONSOLE_STATES.map((st) => (
             <button
               key={st}
-              onClick={() => updateView({ state: st, page: 0 })}
+              onClick={() => setStateClause(st)}
               className={cn(
                 "inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-medium border transition-colors capitalize",
                 view.state === st
@@ -329,7 +541,9 @@ export default function TasksGlobalView() {
               )}
             >
               {st}
-              {view.state === st && <span className="opacity-70">{total}</span>}
+              <span className={cn("font-mono tabular-nums", view.state === st ? "opacity-80" : "opacity-60")}>
+                {countLabel(st)}
+              </span>
             </button>
           ))}
         </div>
@@ -354,18 +568,51 @@ export default function TasksGlobalView() {
           </div>
         )}
 
-        <div className="relative ml-auto">
-          <Search size={13} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-[hsl(var(--muted-foreground))]" />
-          <Input
-            placeholder="Search name, queue, metadata"
-            value={searchInput}
-            onChange={(e) => setSearchInput(e.target.value)}
-            className="pl-7 h-8 w-64 text-xs"
-          />
-        </div>
+        {isCursorMode && (
+          <span className="ml-auto text-xs text-[hsl(var(--muted-foreground))]">
+            score-cursorable · totals exact
+          </span>
+        )}
       </div>
 
-      {/* Metadata filter chips */}
+      {/* Scan meter (§5.9): visible whenever scan coverage is partial */}
+      {meta.mode === "scan" && (scanPartial || extraScanned > 0) && (
+        <div className="flex flex-wrap items-center gap-3 rounded-lg border border-[hsl(var(--border))] bg-[hsl(var(--muted))]/30 px-4 py-2 text-xs">
+          <span className="text-[hsl(var(--muted-foreground))]">scan</span>
+          <div className="h-1.5 w-40 overflow-hidden rounded-full bg-[hsl(var(--border))]">
+            <div
+              className="h-full bg-[hsl(var(--primary))]"
+              style={{
+                width: `${meta.candidateEstimate > 0 ? Math.min(100, (scannedTotal / meta.candidateEstimate) * 100) : 100}%`,
+              }}
+            />
+          </div>
+          <span className="font-mono tabular-nums">
+            scanned {scannedTotal.toLocaleString()} of ~{meta.candidateEstimate.toLocaleString()} candidates
+            {scanPartial ? " · results partial" : " · scan complete"}
+          </span>
+          <div className="ml-auto flex items-center gap-2">
+            {scanPartial && (
+              <Button size="sm" variant="outline" className="h-6 text-xs" disabled={continuing} onClick={continueScan}>
+                {continuing ? "Scanning…" : "Continue"}
+              </Button>
+            )}
+            {scanPartial && !scanJobId && (
+              <Button size="sm" variant="outline" className="h-6 text-xs" onClick={scanAsJob}>
+                Scan-to-completion as job
+              </Button>
+            )}
+            {scanJobId && (
+              <Link to={paths().OPS} className="text-[hsl(var(--primary))] hover:underline">
+                Preview job {scanJobId.slice(0, 8)}… → Operations
+              </Link>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Metadata facet chips — clicking COMPOSES a meta.key=value clause
+          into the query text (single source of truth) */}
       <div className="flex flex-wrap items-center gap-1.5">
         <Tag size={13} className="text-[hsl(var(--muted-foreground))]" />
         {view.meta.map((p) => (
@@ -373,6 +620,7 @@ export default function TasksGlobalView() {
             key={metaId(p)}
             onClick={() => removeFilter(p)}
             className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs bg-[hsl(var(--primary))] text-[hsl(var(--primary-foreground))]"
+            title={`Remove meta.${p.key}=${p.value} from the query`}
           >
             {p.key}: {p.value}
             <X size={11} />
@@ -383,6 +631,7 @@ export default function TasksGlobalView() {
             key={metaId(p)}
             onClick={() => addFilter({ key: p.key, value: p.value })}
             className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs border border-[hsl(var(--border))] text-[hsl(var(--muted-foreground))] hover:border-[hsl(var(--primary))] hover:text-[hsl(var(--foreground))] transition-colors"
+            title={`Add meta.${p.key}=${p.value} to the query`}
           >
             {p.key}: {p.value}
             <span className="opacity-60">{p.count}</span>
@@ -415,7 +664,7 @@ export default function TasksGlobalView() {
               {typeGroups.map((g) => (
                 <button
                   key={g.label}
-                  onClick={() => updateView({ q: g.label, page: 0 })}
+                  onClick={() => updateView({ q: setClause(view.q, "type", "=", g.label), page: 0 })}
                   className="flex w-full items-center justify-between gap-3 text-xs hover:text-[hsl(var(--primary))]"
                   title={`Filter by ${g.label}`}
                 >
@@ -435,7 +684,11 @@ export default function TasksGlobalView() {
       {!window.READ_ONLY && total > 0 && bulkActions.length > 0 && (
         <div className="flex flex-wrap items-center gap-2 rounded-lg border border-dashed border-[var(--fc-warn)]/50 bg-[var(--fc-warn-bg)]/40 px-4 py-2">
           <span className="text-xs text-[hsl(var(--muted-foreground))]">
-            Whole scope — all <span className="font-semibold text-[hsl(var(--foreground))]">{truncated ? `${total}+` : total}</span> matching, as a background job:
+            Whole scope — all{" "}
+            <span className="font-semibold text-[hsl(var(--foreground))]">
+              {isCursorMode ? total.toLocaleString() : truncated ? `${total}+` : total}
+            </span>{" "}
+            matching, as a background job:
           </span>
           {bulkActions.map((b) => (
             <Button
@@ -451,12 +704,19 @@ export default function TasksGlobalView() {
         </div>
       )}
 
-      {/* §4.3 bulk-op modal (whole-scope ops only) */}
+      {/* §4.3 bulk-op modal (whole-scope ops only). AQL queries travel as
+          the scope's aql field; plain free text stays in q. */}
       {bulkVerb && (
         <BulkJobModal
           open
           verb={bulkVerb}
-          scope={{ queue: view.queue, state: view.state, q: view.q, meta: metaParam }}
+          scope={{
+            queue: view.queue,
+            state: view.state,
+            q: isAql ? "" : view.q,
+            meta: [],
+            aql: isAql ? view.q : "",
+          }}
           onClose={() => setBulkVerb(null)}
           onStarted={() => {
             setBulkVerb(null);
@@ -475,10 +735,12 @@ export default function TasksGlobalView() {
         </Alert>
       )}
 
-      {truncated && (
-        <div className="flex items-center gap-2 text-xs text-amber-500">
-          <AlertTriangle size={14} />
-          <span>Result set is large; counts are capped by the scan limit. Narrow with search or metadata filters for exact totals.</span>
+      {/* Legacy free-text scans have no resume cursor; the cap is still
+          disclosed (never silent truncation). */}
+      {meta.mode === "legacy" && truncated && (
+        <div className="text-xs text-amber-500">
+          Free-text scan hit its cap — counts are a floor. Use AQL clauses (queue=, state=, meta.*) for
+          budgeted, resumable scans.
         </div>
       )}
 
@@ -505,7 +767,9 @@ export default function TasksGlobalView() {
                     key={g.label}
                     className={view.mode === "group:type" ? clickableRowClass : undefined}
                     {...(view.mode === "group:type"
-                      ? clickableRowProps(() => updateView({ q: g.label, mode: "rows", page: 0 }))
+                      ? clickableRowProps(() =>
+                          updateView({ q: setClause(view.q, "type", "=", g.label), mode: "rows", page: 0 })
+                        )
                       : {})}
                   >
                     <TableCell className={cn("text-xs", view.mode === "group:error" && "text-red-500")}>
@@ -518,7 +782,7 @@ export default function TasksGlobalView() {
             </TableBody>
           </Table>
           <div className="px-4 py-2 border-t border-[hsl(var(--border))] text-xs text-[hsl(var(--muted-foreground))]">
-            Group counts inherit the scan cap — narrow the filter for exact totals.
+            Group counts inherit the scan's coverage — partial until the scan completes.
             {view.mode === "group:type" && " Click a type to open it as rows."}
           </div>
         </div>
@@ -536,7 +800,7 @@ export default function TasksGlobalView() {
               </TableRow>
             </TableHeader>
             <TableBody>
-              {loading && tasks.length === 0 ? (
+              {loading && visibleTasks.length === 0 ? (
                 // Skeleton rows while the (re)filtered set loads, so the empty
                 // state doesn't flash before data arrives.
                 Array.from({ length: 5 }, (_, i) => (
@@ -548,14 +812,14 @@ export default function TasksGlobalView() {
                     ))}
                   </TableRow>
                 ))
-              ) : tasks.length === 0 ? (
+              ) : visibleTasks.length === 0 ? (
                 <TableRow>
                   <TableCell colSpan={window.READ_ONLY ? 4 : 5} className="text-center py-8 text-[hsl(var(--muted-foreground))]">
                     No tasks
                   </TableCell>
                 </TableRow>
               ) : (
-                tasks.map((t) => (
+                visibleTasks.map((t) => (
                   <TableRow
                     key={`${t.queue}:${t.id}`}
                     className={cn(
@@ -635,33 +899,64 @@ export default function TasksGlobalView() {
             onClose={() => setConfirmDelete(null)}
           />
 
-          {/* Pagination + page size */}
-          {total > 0 && (
+          {/* Pagination: cursor-based for exact zset listings, page/size
+              otherwise. */}
+          {isCursorMode ? (
             <div className="flex items-center justify-between px-4 py-3 border-t border-[hsl(var(--border))]">
-              <div className="flex items-center gap-3">
-                <span className="text-xs text-[hsl(var(--muted-foreground))]">
-                  {view.page * view.size + 1}–{Math.min((view.page + 1) * view.size, total)} of {truncated ? `${total}+` : total}
-                </span>
-                <select
-                  value={view.size}
-                  onChange={(e) => updateView({ size: Number(e.target.value), page: 0 })}
-                  aria-label="Page size"
-                  className="h-6 rounded-md border border-[hsl(var(--input))] bg-[hsl(var(--background))] px-1 text-xs"
-                >
-                  {PAGE_SIZES.map((s) => (
-                    <option key={s} value={s}>{s} / page</option>
-                  ))}
-                </select>
-              </div>
+              <span className="text-xs text-[hsl(var(--muted-foreground))]">
+                {visibleTasks.length} rows · <span className="font-mono tabular-nums">{total.toLocaleString()}</span> total · exact
+              </span>
               <div className="flex items-center gap-1">
-                <Button size="icon" variant="ghost" className="h-7 w-7" disabled={view.page === 0} onClick={() => updateView({ page: view.page - 1 })}>
+                <Button
+                  size="icon"
+                  variant="ghost"
+                  className="h-7 w-7"
+                  disabled={cursorStack.length === 0}
+                  onClick={() => setCursorStack((s) => s.slice(0, -1))}
+                >
                   <ChevronLeft size={14} />
                 </Button>
-                <Button size="icon" variant="ghost" className="h-7 w-7" disabled={view.page >= totalPages - 1} onClick={() => updateView({ page: view.page + 1 })}>
+                <Button
+                  size="icon"
+                  variant="ghost"
+                  className="h-7 w-7"
+                  disabled={meta.cursor === ""}
+                  onClick={() => setCursorStack((s) => [...s, meta.cursor])}
+                >
                   <ChevronRight size={14} />
                 </Button>
               </div>
             </div>
+          ) : (
+            total > 0 && (
+              <div className="flex items-center justify-between px-4 py-3 border-t border-[hsl(var(--border))]">
+                <div className="flex items-center gap-3">
+                  <span className="text-xs text-[hsl(var(--muted-foreground))]">
+                    {view.page * view.size + 1}–{Math.min((view.page + 1) * view.size, total)} of{" "}
+                    {truncated ? `${total}+` : total}
+                    {extraMatches > 0 && ` (+${extraMatches} from continued scan)`}
+                  </span>
+                  <select
+                    value={view.size}
+                    onChange={(e) => updateView({ size: Number(e.target.value), page: 0 })}
+                    aria-label="Page size"
+                    className="h-6 rounded-md border border-[hsl(var(--input))] bg-[hsl(var(--background))] px-1 text-xs"
+                  >
+                    {PAGE_SIZES.map((s) => (
+                      <option key={s} value={s}>{s} / page</option>
+                    ))}
+                  </select>
+                </div>
+                <div className="flex items-center gap-1">
+                  <Button size="icon" variant="ghost" className="h-7 w-7" disabled={view.page === 0} onClick={() => updateView({ page: view.page - 1 })}>
+                    <ChevronLeft size={14} />
+                  </Button>
+                  <Button size="icon" variant="ghost" className="h-7 w-7" disabled={view.page >= totalPages - 1} onClick={() => updateView({ page: view.page + 1 })}>
+                    <ChevronRight size={14} />
+                  </Button>
+                </div>
+              </div>
+            )
           )}
         </div>
       )}
@@ -670,7 +965,7 @@ export default function TasksGlobalView() {
       {peek && (
         <TaskDrawer
           peek={peek}
-          resultList={tasks}
+          resultList={visibleTasks}
           onClose={() => setPeekParam(null, { replace: true })}
           onPeek={(target) => setPeekParam(target, { replace: true })}
           onPivot={handlePivot}

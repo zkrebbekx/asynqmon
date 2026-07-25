@@ -12,6 +12,7 @@ import {
   serializeConsoleState,
   serializePeek,
 } from "./urlstate";
+import { aqlFromLegacy } from "./aql";
 
 /**************************************************************
                 Elapsed-vs-deadline budget (§3.7)
@@ -143,12 +144,12 @@ export function filterCoverageRows(rows: CoverageRow[], query: string): Coverage
 
 // activeTaskDrawerSearch builds the /tasks search string that opens the
 // Tasks console filtered to the worker's queue in the active state with the
-// task peeked in the drawer: "?queue=X&state=active&peek=X/<id>".
+// task peeked in the drawer. Since phase 6 the console's q param carries
+// AQL, so the filter travels as clauses: "?q=queue=X state=active&peek=…".
 export function activeTaskDrawerSearch(queue: string, taskId: string): string {
   const params = serializeConsoleState({
     ...DEFAULT_CONSOLE_STATE,
-    state: "active",
-    queue,
+    q: aqlFromLegacy({ queue, state: "active" }),
   });
   params.set("peek", serializePeek({ queue, id: taskId }));
   return `?${params.toString()}`;
