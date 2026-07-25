@@ -7,12 +7,14 @@ import (
 	"math"
 	"sort"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/hibiken/asynq"
 	"github.com/redis/go-redis/v9"
 
 	"github.com/hibiken/asynqmon/aql"
+	"github.com/hibiken/asynqmon/stats"
 )
 
 // ****************************************************************************
@@ -189,12 +191,56 @@ func cursorTotals(ctx context.Context, rc redis.UniversalClient, plan *aql.Plan,
 	return total, nil
 }
 
+// taskFetchWorkers bounds the concurrent GetTaskInfo fan-out of a cursor
+// page. GetTaskInfo cannot be literally pipelined — asynq's public API owns
+// the task decode (see the errsig header: never decode asynq's protobuf
+// ourselves) and issues its own round trips — so the per-row fetch is
+// parallelized instead: order-preserving, bounded, same per-row semantics.
+const taskFetchWorkers = 16
+
+// fetchTaskInfos fetches TaskInfo for (queue, id) refs with bounded
+// concurrency, preserving order. A ref whose task vanished (or errored)
+// yields nil at its position — callers skip it, honestly, exactly like the
+// old sequential loop.
+func fetchTaskInfos(insp *asynq.Inspector, refs [][2]string) []*asynq.TaskInfo {
+	out := make([]*asynq.TaskInfo, len(refs))
+	if len(refs) == 0 {
+		return out
+	}
+	workers := taskFetchWorkers
+	if workers > len(refs) {
+		workers = len(refs)
+	}
+	var wg sync.WaitGroup
+	idx := make(chan int)
+	wg.Add(workers)
+	for w := 0; w < workers; w++ {
+		go func() {
+			defer wg.Done()
+			for i := range idx {
+				ti, err := insp.GetTaskInfo(refs[i][0], refs[i][1])
+				if err == nil {
+					out[i] = ti
+				}
+			}
+		}()
+	}
+	for i := range refs {
+		idx <- i
+	}
+	close(idx)
+	wg.Wait()
+	return out
+}
+
 // execCursorPlan lists one page of a cursorable plan: queues in sorted
 // order, each traversed by ascending (score, id) via ZRANGEBYSCORE … LIMIT.
 // The cursor is the last returned (queue, score, id); resuming fetches from
 // that score inclusively and skips already-served ties (zset ties order
 // lexically by member, so "member ≤ cursor id at the cursor score" is
-// exactly the served set).
+// exactly the served set). Per-row task fetches fan out through
+// fetchTaskInfos (bounded parallel — phase 12) instead of one blocking
+// GetTaskInfo round trip per row.
 func execCursorPlan(ctx context.Context, rc redis.UniversalClient, insp *asynq.Inspector, plan *aql.Plan, queues []string, cursorStr string, size int, pf PayloadFormatter) (tasks []*searchTask, total int64, next string, err error) {
 	total, err = cursorTotals(ctx, rc, plan, queues)
 	if err != nil {
@@ -237,24 +283,37 @@ func execCursorPlan(ctx context.Context, rc redis.UniversalClient, insp *asynq.I
 			if len(entries) == 0 {
 				break
 			}
+			// Filter tie-skips first, then fetch the page's tasks in one
+			// bounded-parallel fan-out (order preserved).
+			type pageEntry struct {
+				id    string
+				score float64
+			}
+			eligible := make([]pageEntry, 0, len(entries))
+			refs := make([][2]string, 0, len(entries))
 			for _, e := range entries {
-				if len(tasks) >= size {
-					exhausted = false
-					break
-				}
 				id, _ := e.Member.(string)
 				if resuming && e.Score == cur.Score && id <= cur.ID {
 					continue // tie already served on the previous page
 				}
-				ti, gerr := insp.GetTaskInfo(qname, id)
-				if gerr != nil {
+				eligible = append(eligible, pageEntry{id: id, score: e.Score})
+				refs = append(refs, [2]string{qname, id})
+			}
+			infos := fetchTaskInfos(insp, refs)
+			for i, pe := range eligible {
+				if len(tasks) >= size {
+					exhausted = false
+					break
+				}
+				ti := infos[i]
+				if ti == nil {
 					continue // vanished between ZRANGE and fetch: skip, honestly
 				}
 				if ti.State.String() != plan.State {
 					continue // moved mid-listing
 				}
 				tasks = append(tasks, toSearchTask(ti, pf))
-				last = aql.Cursor{Queue: qname, Score: e.Score, ID: id}
+				last = aql.Cursor{Queue: qname, Score: pe.score, ID: pe.id}
 			}
 			if len(tasks) >= size {
 				// More entries may remain in this queue (or later queues).
@@ -454,12 +513,67 @@ func aggregatingCount(insp *asynq.Inspector, queues []string, group string) (int
 	return total, nil
 }
 
+// estimateFreshWindow bounds how old the stats cache may be before the
+// candidate estimator falls back to live size reads (phase 12).
+const estimateFreshWindow = 15 * time.Second
+
+// estimateFromStatsCache prices the scan from the stats snapshot cache when
+// it is fresh (< estimateFreshWindow): zero live ZCARD/LLEN commands. Returns
+// ok=false when the engine is absent/stale/missing any requested queue —
+// callers then take the live path. Individual rows may be older than the
+// fleet stamp in tiered mode (rotation); the number is expressly an ESTIMATE
+// of scan work, so last-known sizes are exactly fit for purpose.
+func estimateFromStatsCache(ctx context.Context, engine *stats.Engine, state string, queues []string) (int64, bool) {
+	if engine == nil || state == "aggregating" {
+		// The snapshot stores group COUNTS, not member totals — aggregating
+		// stays live (Inspector.Groups).
+		return 0, false
+	}
+	res, err := engine.Read(ctx)
+	if err != nil || res.Fleet == nil || time.Since(res.Fleet.RefreshedAt) > estimateFreshWindow {
+		return 0, false
+	}
+	byName := make(map[string]*stats.QueueSnapshot, len(res.Queues))
+	for _, s := range res.Queues {
+		byName[s.Queue] = s
+	}
+	var total int64
+	for _, q := range queues {
+		s, ok := byName[q]
+		if !ok {
+			return 0, false // not yet observed (rotation) — go live
+		}
+		switch state {
+		case "pending":
+			total += s.Pending
+		case "active":
+			total += s.Active
+		case "scheduled":
+			total += s.Scheduled
+		case "retry":
+			total += s.Retry
+		case "archived":
+			total += s.Archived
+		case "completed":
+			total += s.Completed
+		default:
+			return 0, false
+		}
+	}
+	return total, true
+}
+
 // estimateCandidates prices a scan: the total number of tasks in the scanned
-// state across the resolved queues (one pipelined size read). It is an
-// estimate of scan WORK, not of matches — the §5.9 meter's "~M candidates".
-func estimateCandidates(ctx context.Context, rc redis.UniversalClient, insp *asynq.Inspector, state string, queues []string, group string) (int64, error) {
+// state across the resolved queues. It is an estimate of scan WORK, not of
+// matches — the §5.9 meter's "~M candidates". Since phase 12 it reads the
+// stats cache when fresh (< 15s) instead of issuing live ZCARD/LLEN per
+// queue; the live pipelined read remains the fallback.
+func estimateCandidates(ctx context.Context, rc redis.UniversalClient, insp *asynq.Inspector, engine *stats.Engine, state string, queues []string, group string) (int64, error) {
 	if state == "aggregating" {
 		return aggregatingCount(insp, queues, group)
+	}
+	if total, ok := estimateFromStatsCache(ctx, engine, state, queues); ok {
+		return total, nil
 	}
 	pipe := rc.Pipeline()
 	cmds := make([]*redis.IntCmd, len(queues))

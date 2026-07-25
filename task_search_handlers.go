@@ -325,7 +325,7 @@ func writeAqlError(w http.ResponseWriter, perr *aql.ParseError) {
 	json.NewEncoder(w).Encode(perr)
 }
 
-func newSearchTasksHandlerFunc(inspector *asynq.Inspector, rc redis.UniversalClient, pf PayloadFormatter) http.HandlerFunc {
+func newSearchTasksHandlerFunc(inspector *asynq.Inspector, rc redis.UniversalClient, statsEngine *stats.Engine, pf PayloadFormatter) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		q := r.URL.Query()
 		search := q.Get("q")
@@ -335,7 +335,7 @@ func newSearchTasksHandlerFunc(inspector *asynq.Inspector, rc redis.UniversalCli
 		// keeps the pre-AQL substring semantics below, so old URLs and old
 		// clients behave identically.
 		if aql.IsQuery(search) {
-			serveAqlSearch(w, r, inspector, rc, pf, search)
+			serveAqlSearch(w, r, inspector, rc, statsEngine, pf, search)
 			return
 		}
 
@@ -404,7 +404,7 @@ func newSearchTasksHandlerFunc(inspector *asynq.Inspector, rc redis.UniversalCli
 // serveAqlSearch handles GET /api/tasks when q is an AQL query: parse →
 // resolve state (explicit clause > legacy state param > inference) →
 // compile → execute as an exact cursor listing or a budgeted scan.
-func serveAqlSearch(w http.ResponseWriter, r *http.Request, inspector *asynq.Inspector, rc redis.UniversalClient, pf PayloadFormatter, search string) {
+func serveAqlSearch(w http.ResponseWriter, r *http.Request, inspector *asynq.Inspector, rc redis.UniversalClient, statsEngine *stats.Engine, pf PayloadFormatter, search string) {
 	q := r.URL.Query()
 	now := time.Now()
 
@@ -479,7 +479,7 @@ func serveAqlSearch(w http.ResponseWriter, r *http.Request, inspector *asynq.Ins
 		writeError(w, errorStatus(eerr), eerr)
 		return
 	}
-	estimate, eerr := estimateCandidates(r.Context(), rc, inspector, state, queues, plan.Group)
+	estimate, eerr := estimateCandidates(r.Context(), rc, inspector, statsEngine, state, queues, plan.Group)
 	if eerr != nil {
 		writeError(w, errorStatus(eerr), eerr)
 		return

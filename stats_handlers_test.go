@@ -131,7 +131,7 @@ func TestFleetOverviewHandler(t *testing.T) {
 
 func TestFleetQueuesHandler(t *testing.T) {
 	engine := newStatsTestEngine(t)
-	handler := newFleetQueuesHandlerFunc(engine)
+	handler := newFleetQueuesHandlerFunc(engine, nil)
 
 	queueNames := func(resp fleetQueuesResponse) []string {
 		names := make([]string, 0, len(resp.Queues))
@@ -237,7 +237,7 @@ func TestFleetQueuesHandler(t *testing.T) {
 		})
 
 		Convey("When the stats engine is disabled (nil)", func() {
-			w := getJSON(t, newFleetQueuesHandlerFunc(nil), "/api/fleet/queues", nil)
+			w := getJSON(t, newFleetQueuesHandlerFunc(nil, nil), "/api/fleet/queues", nil)
 			Convey("Then it responds 503 with a JSON error", func() {
 				So(w.Code, ShouldEqual, http.StatusServiceUnavailable)
 			})

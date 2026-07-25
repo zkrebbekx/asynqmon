@@ -117,6 +117,11 @@ type Options struct {
 	// only asynqmon-owned keys, so it stays enabled in ReadOnly mode unless
 	// disabled here explicitly.
 	ErrorIndexDisabled bool
+
+	// errsigIndexer is the replica's indexer instance, set by New so the
+	// §3.12 health readout can report "held by this replica"; nil when
+	// disabled (or in direct-router tests).
+	errsigIndexer *errsig.Indexer
 	// --------------------------- end phase 9 ---------------------------
 
 	// ------------------------------------------------------------------
@@ -134,6 +139,21 @@ type Options struct {
 	// tests that build the router directly may inject their own.
 	enqueueClient *asynq.Client
 	// --------------------------- end §5.10 -----------------------------
+
+	// ------------------------------------------------------------------
+	// Fleet Console phase 16 — Flow view correlation keys (§3.5).
+	// ------------------------------------------------------------------
+
+	// CorrelationKeys is the ordered list of payload keys the task
+	// drawer's Flow view recognizes as correlation ids (first present
+	// wins). Producers opt in by putting one of these keys in their JSON
+	// payloads; the drawer then reconstructs the de-facto chain of tasks
+	// sharing the value via the metadata search path. Exposed to the
+	// frontend through GET /api/features ("correlation_keys"). Entries
+	// are trimmed, empties dropped, and duplicates removed; nil/empty
+	// means the default list: trace_id, correlation_id, request_id.
+	CorrelationKeys []string
+	// --------------------------- end phase 16 --------------------------
 
 	// ------------------------------------------------------------------
 	// Fleet Console phase 15 — hygiene reports (§3.10) options.
@@ -254,6 +274,7 @@ func New(opts Options) *HTTPHandler {
 			Inspector:   i,
 		})
 		errIndexer.Start(context.Background())
+		opts.errsigIndexer = errIndexer
 		closers = append([]func() error{
 			func() error { errIndexer.Stop(); return nil },
 		}, closers...)
@@ -341,18 +362,36 @@ func muxRouter(opts Options, rc redis.UniversalClient, inspector *asynq.Inspecto
 
 	api := router.PathPrefix("/api").Subrouter()
 
+	// ── Phase 12: "currently viewed" tracking (§5.1 hot set) ──
+	// Whichever replica serves a directory name= filter or a workspace
+	// endpoint records the queue in a small TTL'd Redis zset; the sweeping
+	// replica folds recent views into the hot set on tiered fleets.
+	// Best-effort by design (rotation press on regardless); markViewed wraps
+	// the workspace routes so their handler signatures stay untouched.
+	viewTracker := stats.NewViewTracker(rc, nil)
+	markViewed := func(h http.HandlerFunc) http.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) {
+			if qname := mux.Vars(r)["qname"]; qname != "" {
+				viewTracker.MarkViewed(r.Context(), qname)
+			}
+			h(w, r)
+		}
+	}
+	// ── end phase-12 view tracking ──
+
 	// Fleet Console endpoints (stats cache; §5.1). These serve exclusively
 	// from the sweeper's snapshot cache — never per-queue Redis reads per
 	// request. The legacy GET /api/queues below stays untouched for the
 	// shipping dashboard; the new directory reads /api/fleet/queues.
 	api.HandleFunc("/fleet/overview", newFleetOverviewHandlerFunc(statsEngine)).Methods("GET")
-	api.HandleFunc("/fleet/queues", newFleetQueuesHandlerFunc(statsEngine)).Methods("GET")
+	api.HandleFunc("/fleet/queues", newFleetQueuesHandlerFunc(statsEngine, viewTracker)).Methods("GET")
 	api.HandleFunc("/fleet/attention", newFleetAttentionHandlerFunc(statsEngine)).Methods("GET")
 	api.HandleFunc("/fleet/events", newFleetEventsHandlerFunc(eventsBroker)).Methods("GET")
 
-	// Queue endpoints.
+	// Queue endpoints. The workspace GET marks the queue "currently viewed"
+	// (§5.1 hot set, phase 12).
 	api.HandleFunc("/queues", newListQueuesHandlerFunc(inspector)).Methods("GET")
-	api.HandleFunc("/queues/{qname}", newGetQueueHandlerFunc(inspector)).Methods("GET")
+	api.HandleFunc("/queues/{qname}", markViewed(newGetQueueHandlerFunc(inspector))).Methods("GET")
 	api.HandleFunc("/queues/{qname}", newDeleteQueueHandlerFunc(inspector)).Methods("DELETE")
 	api.HandleFunc("/queues/{qname}:pause", newPauseQueueHandlerFunc(inspector)).Methods("POST")
 	api.HandleFunc("/queues/{qname}:resume", newResumeQueueHandlerFunc(inspector)).Methods("POST")
@@ -361,8 +400,8 @@ func muxRouter(opts Options, rc redis.UniversalClient, inspector *asynq.Inspecto
 	// Right-rail histograms: retry-ETA (exact pipelined ZCOUNT buckets on the
 	// retry zset) and pending-wait (head/tail LINDEX sampling, labeled
 	// "sampled, head/tail-biased"). Handlers live in queue_workspace_handlers.go.
-	api.HandleFunc("/queues/{qname}/retry_histogram", newRetryHistogramHandlerFunc(rc)).Methods("GET")
-	api.HandleFunc("/queues/{qname}/pending_wait_sample", newPendingWaitSampleHandlerFunc(rc)).Methods("GET")
+	api.HandleFunc("/queues/{qname}/retry_histogram", markViewed(newRetryHistogramHandlerFunc(rc))).Methods("GET")
+	api.HandleFunc("/queues/{qname}/pending_wait_sample", markViewed(newPendingWaitSampleHandlerFunc(rc))).Methods("GET")
 	// ── end Queue Workspace routes ──
 
 	// Queue Historical Stats endpoint.
@@ -433,8 +472,10 @@ func muxRouter(opts Options, rc redis.UniversalClient, inspector *asynq.Inspecto
 	// Cross-queue server-side task search / filter / pagination. `q` accepts
 	// AQL (phase 6, §3.4): cursorable plans return exact totals + (score,id)
 	// cursor pages; scan plans return budgeted partial results + a resume
-	// scan_cursor; parse rejections are 400 {error, position, hint}.
-	api.HandleFunc("/tasks", newSearchTasksHandlerFunc(inspector, rc, payloadFmt)).Methods("GET")
+	// scan_cursor; parse rejections are 400 {error, position, hint}. The
+	// stats engine feeds the phase-12 candidate estimator (cache when fresh,
+	// live fallback).
+	api.HandleFunc("/tasks", newSearchTasksHandlerFunc(inspector, rc, statsEngine, payloadFmt)).Methods("GET")
 	// All seven per-state counts in one pipelined pass (state pills, §3.4);
 	// fleet-wide answers come from the stats cache sums.
 	api.HandleFunc("/tasks/state_counts", newStateCountsHandlerFunc(inspector, rc, statsEngine)).Methods("GET")
@@ -574,6 +615,16 @@ func muxRouter(opts Options, rc redis.UniversalClient, inspector *asynq.Inspecto
 			WebhookURL:  opts.HygieneWebhookURL,
 		})
 	}
+	// ------------------------------------------------------------------
+	// Phase 12 — Settings › Health readout (§3.12): per-role lease holders,
+	// tier status, budget, coverage, sweep cost, series-sampler status.
+	// Read-only; served by any replica from the shared lease keys + the
+	// stats cache. Handler lives in health_handlers.go.
+	// ------------------------------------------------------------------
+	api.HandleFunc("/health/roles",
+		newHealthRolesHandlerFunc(rc, statsEngine, opts.errsigIndexer, hygieneEng)).Methods("GET")
+	// --------------------------- end phase 12 --------------------------
+
 	api.HandleFunc("/hygiene", newListHygieneHandlerFunc(rc)).Methods("GET")
 	api.HandleFunc("/hygiene/{kind}", newGetHygieneReportHandlerFunc(rc)).Methods("GET")
 	api.HandleFunc("/hygiene/{kind}/config", newPutHygieneConfigHandlerFunc(rc, jobsStore)).Methods("PUT")
@@ -591,7 +642,8 @@ func muxRouter(opts Options, rc redis.UniversalClient, inspector *asynq.Inspecto
 	// block's blast radius).
 	// ------------------------------------------------------------------
 	enqueueEnabled := opts.EnableEnqueue && !opts.ReadOnly
-	api.HandleFunc("/features", newFeaturesHandlerFunc(enqueueEnabled)).Methods("GET")
+	api.HandleFunc("/features",
+		newFeaturesHandlerFunc(enqueueEnabled, normalizeCorrelationKeys(opts.CorrelationKeys))).Methods("GET")
 	if enqueueEnabled {
 		ec := opts.enqueueClient
 		if ec == nil {

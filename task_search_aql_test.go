@@ -472,18 +472,35 @@ func TestJobScopeWithAql(t *testing.T) {
 		time.Sleep(50 * time.Millisecond)
 	}
 
-	// Rejection path: env-dependent predicates cannot be job scopes.
-	reqBody := map[string]interface{}{
+	// Phase 12 lifted the phase-6 env rejection: env-dependent predicates
+	// are now valid job scopes (the runner evaluates them through the
+	// aql.EnvBuilder session — execution covered by TestJobEnvScope).
+	envBody := map[string]interface{}{
 		"verb": "cancel",
 		"scope": map[string]interface{}{
 			"queue": "aqljob", "state": "active", "q": "", "meta": []string{},
 			"aql": "orphaned",
 		},
+		"reason": "env scopes are valid since phase 12",
+	}
+	var envCreated struct {
+		ID    string `json:"id"`
+		State string `json:"state"`
+	}
+	envW := doJSON(t, h, "POST", "/api/jobs", envBody, &envCreated)
+
+	// A malformed AQL clause is still rejected with the positioned error.
+	badBody := map[string]interface{}{
+		"verb": "archive",
+		"scope": map[string]interface{}{
+			"queue": "aqljob", "state": "pending", "q": "", "meta": []string{},
+			"aql": "enqueued<-2h",
+		},
 		"reason": "should be rejected",
 	}
-	rejW := doJSON(t, h, "POST", "/api/jobs", reqBody, nil)
+	badW := doJSON(t, h, "POST", "/api/jobs", badBody, nil)
 	var rejected aqlErrorResp
-	_ = json.Unmarshal(rejW.Body.Bytes(), &rejected)
+	_ = json.Unmarshal(badW.Body.Bytes(), &rejected)
 
 	Convey("Given the jobs Matcher seam", t, func() {
 		Convey("When a preview job carries an AQL scope", func() {
@@ -492,11 +509,16 @@ func TestJobScopeWithAql(t *testing.T) {
 				So(previewed.Counts.Candidates, ShouldEqual, 4)
 			})
 		})
-		Convey("When the AQL scope needs live worker/lease data", func() {
-			Convey("Then create is refused with the structured rejection", func() {
-				So(rejW.Code, ShouldEqual, 400)
-				So(rejected.Error, ShouldContainSubstring, "`orphaned`")
-				So(rejected.Hint, ShouldContainSubstring, "phase 12")
+		Convey("When the AQL scope needs live worker/lease data (phase 12)", func() {
+			Convey("Then create is accepted — the runner's env session evaluates it", func() {
+				So(envW.Code, ShouldEqual, 201)
+				So(envCreated.ID, ShouldNotBeEmpty)
+			})
+		})
+		Convey("When the AQL scope is unanswerable", func() {
+			Convey("Then create is still refused with the structured rejection", func() {
+				So(badW.Code, ShouldEqual, 400)
+				So(rejected.Error, ShouldNotBeEmpty)
 			})
 		})
 	})

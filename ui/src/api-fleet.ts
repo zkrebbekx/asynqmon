@@ -51,6 +51,11 @@ export interface FleetCoverage {
   queues_total: number;
   refreshed_pct_5m: number;
   updated_at: string; // RFC3339
+  // Phase-12 governor stamp (§5.1 tiers 2-3). Optional: absent on backends
+  // predating the command-budget governor.
+  budget?: number; // commands/second
+  full_rotation_seconds_est?: number; // 0 = every queue refreshed every tick
+  hot_set_size?: number;
 }
 
 export interface FleetOverviewResponse {
@@ -348,6 +353,67 @@ export async function getPendingWaitSample(
     method: "get",
     url: `${getBaseUrl()}/queues/${qname}/pending_wait_sample${qs}`,
   });
+  return resp.data;
+}
+
+/**************************************************************
+              GET /api/health/roles (§3.12, phase 12)
+ **************************************************************/
+
+// One §5.13 singleton role's lease state. The bulk-job runner is absent by
+// design: it is claimed per job (its fencing is visible on Operations).
+export interface HealthRole {
+  role: string; // "stats" | "errsig" | "hygiene"
+  title: string;
+  holder: string; // instance ID; "" = unheld
+  held_by_this_replica: boolean;
+  ttl_ms: number;
+  // Fencing counter — how many claims ever happened; stale-token writers
+  // below it are rejected.
+  fence: number;
+}
+
+// The last sweep THIS replica ran (holder-local measurement) — absent on
+// replicas that never held the sweeper lease.
+export interface HealthSweep {
+  at: string; // RFC3339
+  queues: number;
+  refreshed: number;
+  read_cmds: number;
+  write_cmds: number;
+  duration_ms: number;
+}
+
+export interface HealthSeries {
+  // "full" (tier 1) | "hot+rotation" (tiers 2-3) | "hot-only" (above the
+  // hard §5.8 ceiling).
+  mode: string;
+  queue_ceiling: number;
+}
+
+export interface HealthStats {
+  available: boolean;
+  reason?: string;
+  tier?: number;
+  command_budget?: number;
+  hot_set_size?: number;
+  full_rotation_seconds_est?: number;
+  queues_total?: number;
+  coverage_pct_5m?: number;
+  updated_at?: string;
+  source?: string; // "local" | "cache"
+  last_sweep_local?: HealthSweep;
+  series?: HealthSeries;
+}
+
+export interface HealthRolesResponse {
+  roles: HealthRole[];
+  stats: HealthStats;
+  updated_at: string; // RFC3339
+}
+
+export async function getHealthRoles(): Promise<HealthRolesResponse> {
+  const resp = await axios({ method: "get", url: `${getBaseUrl()}/health/roles` });
   return resp.data;
 }
 

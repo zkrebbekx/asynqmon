@@ -35,19 +35,27 @@ const coverageWindow = 5 * time.Minute
 // tier produced them, and where they were read from. The frontend contract
 // depends on these fields being present from day one.
 type fleetCoverage struct {
-	// Tier of the stats engine that produced the data (§5.1 tiering table).
-	// Always 1 until phase 12 lands rotating shards.
+	// Tier of the stats engine that produced the data (§5.1 tiering table:
+	// 1|2|3 by fleet size; tiers 2-3 rotate shards under the command budget).
 	Tier int `json:"tier"`
 	// QueuesTotal is the number of queues in the cache.
 	QueuesTotal int `json:"queues_total"`
 	// RefreshedPct5m is the percentage (0-100) of queues whose snapshot is
-	// younger than 5 minutes.
+	// younger than 5 minutes — computed from the actual refreshed_at
+	// distribution, which in tiers 2-3 reflects real rotation staleness.
 	RefreshedPct5m float64 `json:"refreshed_pct_5m"`
 	// UpdatedAt is when the fleet aggregate was last swept (RFC3339).
 	UpdatedAt string `json:"updated_at"`
 	// Source is "local" (in-process, sweeping replica) or "cache" (shared
 	// Redis cache).
 	Source string `json:"source"`
+
+	// Phase-12 governor stamp (additive; §3.1 tile stamps + §3.12 health):
+	// the command budget (cmds/sec), the estimated seconds for one full cold
+	// rotation (0 = every queue refreshed every tick), and the hot-set size.
+	Budget                 int `json:"budget"`
+	FullRotationSecondsEst int `json:"full_rotation_seconds_est"`
+	HotSetSize             int `json:"hot_set_size"`
 }
 
 type fleetAggregates struct {
@@ -170,12 +178,19 @@ func buildCoverage(res *stats.ReadResult, now time.Time) fleetCoverage {
 	if n := len(res.Queues); n > 0 {
 		pct = float64(fresh) / float64(n) * 100
 	}
+	tier := res.Fleet.Tier
+	if tier == 0 {
+		tier = 1 // rows written before phase 12 carry no tier
+	}
 	return fleetCoverage{
-		Tier:           1, // phase 12 introduces tiers 2-3
-		QueuesTotal:    len(res.Queues),
-		RefreshedPct5m: pct,
-		UpdatedAt:      formatTimeInRFC3339(res.Fleet.RefreshedAt),
-		Source:         res.Source,
+		Tier:                   tier,
+		QueuesTotal:            len(res.Queues),
+		RefreshedPct5m:         pct,
+		UpdatedAt:              formatTimeInRFC3339(res.Fleet.RefreshedAt),
+		Source:                 res.Source,
+		Budget:                 res.Fleet.CommandBudget,
+		FullRotationSecondsEst: res.Fleet.FullRotationEstSec,
+		HotSetSize:             res.Fleet.HotSetSize,
 	}
 }
 
@@ -321,7 +336,11 @@ const (
 //
 // Parsing is lenient: unknown fields / unparsable values never fail the
 // request; the offending tokens are echoed back in "filter_ignored".
-func newFleetQueuesHandlerFunc(engine *stats.Engine) http.HandlerFunc {
+//
+// tracker (optional) records exact `name=` filter hits as "currently viewed"
+// queues — the §5.1 hot-set signal (phase 12): a queue an operator pins in
+// the directory stays refreshed every tick on tiered fleets.
+func newFleetQueuesHandlerFunc(engine *stats.Engine, tracker *stats.ViewTracker) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		q := r.URL.Query()
 
@@ -357,6 +376,11 @@ func newFleetQueuesHandlerFunc(engine *stats.Engine) http.HandlerFunc {
 			}
 		}
 		filter := stats.ParseFilter(q.Get("f"))
+		if tracker != nil {
+			for _, name := range filter.ExactNames() {
+				tracker.MarkViewed(r.Context(), name)
+			}
+		}
 
 		res, ok := readStats(w, r, engine)
 		if !ok {
