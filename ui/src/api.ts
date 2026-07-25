@@ -594,6 +594,55 @@ export async function getTaskInfo(
   return resp.data;
 }
 
+// The flag-gated enqueue capability (§5.10). Field names are a backend
+// contract (enqueue.go enqueueTaskRequest). Absent optional fields fall back
+// to asynq defaults server-side.
+export interface EnqueueTaskRequest {
+  type: string;
+  payload: string;
+  // When true, payload is base64-encoded binary.
+  payload_base64?: boolean;
+  max_retry?: number;
+  timeout_seconds?: number;
+  deadline?: string; // RFC3339
+  retention_seconds?: number;
+  unique_ttl_seconds?: number;
+  // Mutually exclusive scheduling knobs.
+  process_at?: string; // RFC3339
+  process_in_seconds?: number;
+  // Optional free text recorded on the audit entry.
+  reason?: string;
+}
+
+export async function enqueueTask(
+  qname: string,
+  body: EnqueueTaskRequest
+): Promise<TaskInfo> {
+  const resp = await axios({
+    method: "post",
+    url: `${getBaseUrl()}/queues/${qname}/tasks`,
+    data: body,
+  });
+  return resp.data;
+}
+
+// Capability discovery (GET /api/features): which gated features this
+// deployment has on. Deliberately independent of /api/fleet/overview, which
+// 503s while the stats engine is disabled or warming up.
+export interface FeaturesResponse {
+  features: {
+    enqueue: boolean;
+  };
+}
+
+export async function getFeatures(): Promise<FeaturesResponse> {
+  const resp = await axios({
+    method: "get",
+    url: `${getBaseUrl()}/features`,
+  });
+  return resp.data;
+}
+
 export async function listActiveTasks(
   qname: string,
   pageOpts?: PaginationOptions

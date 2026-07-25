@@ -11,6 +11,7 @@ import { useSelector } from "react-redux";
 import { AppState } from "../store";
 import * as api from "../api";
 import { AuditEntry, JobDetail, JobInfo } from "../api";
+import { SeriesResponse, getSeries } from "../api-series";
 import { usePolling } from "../hooks";
 import {
   isTerminalJobState,
@@ -18,8 +19,10 @@ import {
   scopeLabel,
   verifyVerdict,
 } from "../lib/bulkjob";
+import { burnDownProjection, projectionSentence, sliceLastSeconds } from "../lib/series";
 import { toErrorString, uuidPrefix } from "../utils";
 import { cn } from "../lib/utils";
+import { BurnDown } from "../components/charts";
 import { Button } from "../components/ui/button";
 import { Alert, AlertDescription, AlertTitle } from "../components/ui/alert";
 import {
@@ -58,6 +61,92 @@ interface VerifyState {
   loading: boolean;
   verdict: string;
   error: string;
+}
+
+/**************************************************************
+        Verify burn-down (§4.3 step 6, ring buffers phase 10)
+ **************************************************************/
+
+// The §5.8 depth metric a job scope's state maps onto (the state whose
+// burn-down proves the remediation). States without a collected series
+// (scheduled, completed, aggregating) render no chart — absent, not faked.
+const STATE_METRIC: Record<string, string> = {
+  pending: "pending",
+  active: "active",
+  retry: "retry",
+  archived: "archived",
+};
+
+// VerifyBurnDown fetches the scoped state's hot series and renders the
+// burn-down chart + the "drains in ~42m at current rate" projection —
+// linear fit over the last 10 samples, ETA ONLY when the slope is negative,
+// otherwise the honest "not draining" (§4.3 step 6).
+function VerifyBurnDown({ job }: { job: JobInfo }) {
+  const metric = STATE_METRIC[job.scope.state ?? ""];
+  const scope =
+    job.scope.queue && job.scope.queue !== "all" ? `queue:${job.scope.queue}` : "fleet";
+  const [series, setSeries] = useState<SeriesResponse | null>(null);
+  const [failed, setFailed] = useState(false);
+
+  useEffect(() => {
+    if (!metric) return;
+    let disposed = false;
+    const fetchSeries = async () => {
+      try {
+        const s = await getSeries({ scope, metric, window: "3h" });
+        if (!disposed) {
+          setSeries(s);
+          setFailed(false);
+        }
+      } catch {
+        if (!disposed) setFailed(true);
+      }
+    };
+    fetchSeries();
+    const id = setInterval(fetchSeries, 30_000);
+    return () => {
+      disposed = true;
+      clearInterval(id);
+    };
+  }, [scope, metric]);
+
+  if (!metric) return null;
+  if (failed || series === null) return null;
+
+  // Chart shows the last 30 minutes; the projection fits the last 10 samples.
+  const nowSec = Math.floor(Date.now() / 1000);
+  const recent = sliceLastSeconds(series.points, 30 * 60, nowSec);
+  const proj = burnDownProjection(series.points);
+  if (proj === null) {
+    return (
+      <div className="mt-2 text-[10.5px] text-[var(--fc-ink3)]">
+        burn-down: not enough ring-buffer samples yet to project a drain rate
+      </div>
+    );
+  }
+  const sentence = projectionSentence(proj);
+  const draining = proj.etaMinutes !== null;
+  return (
+    <div className="mt-2" data-testid="verify-burndown">
+      <div className="mb-1 flex items-baseline gap-2 text-[10px] uppercase tracking-[0.1em] text-[var(--fc-ink3)]">
+        {scope === "fleet" ? "fleet" : job.scope.queue} · {metric} · last 30m
+        <span
+          className={cn(
+            "normal-case tracking-normal",
+            draining ? "font-semibold text-[var(--fc-good)]" : "text-[var(--fc-warn)]"
+          )}
+        >
+          {sentence}
+        </span>
+      </div>
+      <BurnDown
+        points={recent}
+        slopePerMin={proj.slopePerMin}
+        etaMinutes={proj.etaMinutes}
+        height={72}
+      />
+    </div>
+  );
 }
 
 export default function OpsView() {
@@ -438,6 +527,8 @@ export default function OpsView() {
                                   {verify.verdict}
                                 </div>
                               ) : null}
+                              {/* Burn-down of the scoped state (§4.3 step 6) */}
+                              {j.state === "done" && <VerifyBurnDown job={j} />}
                               {j.error && (
                                 <div className="mt-2 rounded border border-[var(--fc-crit)]/40 bg-[var(--fc-crit-bg)] p-2 text-xs text-[var(--fc-crit)]">
                                   {j.error}

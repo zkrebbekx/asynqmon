@@ -137,6 +137,16 @@ export interface AttentionFinding {
   since: string; // RFC3339
   // The query the system wrote for you — wired into /tasks or /queues.
   suggested_query: string;
+  // Phase-10 additive: the §5.8 series that visualizes this finding (the
+  // rail's 30m spark). Absent when no collected series backs the detector.
+  series_scope?: string;
+  series_metric?: string;
+}
+
+// One baseline detector still gathering its baseline (§3.1 learning badges).
+export interface LearningDetector {
+  detector: string;
+  until: string; // RFC3339 go-live time
 }
 
 export interface FleetAttentionResponse {
@@ -144,6 +154,8 @@ export interface FleetAttentionResponse {
   updated_at: string;
   detectors_live: number;
   detectors_learning: number;
+  // Phase-10 additive: which detectors are learning, and until when.
+  learning?: LearningDetector[];
 }
 
 export async function getFleetAttention(): Promise<FleetAttentionResponse> {

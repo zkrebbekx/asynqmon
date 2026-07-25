@@ -270,7 +270,7 @@ func TestSweepSeededFleet(t *testing.T) {
 			So(f.RefreshedAt.IsZero(), ShouldBeFalse)
 		})
 
-		Convey("Then the sweep cost matches the budget: 15 commands per queue, +1 per queue with pending, +4 per sweep, + bounded group reads", func() {
+		Convey("Then the sweep cost matches the budget: 15 commands per queue, +1 per queue with pending, +4 per sweep, + bounded group reads, + first-sweep baseline loads", func() {
 			cost := engine.LastSweep()
 			So(cost.Queues, ShouldEqual, 2)
 			// 1 SMEMBERS asynq:queues + 1 SMEMBERS cache index
@@ -280,10 +280,18 @@ func TestSweepSeededFleet(t *testing.T) {
 			// + 1 INFO memory
 			// + 2 GROUP_STALL reads (q2 has one group: SMEMBERS + ZRANGE)
 			// + 1 ZRANGE of the (empty) scheduler snapshot index (§5.12)
-			So(cost.ReadCmds, ShouldEqual, 38)
+			// = 38, plus the phase-10 first-sweep baseline loads (baseline.go;
+			// all cadenced, so steady-state sweeps re-issue none of them):
+			// + 1 GET series learning anchor
+			// + 2 queues x 7 GET FAIL_SPIKE daily counters
+			// + 2 GET DEPTH_ANOMALY rollup rings (hourly cadence)
+			// + 2 GET CONSUMERS_DROPPED hot-ring window seeds (once/holder)
+			So(cost.ReadCmds, ShouldEqual, 57)
 			// 2 queues x (HSET + PEXPIRE) + 1 SADD index + fleet HSET +
-			// PEXPIRE + 1 SET attention report
-			So(cost.WriteCmds, ShouldEqual, 8)
+			// PEXPIRE + 1 SET attention report = 8, + 1 SETNX series learning
+			// anchor (once per holder; §5.8 slot flushes happen only when the
+			// sweep clock crosses a 30s slot boundary — never on a first sweep)
+			So(cost.WriteCmds, ShouldEqual, 9)
 			So(cost.Duration, ShouldBeGreaterThan, 0)
 		})
 

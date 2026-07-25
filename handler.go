@@ -117,6 +117,22 @@ type Options struct {
 	// disabled here explicitly.
 	ErrorIndexDisabled bool
 	// --------------------------- end phase 9 ---------------------------
+
+	// ------------------------------------------------------------------
+	// Fleet Console — enqueue capability (§5.10) options.
+	// ------------------------------------------------------------------
+
+	// EnableEnqueue turns on POST /api/queues/{qname}/tasks (create a task
+	// from the UI via an embedded asynq.Client; powers clone-and-edit,
+	// §3.5). Default false. Always excluded in ReadOnly mode; when gated
+	// off the route answers 403 JSON with the reason.
+	EnableEnqueue bool
+
+	// enqueueClient backs the enqueue route. Set by New (and closed via
+	// HTTPHandler.Close) when EnableEnqueue && !ReadOnly; same-package
+	// tests that build the router directly may inject their own.
+	enqueueClient *asynq.Client
+	// --------------------------- end §5.10 -----------------------------
 }
 
 // HTTPHandler is a http.Handler for asynqmon application.
@@ -218,6 +234,18 @@ func New(opts Options) *HTTPHandler {
 		}, closers...)
 	}
 	// --------------------------- end phase 9 ---------------------------
+
+	// ------------------------------------------------------------------
+	// Fleet Console — embedded enqueue client lifecycle (§5.10). Only
+	// constructed when the flag is on and this replica may mutate; the
+	// §5.10 route block in muxRouter registers a 403 handler otherwise.
+	// ------------------------------------------------------------------
+	if opts.EnableEnqueue && !opts.ReadOnly {
+		ec := asynq.NewClient(opts.RedisConnOpt)
+		opts.enqueueClient = ec
+		closers = append(closers, ec.Close)
+	}
+	// --------------------------- end §5.10 -----------------------------
 
 	return &HTTPHandler{
 		router:   muxRouter(opts, rc, i, statsEngine, eventsBroker),
@@ -430,6 +458,52 @@ func muxRouter(opts Options, rc redis.UniversalClient, inspector *asynq.Inspecto
 	api.HandleFunc("/jobs/{job_id}/resume", newResumeJobHandlerFunc(jobsStore)).Methods("POST")
 	api.HandleFunc("/audit", newListAuditHandlerFunc(jobsStore)).Methods("GET")
 	// --------------------------- end phase 5 ---------------------------
+
+	// ------------------------------------------------------------------
+	// Fleet Console phase 10 — §5.8 ring-buffer series read API + §5.14
+	// deploy markers. Series are written by the leased sweeper
+	// (stats/series.go) and read from shared Redis strings, so any replica
+	// serves them; markers are plain shared state (§5.13). POST /markers is
+	// blocked in read-only mode by the method filter below and audit-logged
+	// via the phase-5 store; the actor comes from the §5.11 middleware.
+	// Handlers live in series_handlers.go / markers.go.
+	// ------------------------------------------------------------------
+	seriesRead := newStatsSeriesReader(rc)
+	api.HandleFunc("/series", newGetSeriesHandlerFunc(seriesRead)).Methods("GET")
+	api.HandleFunc("/series/batch", newGetSeriesBatchHandlerFunc(seriesRead)).Methods("GET")
+	markerSt := newRedisMarkerStore(rc)
+	api.HandleFunc("/markers", newCreateMarkerHandlerFunc(markerSt, jobsStore)).Methods("POST")
+	api.HandleFunc("/markers", newListMarkersHandlerFunc(markerSt)).Methods("GET")
+	// --------------------------- end phase 10 --------------------------
+
+	// ------------------------------------------------------------------
+	// Fleet Console — enqueue route + capability discovery (§5.10;
+	// enqueue.go / enqueue_handlers.go). The capability flag lives on its
+	// own tiny GET /api/features rather than inside /api/fleet/overview:
+	// overview 503s whenever the stats engine is disabled or has not
+	// swept yet, and capability discovery must not depend on it (the
+	// overview body is also rebuilt by the SSE broker — kept outside this
+	// block's blast radius).
+	// ------------------------------------------------------------------
+	enqueueEnabled := opts.EnableEnqueue && !opts.ReadOnly
+	api.HandleFunc("/features", newFeaturesHandlerFunc(enqueueEnabled)).Methods("GET")
+	if enqueueEnabled {
+		ec := opts.enqueueClient
+		if ec == nil {
+			// muxRouter built directly (tests). In production New owns the
+			// closer-managed client and sets it before building the router.
+			ec = asynq.NewClient(opts.RedisConnOpt)
+		}
+		api.HandleFunc("/queues/{qname}/tasks", newEnqueueTaskHandlerFunc(ec, jobsStore, payloadFmt, resultFmt)).Methods("POST")
+	} else {
+		// Registered on the parent router, not the api subrouter: the
+		// read-only method filter below would otherwise answer with a bare
+		// text 405, and §5.10 wants an explanatory 403 JSON. An unmatched
+		// POST falls out of the api subrouter (it has no NotFoundHandler
+		// of its own) and reaches this route.
+		router.HandleFunc("/api/queues/{qname}/tasks", newEnqueueDisabledHandlerFunc(opts.ReadOnly)).Methods("POST")
+	}
+	// --------------------------- end §5.10 -----------------------------
 
 	// Restrict APIs when running in read-only mode.
 	if opts.ReadOnly {

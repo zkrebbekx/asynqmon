@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useSelector } from "react-redux";
 import {
-  AlertCircle, Archive, Check, ChevronLeft, ChevronRight, Copy, Play, Trash2, X,
+  AlertCircle, Archive, Check, ChevronLeft, ChevronRight, Copy, CopyPlus, Play, Trash2, X,
 } from "lucide-react";
 import { AppState, useAppDispatch } from "../store";
 import * as api from "../api";
@@ -14,6 +14,7 @@ import {
   cancelActiveTaskAsync,
 } from "../actions/tasksActions";
 import { usePolling } from "../hooks";
+import { useEnqueueEnabled } from "../hooks/useFeatures";
 import {
   durationBefore, durationFromSeconds, durationSince, formatTimestamp,
   prettifyPayload, stringifyDuration, timeAgo, toErrorString,
@@ -26,6 +27,7 @@ import { cn } from "../lib/utils";
 import SyntaxHighlighter from "./SyntaxHighlighter";
 import ConfirmDialog from "./ConfirmDialog";
 import JourneyGraph from "./JourneyGraph";
+import CloneEnqueueModal from "./CloneEnqueueModal";
 
 // TaskDrawer: the peek-param task detail overlay (Fleet Console build
 // contract §3.5). Opens from any row in the Tasks console without a
@@ -177,6 +179,7 @@ export default function TaskDrawer({ peek, resultList, onClose, onPeek, onPivot 
   const [fetchErr, setFetchErr] = useState("");
   const [copied, setCopied] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const [cloneOpen, setCloneOpen] = useState(false);
   const [tab, setTab] = useState<"detail" | "flow">("detail");
   const [flow, setFlow] = useState<FlowResult | null>(null);
   const [flowLoading, setFlowLoading] = useState(false);
@@ -212,6 +215,7 @@ export default function TaskDrawer({ peek, resultList, onClose, onPeek, onPivot 
     setFlow(null);
     setFlowErr("");
     setConfirmDelete(false);
+    setCloneOpen(false);
   }, [peekKey]);
 
   // Route-match guard (kept from the details view): the state may still hold
@@ -230,8 +234,8 @@ export default function TaskDrawer({ peek, resultList, onClose, onPeek, onPivot 
   const nextTask = idx >= 0 && idx < resultList.length - 1 ? resultList[idx + 1] : undefined;
 
   // Latest handlers in refs so the document-level key listener binds once.
-  const handlersRef = useRef({ onClose, prevTask, nextTask, onPeek, confirmDelete });
-  handlersRef.current = { onClose, prevTask, nextTask, onPeek, confirmDelete };
+  const handlersRef = useRef({ onClose, prevTask, nextTask, onPeek, confirmDelete, cloneOpen });
+  handlersRef.current = { onClose, prevTask, nextTask, onPeek, confirmDelete, cloneOpen };
 
   // Keyboard: Esc closes, [ and ] move through the result list.
   useEffect(() => {
@@ -239,6 +243,8 @@ export default function TaskDrawer({ peek, resultList, onClose, onPeek, onPivot 
       const el = e.target as HTMLElement | null;
       if (el && (el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.isContentEditable)) return;
       const h = handlersRef.current;
+      // The clone modal owns the keyboard while open (its dialog handles Esc).
+      if (h.cloneOpen) return;
       if (e.key === "Escape") {
         // The delete ConfirmDialog handles its own Esc — don't double-close.
         if (h.confirmDelete) return;
@@ -330,6 +336,11 @@ export default function TaskDrawer({ peek, resultList, onClose, onPeek, onPivot 
   const canArchive = !window.READ_ONLY && !!task && !!archiveThunks[state];
   const canDelete = !window.READ_ONLY && !!task && !!deleteThunks[state];
   const canCancel = !window.READ_ONLY && !!task && state === "active";
+  // Clone-and-edit is offered in EVERY state (§3.5) — it creates a new task,
+  // never mutates this one — but only when the deployment enables enqueue
+  // (§5.10); the action hides entirely otherwise.
+  const enqueueEnabled = useEnqueueEnabled();
+  const canClone = enqueueEnabled && !window.READ_ONLY && !!task;
 
   // Actions re-check the guard (`task` is null unless it matches the peek
   // param) and refetch so the drawer reflects the task's new state.
@@ -719,7 +730,7 @@ export default function TaskDrawer({ peek, resultList, onClose, onPeek, onPivot 
               )}
 
               {/* Actions */}
-              {(canRun || canArchive || canDelete || canCancel) && (
+              {(canRun || canArchive || canDelete || canCancel || canClone) && (
                 <section className="flex items-center gap-2 border-t border-[var(--fc-line2)] pt-4">
                   {canRun && (
                     <DrawerButton onClick={doRun} className="border-[var(--fc-acc)] bg-[var(--fc-acc)] text-white hover:border-[var(--fc-acc)]">
@@ -734,6 +745,14 @@ export default function TaskDrawer({ peek, resultList, onClose, onPeek, onPivot 
                   {canArchive && (
                     <DrawerButton onClick={doArchive}>
                       <Archive size={12} /> Archive
+                    </DrawerButton>
+                  )}
+                  {canClone && (
+                    <DrawerButton
+                      onClick={() => setCloneOpen(true)}
+                      title="Create a new task from this one (§5.10 enqueue)"
+                    >
+                      <CopyPlus size={12} /> Clone &amp; edit…
                     </DrawerButton>
                   )}
                   {canDelete && (
@@ -759,6 +778,17 @@ export default function TaskDrawer({ peek, resultList, onClose, onPeek, onPivot 
                     }}
                     onClose={() => setConfirmDelete(false)}
                   />
+                  {canClone && task && (
+                    <CloneEnqueueModal
+                      open={cloneOpen}
+                      sourceTask={task}
+                      onClose={() => setCloneOpen(false)}
+                      onEnqueued={(q, id) => {
+                        setCloneOpen(false);
+                        onPeek({ queue: q, id });
+                      }}
+                    />
+                  )}
                 </section>
               )}
             </>

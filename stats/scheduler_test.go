@@ -175,7 +175,7 @@ func TestSchedulerGoneDetector(t *testing.T) {
 		}}
 
 		Convey("When the sweep evaluates with the observation", func() {
-			rep := ev.evaluate(map[string]*QueueSnapshot{}, nil, gone, now)
+			rep := ev.evaluate(map[string]*QueueSnapshot{}, nil, gone, detectorInputs{}, now)
 
 			Convey("Then detector #9 raises the severity-4 finding, no debounce", func() {
 				So(rep.Findings, ShouldHaveLength, 1)
@@ -190,14 +190,14 @@ func TestSchedulerGoneDetector(t *testing.T) {
 				So(f.SuggestedQuery, ShouldEqual, "schedulers type=report:nightly")
 			})
 
-			Convey("Then the census counts nine live detectors", func() {
-				So(rep.DetectorsLive, ShouldEqual, 9)
+			Convey("Then the census counts every detector live (zero-value inputs carry no learning gates)", func() {
+				So(rep.DetectorsLive, ShouldEqual, detectorsTotal)
 			})
 		})
 
 		Convey("When the entry is observed live again (no observation passed)", func() {
-			ev.evaluate(map[string]*QueueSnapshot{}, nil, gone, now)
-			rep := ev.evaluate(map[string]*QueueSnapshot{}, nil, nil, now.Add(5*time.Second))
+			ev.evaluate(map[string]*QueueSnapshot{}, nil, gone, detectorInputs{}, now)
+			rep := ev.evaluate(map[string]*QueueSnapshot{}, nil, nil, detectorInputs{}, now.Add(5*time.Second))
 
 			Convey("Then the finding auto-clears", func() {
 				So(rep.Findings, ShouldBeEmpty)

@@ -54,6 +54,12 @@ const (
 	defaultPausedLongAfter     = 7 * 24 * time.Hour
 	defaultGroupStallAfter     = 5 * time.Minute
 
+	// Phase-10 baseline-detector knob defaults (§3.1).
+	defaultFailSpikeRatio    = 4.0
+	defaultFailSpikeMinCount = 100
+	defaultDepthAnomalyRatio = 3.0
+	defaultDepthAnomalyMin   = 500
+
 	// GROUP_STALL bound (§3.1: "only for queues with groups", costed): per
 	// sweep at most maxGroupStallQueues queues' groups are examined — a
 	// rotating cursor walks the grouped-queue set across sweeps so every
@@ -122,6 +128,32 @@ type Config struct {
 	// tests.
 	SchedulerGoneAfter time.Duration
 
+	// FailSpikeRatio raises a FAIL_SPIKE finding when today's failed counter
+	// is at least this multiple of the 7-day same-hour baseline. Default 4.
+	FailSpikeRatio float64
+
+	// FailSpikeMinCount is the FAIL_SPIKE floor: below this many failures
+	// today the detector stays silent regardless of ratio. Default 100.
+	FailSpikeMinCount int64
+
+	// DepthAnomalyRatio raises a DEPTH_ANOMALY finding when pending depth is
+	// at least this multiple of the queue's 24h ring-buffer mean. Default 3.
+	DepthAnomalyRatio float64
+
+	// DepthAnomalyMin is the DEPTH_ANOMALY floor: shallower queues never
+	// anomaly-flag. Default 500.
+	DepthAnomalyMin int64
+
+	// SeriesQueueCeiling is the §5.8 tier guard: per-queue time series are
+	// sampled only while the fleet has at most this many queues (fleet and
+	// per-server series are always sampled). Default 2000. Hot-set tiering
+	// beyond the ceiling is phase 12.
+	SeriesQueueCeiling int
+
+	// Now supplies the sweep clock. Default time.Now. Injected by tests so
+	// ring-buffer slot math is deterministic (no wall-clock flakes).
+	Now func() time.Time
+
 	// Logf logs sweeper lifecycle events and errors. Default log.Printf.
 	Logf func(format string, args ...interface{})
 }
@@ -143,6 +175,7 @@ type Engine struct {
 
 	mem  *memoryStore
 	kick chan struct{} // signals the sweep loop right after lease acquisition
+	now  func() time.Time
 
 	// attn evaluates the §3.1 instantaneous detectors per sweep. Its
 	// debounce/since state is in-process, holder-only (the published report
@@ -150,6 +183,12 @@ type Engine struct {
 	// reads across sweeps. Both are only touched from the sweep goroutine.
 	attn        *attentionEvaluator
 	groupCursor int
+
+	// series is the §5.8 ring-buffer sampler; base computes the phase-10
+	// detector baselines. Both hold in-process, holder-only state and are
+	// only touched from the sweep goroutine (like attn).
+	series *seriesSampler
+	base   *baselineRefresher
 
 	holding int32 // atomic; 1 while this replica holds the sweeper lease
 
@@ -210,6 +249,24 @@ func NewEngine(cfg Config) *Engine {
 	if cfg.SchedulerGoneAfter <= 0 {
 		cfg.SchedulerGoneAfter = DefaultSchedulerGoneAfter
 	}
+	if cfg.FailSpikeRatio <= 0 {
+		cfg.FailSpikeRatio = defaultFailSpikeRatio
+	}
+	if cfg.FailSpikeMinCount <= 0 {
+		cfg.FailSpikeMinCount = defaultFailSpikeMinCount
+	}
+	if cfg.DepthAnomalyRatio <= 0 {
+		cfg.DepthAnomalyRatio = defaultDepthAnomalyRatio
+	}
+	if cfg.DepthAnomalyMin <= 0 {
+		cfg.DepthAnomalyMin = defaultDepthAnomalyMin
+	}
+	if cfg.SeriesQueueCeiling <= 0 {
+		cfg.SeriesQueueCeiling = defaultSeriesQueueCeiling
+	}
+	if cfg.Now == nil {
+		cfg.Now = time.Now
+	}
 	logf := cfg.Logf
 	if logf == nil {
 		logf = log.Printf
@@ -221,14 +278,21 @@ func NewEngine(cfg Config) *Engine {
 		logf: logf,
 		mem:  newMemoryStore(),
 		kick: make(chan struct{}, 1),
+		now:  cfg.Now,
 		attn: newAttentionEvaluator(attentionConfig{
 			pendingAgeSLO:       cfg.PendingAgeSLO,
 			retryStormThreshold: cfg.RetryStormThreshold,
 			pausedLongAfter:     cfg.PausedLongAfter,
 			groupStallAfter:     cfg.GroupStallAfter,
 			orphanGrace:         cfg.OrphanGrace,
+			failSpikeRatio:      cfg.FailSpikeRatio,
+			failSpikeMinCount:   cfg.FailSpikeMinCount,
+			depthAnomalyRatio:   cfg.DepthAnomalyRatio,
+			depthAnomalyMin:     cfg.DepthAnomalyMin,
 		}),
-		subs: make(map[chan struct{}]struct{}),
+		series: newSeriesSampler(cfg.RedisClient, cfg.SeriesQueueCeiling),
+		base:   newBaselineRefresher(cfg.RedisClient),
+		subs:   make(map[chan struct{}]struct{}),
 	}
 }
 
@@ -454,7 +518,7 @@ func (e *Engine) sweep(ctx context.Context) error {
 		}
 	}
 
-	now := time.Now()
+	now := e.now()
 	snaps := make(map[string]*QueueSnapshot, len(qnames))
 	for i := 0; i < len(qnames); i += e.cfg.BatchSize {
 		end := i + e.cfg.BatchSize
@@ -499,9 +563,28 @@ func (e *Engine) sweep(ctx context.Context) error {
 	fleet.RedisMemoryUsed = memUsed
 	fleet.RedisMemoryMax = memMax
 
+	// §5.8 ring-buffer sampling (phase 10): accumulate this sweep's samples
+	// and flush any completed 30s/1h slots. Runs before the baseline
+	// refresher so the learning anchor (asynqmon:series:since) exists.
+	seriesReads, seriesWrites, err := e.series.sample(ctx, now, snaps, fleet, servers)
+	reads += seriesReads
+	if err != nil {
+		return fmt.Errorf("sampling time series: %w", err)
+	}
+
+	// Phase-10 detector baselines (baseline.go): cadenced reads — 7-day
+	// fail counters daily, rollup depth rings hourly, consumer-window seed
+	// once per holder. Steady-state per-sweep cost is zero reads.
+	baseReads, err := e.base.refresh(ctx, now, snaps)
+	reads += baseReads
+	if err != nil {
+		return fmt.Errorf("refreshing detector baselines: %w", err)
+	}
+
 	// Attention findings: pure evaluation over this sweep's snapshots plus
-	// the evaluator's holder-local debounce state (§5.2).
-	report := e.attn.evaluate(snaps, groupObs, schedGone, now)
+	// the evaluator's holder-local debounce state (§5.2) and the phase-10
+	// baseline inputs.
+	report := e.attn.evaluate(snaps, groupObs, schedGone, e.base.inputs(now, snaps), now)
 	attentionJSON, err := json.Marshal(report)
 	if err != nil {
 		// Cannot happen for these types; guard so a future field never
@@ -523,7 +606,7 @@ func (e *Engine) sweep(ctx context.Context) error {
 		At:        now,
 		Queues:    len(qnames),
 		ReadCmds:  reads,
-		WriteCmds: writes + schedWrites,
+		WriteCmds: writes + schedWrites + seriesWrites,
 		Duration:  time.Since(begin),
 	})
 	// Wake SSE listeners after the local publish so what they read is at

@@ -18,6 +18,7 @@ import { X } from "lucide-react";
 import { AppState } from "../store";
 import { usePolling } from "../hooks";
 import { listFleetQueues, FleetQueuesResponse, FleetQueueRow } from "../api-fleet";
+import { SeriesResponse, SeriesSpec, getSeriesBatch } from "../api-series";
 import {
   DirectoryState,
   DirectorySortKey,
@@ -30,6 +31,7 @@ import { queueDetailsPath } from "../paths";
 import { timeAgo, toErrorString } from "../utils";
 import { cn, clickableRowClass, clickableRowProps } from "../lib/utils";
 import { FcChip } from "../components/FleetBits";
+import { LazyMount, Sparkline } from "../components/charts";
 
 const fmt = (n: number | undefined | null) =>
   n === undefined || n === null || !Number.isFinite(n) ? "—" : n.toLocaleString("en-US");
@@ -37,6 +39,13 @@ const fmt = (n: number | undefined | null) =>
 // asynq trims archived to 10k per queue — a full set means dead-letters are
 // being discarded (honesty ledger §7.3).
 const ARCHIVE_CAP = 10_000;
+
+// Sparkline column (§3.2): 30m pending trend from the §5.8 hot ring, only
+// for the top SPARK_ROW_CAP rows of the page, rendered only when the row is
+// in the viewport (LazyMount), refreshed at the hot-slot cadence.
+const SPARK_ROW_CAP = 50;
+const SPARK_POINTS = 60; // 60 × 30s = 30m
+const SPARK_REFRESH_MS = 30_000;
 
 interface Col {
   label: string;
@@ -47,6 +56,7 @@ interface Col {
 const COLUMNS: Col[] = [
   { label: "Queue", sortKey: "name" },
   { label: "Pending", sortKey: "pending", numeric: true },
+  { label: "Trend 30m" }, // §5.8 sparkline; not server-sortable
   { label: "Active", sortKey: "active", numeric: true },
   { label: "Scheduled", sortKey: "scheduled", numeric: true },
   { label: "Retry", sortKey: "retry", numeric: true },
@@ -61,7 +71,18 @@ const COLUMNS: Col[] = [
   { label: "" }, // staleness dot
 ];
 
-function QueueRowView({ row, now }: { row: FleetQueueRow; now: number }) {
+function QueueRowView({
+  row,
+  now,
+  spark,
+  sparkEligible,
+}: {
+  row: FleetQueueRow;
+  now: number;
+  spark?: SeriesResponse;
+  // False beyond the top-50 rows (§3.2 cap) — renders a dash, not a fetch.
+  sparkEligible: boolean;
+}) {
   const navigate = useNavigate();
   const uncovered = row.consumers === 0 && row.pending > 0;
   const oldTone = ageTone(row.oldest_pending_age_ms);
@@ -100,6 +121,30 @@ function QueueRowView({ row, now }: { row: FleetQueueRow; now: number }) {
         )}
       </td>
       <td className="num-cell">{fmt(row.pending)}</td>
+      <td className="px-2.5 py-1.5">
+        {sparkEligible && spark ? (
+          <LazyMount width={72} height={18}>
+            <Sparkline
+              points={spark.points}
+              width={72}
+              height={18}
+              tone="mut"
+              label={`${row.queue} pending — last 30m`}
+            />
+          </LazyMount>
+        ) : (
+          <span
+            className="text-[10px] text-[var(--fc-ink3)]"
+            title={
+              sparkEligible
+                ? "no series yet — the ring-buffer sampler hasn't published for this queue"
+                : `sparklines render for the top ${SPARK_ROW_CAP} rows`
+            }
+          >
+            —
+          </span>
+        )}
+      </td>
       <td className="num-cell">{fmt(row.active)}</td>
       <td className="num-cell">
         {fmt(row.scheduled)}
@@ -208,6 +253,42 @@ export default function QueuesDirectoryView() {
   }, [view.sort, view.dir, view.f, view.cursor, view.limit]);
 
   usePolling(fetchQueues, pollInterval, [view.sort, view.dir, view.f, view.cursor, view.limit]);
+
+  // Sparkline data (§3.2): ONE batch call for the page's top rows, refreshed
+  // at the hot-slot cadence. Data fetch is capped at SPARK_ROW_CAP and
+  // rendering is additionally viewport-gated per cell (LazyMount).
+  const [sparks, setSparks] = useState<Record<string, SeriesResponse>>({});
+  const sparkNames = useMemo(
+    () => (resp?.queues ?? []).slice(0, SPARK_ROW_CAP).map((r) => r.queue).join(" "),
+    [resp]
+  );
+  useEffect(() => {
+    if (sparkNames === "") return;
+    let disposed = false;
+    const fetchSparks = async () => {
+      const specs: SeriesSpec[] = sparkNames.split(" ").map((q) => ({
+        scope: `queue:${q}`,
+        metric: "pending",
+        window: "3h",
+        points: SPARK_POINTS,
+      }));
+      try {
+        const batch = await getSeriesBatch(specs);
+        if (disposed) return;
+        const next: Record<string, SeriesResponse> = {};
+        for (const s of batch.series) next[s.scope.replace(/^queue:/, "")] = s;
+        setSparks(next);
+      } catch {
+        // Endpoint absent: the column degrades to dashes, never fake lines.
+      }
+    };
+    fetchSparks();
+    const id = setInterval(fetchSparks, SPARK_REFRESH_MS);
+    return () => {
+      disposed = true;
+      clearInterval(id);
+    };
+  }, [sparkNames]);
 
   const onSort = (key: DirectorySortKey) => {
     if (view.sort === key) {
@@ -372,8 +453,14 @@ export default function QueuesDirectoryView() {
               </tr>
             </thead>
             <tbody className="font-mono tabular-nums [&_td.num-cell]:whitespace-nowrap [&_td.num-cell]:px-2.5 [&_td.num-cell]:py-1.5 [&_td.num-cell]:text-right">
-              {rows.map((row) => (
-                <QueueRowView key={row.queue} row={row} now={now} />
+              {rows.map((row, i) => (
+                <QueueRowView
+                  key={row.queue}
+                  row={row}
+                  now={now}
+                  spark={sparks[row.queue]}
+                  sparkEligible={i < SPARK_ROW_CAP}
+                />
               ))}
             </tbody>
           </table>
