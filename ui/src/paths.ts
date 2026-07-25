@@ -6,6 +6,7 @@ export const paths = () => ({
   SCHEDULERS: `${window.ROOT_PATH}/schedulers`,
   QUEUE_DETAILS: `${window.ROOT_PATH}/queues/:qname`,
   TASKS: `${window.ROOT_PATH}/tasks`,
+  OPS: `${window.ROOT_PATH}/ops`, // Operations — bulk jobs + audit (§3.9)
   REDIS: `${window.ROOT_PATH}/redis`,
   TASK_DETAILS: `${window.ROOT_PATH}/queues/:qname/tasks/:taskId`,
   QUEUE_METRICS: `${window.ROOT_PATH}/q/metrics`,

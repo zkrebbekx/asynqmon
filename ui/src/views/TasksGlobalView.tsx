@@ -29,6 +29,7 @@ import { Alert, AlertDescription, AlertTitle } from "../components/ui/alert";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "../components/ui/tooltip";
 import SyntaxHighlighter from "../components/SyntaxHighlighter";
 import ConfirmDialog from "../components/ConfirmDialog";
+import BulkJobModal from "../components/BulkJobModal";
 import TaskDrawer, { PivotRequest } from "../components/TaskDrawer";
 
 type ActionFn = (qname: string, taskId: string) => Promise<unknown>;
@@ -129,9 +130,10 @@ export default function TasksGlobalView() {
   // Failure-analytics groupings (only for retry/archived).
   const [errorGroups, setErrorGroups] = useState<{ label: string; count: number }[]>([]);
   const [typeGroups, setTypeGroups] = useState<{ label: string; count: number }[]>([]);
-  // Two-step confirm for bulk-on-filter actions.
-  const [confirmAction, setConfirmAction] = useState<"run" | "archive" | "delete" | "cancel" | null>(null);
-  const [bulkBusy, setBulkBusy] = useState(false);
+  // Whole-scope verbs open the §4.3 bulk-job modal (preview job + cost
+  // disclosure + gated execute). Selection/row-scoped actions keep their
+  // direct endpoints — cheap and exact.
+  const [bulkVerb, setBulkVerb] = useState<"run" | "archive" | "delete" | "cancel" | null>(null);
   // Row-level delete confirmation target.
   const [confirmDelete, setConfirmDelete] = useState<TaskInfo | null>(null);
 
@@ -272,27 +274,6 @@ export default function TasksGlobalView() {
       setError(toErrorString(e));
     }
     fetchTasks();
-  };
-
-  const applyBulk = async (action: "run" | "archive" | "delete" | "cancel") => {
-    setBulkBusy(true);
-    try {
-      await api.bulkFilteredTasks({
-        queue: view.queue,
-        state: view.state,
-        q: view.q,
-        meta: metaParam,
-        action,
-      });
-      setError("");
-    } catch (e) {
-      setError(toErrorString(e));
-    }
-    setBulkBusy(false);
-    setConfirmAction(null);
-    fetchTasks();
-    fetchFacets();
-    fetchAnalytics();
   };
 
   // Drawer pivots ("find all like this") compose into the console filters.
@@ -447,11 +428,14 @@ export default function TasksGlobalView() {
         </div>
       )}
 
-      {/* Bulk-on-filter toolbar */}
+      {/* Whole-scope bulk bar (§4.3): every verb opens the bulk-job modal —
+          async preview, cost disclosure, throttle, mandatory reason, gated
+          execute — and runs as a background job on the Operations screen.
+          Visually distinct from row actions and red-guarded for delete. */}
       {!window.READ_ONLY && total > 0 && bulkActions.length > 0 && (
-        <div className="flex flex-wrap items-center gap-2 rounded-lg border border-[hsl(var(--border))] bg-[hsl(var(--muted))]/30 px-4 py-2">
+        <div className="flex flex-wrap items-center gap-2 rounded-lg border border-dashed border-[var(--fc-warn)]/50 bg-[var(--fc-warn-bg)]/40 px-4 py-2">
           <span className="text-xs text-[hsl(var(--muted-foreground))]">
-            Apply to all <span className="font-semibold text-[hsl(var(--foreground))]">{truncated ? `${total}+` : total}</span> matching:
+            Whole scope — all <span className="font-semibold text-[hsl(var(--foreground))]">{truncated ? `${total}+` : total}</span> matching, as a background job:
           </span>
           {bulkActions.map((b) => (
             <Button
@@ -459,26 +443,28 @@ export default function TasksGlobalView() {
               size="sm"
               variant={b.action === "delete" ? "outline" : "ghost"}
               className={cn("h-7 text-xs", b.action === "delete" && "text-red-500 hover:text-red-600")}
-              disabled={bulkBusy}
-              onClick={() => setConfirmAction(b.action)}
+              onClick={() => setBulkVerb(b.action)}
             >
-              {b.label} all
+              {b.label} all…
             </Button>
           ))}
-          {confirmAction && (
-            <div className="flex items-center gap-2 ml-2 pl-2 border-l border-[hsl(var(--border))]">
-              <span className="text-xs text-[hsl(var(--foreground))]">
-                {confirmAction} {truncated ? `${total}+` : total} task(s)?
-              </span>
-              <Button size="sm" className="h-7 text-xs" disabled={bulkBusy} onClick={() => applyBulk(confirmAction)}>
-                Confirm
-              </Button>
-              <Button size="sm" variant="ghost" className="h-7 text-xs" disabled={bulkBusy} onClick={() => setConfirmAction(null)}>
-                Cancel
-              </Button>
-            </div>
-          )}
         </div>
+      )}
+
+      {/* §4.3 bulk-op modal (whole-scope ops only) */}
+      {bulkVerb && (
+        <BulkJobModal
+          open
+          verb={bulkVerb}
+          scope={{ queue: view.queue, state: view.state, q: view.q, meta: metaParam }}
+          onClose={() => setBulkVerb(null)}
+          onStarted={() => {
+            setBulkVerb(null);
+            fetchTasks();
+            fetchFacets();
+            fetchAnalytics();
+          }}
+        />
       )}
 
       {error && (

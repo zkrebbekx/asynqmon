@@ -42,6 +42,7 @@ function useBreadcrumbs(): Crumb[] {
     [p.TASKS, "Tasks"],
     [p.SERVERS, "Workers"],
     [p.SCHEDULERS, "Schedulers"],
+    [p.OPS, "Operations"],
     [p.REDIS, "Redis"],
     [p.SETTINGS, "Settings"],
     [p.QUEUE_METRICS, "Metrics"],

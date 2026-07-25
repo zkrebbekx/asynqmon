@@ -364,6 +364,9 @@ export interface WorkerInfo {
   task_type: string;
   task_payload: string;
   start_time: string;
+  // RFC3339 deadline the worker must finish by (start + timeout, or the task
+  // deadline); "" when unknown. Drives the Workers screen budget bars (§3.7).
+  deadline: string;
 }
 
 export interface SchedulerEntry {
@@ -1189,6 +1192,179 @@ export async function getMetrics(
   const resp = await axios({
     method: "get",
     url: `${getBaseUrl()}/metrics?${queryString.stringify(params)}`,
+  });
+  return resp.data;
+}
+
+/**************************************************************
+    Bulk jobs + audit (Fleet Console phase 5 — §3.9, §4.3,
+    §5.4, §5.11). Wire shapes are frozen backend contracts
+    (jobs_handlers.go jobJSON / getJobResponse / AuditEntry).
+ **************************************************************/
+
+export type JobVerb = "run" | "archive" | "delete" | "cancel";
+
+export interface JobScope {
+  queue: string;
+  state: string;
+  q: string;
+  meta: string[]; // "key:value" pairs, same wire format as searchTasks
+}
+
+export interface JobCounts {
+  candidates: number;
+  acted: number;
+  skipped: number;
+  failed: number;
+}
+
+export interface JobInfo {
+  id: string;
+  verb: JobVerb;
+  scope: JobScope;
+  phase: "preview" | "execute";
+  state:
+    | "previewing"
+    | "preview_ready"
+    | "running"
+    | "paused"
+    | "canceled"
+    | "done"
+    | "failed";
+  throttle: number;
+  reason: string;
+  actor: string;
+  counts: JobCounts;
+  cost_class: "cheap" | "list_removal";
+  cost_list_len: number;
+  preview_complete: boolean;
+  proceed_on_partial: boolean;
+  created_at: string;
+  started_at: string;
+  finished_at: string;
+  fence: number;
+  error: string;
+  failures_overflow: number;
+  ctl_pending: string;
+}
+
+export interface JobSampleRow {
+  id: string;
+  queue: string;
+  type: string;
+  payload: string;
+}
+
+export interface JobItemFailure {
+  queue: string;
+  id: string;
+  error: string;
+}
+
+export interface JobDetail extends JobInfo {
+  sample: JobSampleRow[];
+  failures: JobItemFailure[];
+  failures_total: number;
+}
+
+export interface AuditEntry {
+  id: string;
+  event: string;
+  actor: string;
+  verb: string;
+  scope: JobScope;
+  reason: string;
+  job_id: string;
+  preview_count: number;
+  acted: number;
+  skipped: number;
+  failed: number;
+  at: string;
+}
+
+export async function createJob(body: {
+  verb: JobVerb;
+  scope: { queue?: string; state: string; q?: string; meta?: string[] };
+  reason: string;
+  throttle?: number;
+}): Promise<JobInfo> {
+  const resp = await axios({
+    method: "post",
+    url: `${getBaseUrl()}/jobs`,
+    data: body,
+  });
+  return resp.data;
+}
+
+export async function listJobs(limit?: number): Promise<{ jobs: JobInfo[] }> {
+  const usp = new URLSearchParams();
+  if (limit) usp.set("limit", String(limit));
+  const resp = await axios({
+    method: "get",
+    url: `${getBaseUrl()}/jobs?${usp.toString()}`,
+  });
+  return resp.data;
+}
+
+export async function getJob(
+  id: string,
+  failuresOffset?: number,
+  failuresLimit?: number
+): Promise<JobDetail> {
+  const usp = new URLSearchParams();
+  if (failuresOffset) usp.set("failures_offset", String(failuresOffset));
+  if (failuresLimit) usp.set("failures_limit", String(failuresLimit));
+  const resp = await axios({
+    method: "get",
+    url: `${getBaseUrl()}/jobs/${id}?${usp.toString()}`,
+  });
+  return resp.data;
+}
+
+export async function executeJob(
+  id: string,
+  body: { proceed_on_partial?: boolean; throttle?: number; reason?: string }
+): Promise<JobInfo> {
+  const resp = await axios({
+    method: "post",
+    url: `${getBaseUrl()}/jobs/${id}/execute`,
+    data: body,
+  });
+  return resp.data;
+}
+
+export async function cancelJob(id: string): Promise<JobInfo> {
+  const resp = await axios({
+    method: "post",
+    url: `${getBaseUrl()}/jobs/${id}/cancel`,
+  });
+  return resp.data;
+}
+
+export async function pauseJob(id: string): Promise<JobInfo> {
+  const resp = await axios({
+    method: "post",
+    url: `${getBaseUrl()}/jobs/${id}/pause`,
+  });
+  return resp.data;
+}
+
+export async function resumeJob(id: string): Promise<JobInfo> {
+  const resp = await axios({
+    method: "post",
+    url: `${getBaseUrl()}/jobs/${id}/resume`,
+  });
+  return resp.data;
+}
+
+export async function listAudit(
+  limit?: number
+): Promise<{ entries: AuditEntry[] }> {
+  const usp = new URLSearchParams();
+  if (limit) usp.set("limit", String(limit));
+  const resp = await axios({
+    method: "get",
+    url: `${getBaseUrl()}/audit?${usp.toString()}`,
   });
   return resp.data;
 }

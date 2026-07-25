@@ -12,6 +12,7 @@ import (
 	"github.com/hibiken/asynq"
 	"github.com/redis/go-redis/v9"
 
+	"github.com/hibiken/asynqmon/jobs"
 	"github.com/hibiken/asynqmon/stats"
 )
 
@@ -75,6 +76,34 @@ type Options struct {
 	// AttentionGroupStallAfter raises a GROUP_STALL finding when the oldest
 	// member of an examined group has aggregated longer than this. Default 5m.
 	AttentionGroupStallAfter time.Duration
+
+	// ------------------------------------------------------------------
+	// Fleet Console phase 5 — identity & audit (§5.11) + bulk-job runner
+	// (§5.4) options.
+	// ------------------------------------------------------------------
+
+	// AuthHeader is a reverse-proxy identity header (e.g.
+	// "X-Auth-Request-User") resolved as the acting user on every request.
+	// Only trusted when the peer is inside TrustedProxies (any peer when
+	// TrustedProxies is empty). Optional.
+	AuthHeader string
+
+	// TrustedProxies are CIDRs (or bare IPs) the AuthHeader is trusted
+	// from. Malformed entries panic at boot. Optional.
+	TrustedProxies []string
+
+	// RequireIdentity refuses mutating requests (403 JSON) that carry no
+	// resolvable identity (trusted header or basic-auth user). Optional.
+	RequireIdentity bool
+
+	// JobConcurrency is the max number of bulk jobs this replica works at
+	// once. Default 2.
+	JobConcurrency int
+
+	// JobsDisabled turns off this replica's bulk-job runner. The /api/jobs
+	// endpoints still work — another replica's runner claims the jobs. The
+	// runner never starts in ReadOnly mode regardless.
+	JobsDisabled bool
 }
 
 // HTTPHandler is a http.Handler for asynqmon application.
@@ -134,6 +163,26 @@ func New(opts Options) *HTTPHandler {
 		closers = append([]func() error{
 			func() error { eventsBroker.stop(); return nil },
 			func() error { statsEngine.Stop(); return nil },
+		}, closers...)
+	}
+
+	// ------------------------------------------------------------------
+	// Fleet Console phase 5 — bulk-job runner lifecycle (§5.4, §5.13).
+	// Same pattern as the stats engine: any replica serves the /api/jobs
+	// endpoints from the shared store; execution is claimed per job with a
+	// fencing token, so running the runner on every writable replica is
+	// safe. Never started in ReadOnly mode — a read-only replica must not
+	// mutate queues even for jobs created elsewhere.
+	// ------------------------------------------------------------------
+	if !opts.ReadOnly && !opts.JobsDisabled {
+		jobsRunner := jobs.NewRunner(jobs.Config{
+			RedisClient: rc,
+			Inspector:   i,
+			Concurrency: opts.JobConcurrency,
+		})
+		jobsRunner.Start(context.Background())
+		closers = append([]func() error{
+			func() error { jobsRunner.Stop(); return nil },
 		}, closers...)
 	}
 
@@ -274,6 +323,13 @@ func muxRouter(opts Options, rc redis.UniversalClient, inspector *asynq.Inspecto
 	// Servers endpoints.
 	api.HandleFunc("/servers", newListServersHandlerFunc(inspector, payloadFmt)).Methods("GET")
 
+	// ── Workers screen routes (Fleet Console §3.7) — registration only ──
+	// Coverage matrix (§5.5) and cancel-deliverability widget (§5.14).
+	// Handlers live in coverage_handlers.go; join logic in coverage.go.
+	api.HandleFunc("/coverage", newCoverageHandlerFunc(inspector, statsEngine)).Methods("GET")
+	api.HandleFunc("/cancel-listeners", newCancelListenersHandlerFunc(rc)).Methods("GET")
+	// ── end Workers screen routes ──
+
 	// Scheduler Entry endpoints.
 	api.HandleFunc("/scheduler_entries", newListSchedulerEntriesHandlerFunc(inspector, payloadFmt)).Methods("GET")
 	api.HandleFunc("/scheduler_entries/{entry_id}/enqueue_events", newListSchedulerEnqueueEventsHandlerFunc(inspector)).Methods("GET")
@@ -291,6 +347,25 @@ func muxRouter(opts Options, rc redis.UniversalClient, inspector *asynq.Inspecto
 	// goroutines on every metrics poll.
 	metricsClient := &http.Client{Timeout: 10 * time.Second}
 	api.HandleFunc("/metrics", newGetMetricsHandlerFunc(metricsClient, opts.PrometheusAddress)).Methods("GET")
+
+	// ------------------------------------------------------------------
+	// Fleet Console phase 5 — bulk jobs + audit + identity (§3.9, §4.3,
+	// §5.4, §5.11; jobs_handlers.go / identity.go). Handlers are
+	// store-backed so any replica serves them; the leased runner started
+	// in New performs the work. All mutating routes here are POSTs, so
+	// read-only mode's method filter below blocks them.
+	// ------------------------------------------------------------------
+	api.Use(newActorMiddleware(opts))
+	jobsStore := jobs.NewStore(rc)
+	api.HandleFunc("/jobs", newCreateJobHandlerFunc(jobsStore)).Methods("POST")
+	api.HandleFunc("/jobs", newListJobsHandlerFunc(jobsStore)).Methods("GET")
+	api.HandleFunc("/jobs/{job_id}", newGetJobHandlerFunc(jobsStore)).Methods("GET")
+	api.HandleFunc("/jobs/{job_id}/execute", newExecuteJobHandlerFunc(jobsStore)).Methods("POST")
+	api.HandleFunc("/jobs/{job_id}/cancel", newCancelJobHandlerFunc(jobsStore)).Methods("POST")
+	api.HandleFunc("/jobs/{job_id}/pause", newPauseJobHandlerFunc(jobsStore)).Methods("POST")
+	api.HandleFunc("/jobs/{job_id}/resume", newResumeJobHandlerFunc(jobsStore)).Methods("POST")
+	api.HandleFunc("/audit", newListAuditHandlerFunc(jobsStore)).Methods("GET")
+	// --------------------------- end phase 5 ---------------------------
 
 	// Restrict APIs when running in read-only mode.
 	if opts.ReadOnly {

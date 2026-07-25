@@ -6,6 +6,7 @@ import {
   Activity,
   Layers,
   ListChecks,
+  Play,
   Server,
   Clock,
   Database,
@@ -31,6 +32,7 @@ const TasksGlobalView = lazy(() => import("./views/TasksGlobalView"));
 const TaskDetailsView = lazy(() => import("./views/TaskDetailsView"));
 const SchedulersView = lazy(() => import("./views/SchedulersView"));
 const ServersView = lazy(() => import("./views/ServersView"));
+const OpsView = lazy(() => import("./views/OpsView"));
 const RedisInfoView = lazy(() => import("./views/RedisInfoView"));
 const MetricsView = lazy(() => import("./views/MetricsView"));
 const SettingsView = lazy(() => import("./views/SettingsView"));
@@ -122,6 +124,7 @@ function AppContent() {
           <NavGroupLabel label="Operate" collapsed={collapsed} />
           <NavItem to={appPaths.SERVERS} icon={<Server size={15} />} label="Workers" collapsed={collapsed} />
           <NavItem to={appPaths.SCHEDULERS} icon={<Clock size={15} />} label="Schedulers" collapsed={collapsed} />
+          <NavItem to={appPaths.OPS} icon={<Play size={15} />} label="Operations" collapsed={collapsed} />
           <NavGroupLabel label="System" collapsed={collapsed} />
           <NavItem to={appPaths.REDIS} icon={<Database size={15} />} label="Redis" collapsed={collapsed} />
           <NavItem to={appPaths.SETTINGS} icon={<Settings size={15} />} label="Settings" collapsed={collapsed} />
@@ -154,6 +157,7 @@ function AppContent() {
             <Route path={appPaths.QUEUES} element={<QueuesDirectoryView />} />
             <Route path={appPaths.SCHEDULERS} element={<SchedulersView />} />
             <Route path={appPaths.SERVERS} element={<ServersView />} />
+            <Route path={appPaths.OPS} element={<OpsView />} />
             <Route path={appPaths.REDIS} element={<RedisInfoView />} />
             <Route path={appPaths.SETTINGS} element={<SettingsView />} />
             <Route path={appPaths.QUEUE_METRICS} element={<MetricsView />} />
