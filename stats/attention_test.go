@@ -149,7 +149,7 @@ func TestAttentionDetectors(t *testing.T) {
 		So(read2Err, ShouldBeNil)
 
 		Convey("Then the report footer states the phase-4 detector census", func() {
-			So(rep2.DetectorsLive, ShouldEqual, 8)
+			So(rep2.DetectorsLive, ShouldEqual, 9)
 			So(rep2.DetectorsLearning, ShouldEqual, 0)
 			So(rep2.UpdatedAt, ShouldNotBeEmpty)
 		})
@@ -336,9 +336,9 @@ func TestAttentionEvaluatorDebounce(t *testing.T) {
 		snaps := map[string]*QueueSnapshot{"q": {Queue: "q", Pending: 5}}
 
 		Convey("When three sweeps observe the condition seconds apart", func() {
-			rep1 := ev.evaluate(snaps, nil, t0)
-			rep2 := ev.evaluate(snaps, nil, t0.Add(5*time.Second))
-			rep3 := ev.evaluate(snaps, nil, t0.Add(10*time.Second))
+			rep1 := ev.evaluate(snaps, nil, nil, t0)
+			rep2 := ev.evaluate(snaps, nil, nil, t0.Add(5*time.Second))
+			rep3 := ev.evaluate(snaps, nil, nil, t0.Add(10*time.Second))
 
 			Convey("Then the first sweep withholds (debounce) and later sweeps report", func() {
 				So(findingFor(rep1, "q", DetectorNoConsumers), ShouldBeNil)
@@ -355,10 +355,10 @@ func TestAttentionEvaluatorDebounce(t *testing.T) {
 
 			Convey("And when the condition clears and later returns", func() {
 				healthy := map[string]*QueueSnapshot{"q": {Queue: "q", Pending: 5, Consumers: 1}}
-				rep4 := ev.evaluate(healthy, nil, t0.Add(15*time.Second))
+				rep4 := ev.evaluate(healthy, nil, nil, t0.Add(15*time.Second))
 				t5 := t0.Add(20 * time.Second)
-				rep5 := ev.evaluate(snaps, nil, t5)
-				rep6 := ev.evaluate(snaps, nil, t5.Add(5*time.Second))
+				rep5 := ev.evaluate(snaps, nil, nil, t5)
+				rep6 := ev.evaluate(snaps, nil, nil, t5.Add(5*time.Second))
 
 				Convey("Then it auto-clears and the debounce (and since) restart from scratch", func() {
 					So(findingFor(rep4, "q", DetectorNoConsumers), ShouldBeNil)
@@ -390,12 +390,12 @@ func TestAttentionEvaluatorGroupCarry(t *testing.T) {
 		stalled := map[string]groupStallObs{"gq": {group: "g1", oldestSince: t0.Add(-10 * time.Minute)}}
 
 		Convey("When an examined sweep finds the stall", func() {
-			rep1 := ev.evaluate(snaps, stalled, t0)
+			rep1 := ev.evaluate(snaps, stalled, nil, t0)
 			f1 := findingFor(rep1, "gq", DetectorGroupStall)
 			So(f1, ShouldNotBeNil)
 
 			Convey("And the next sweep's bounded reader does not revisit the queue", func() {
-				rep2 := ev.evaluate(snaps, nil, t0.Add(5*time.Second))
+				rep2 := ev.evaluate(snaps, nil, nil, t0.Add(5*time.Second))
 				Convey("Then the previous finding is replayed verbatim, not cleared", func() {
 					f2 := findingFor(rep2, "gq", DetectorGroupStall)
 					So(f2, ShouldNotBeNil)
@@ -404,7 +404,7 @@ func TestAttentionEvaluatorGroupCarry(t *testing.T) {
 
 				Convey("And a later examined-healthy sweep clears it", func() {
 					healthy := map[string]groupStallObs{"gq": {}} // examined, no members
-					rep3 := ev.evaluate(snaps, healthy, t0.Add(10*time.Second))
+					rep3 := ev.evaluate(snaps, healthy, nil, t0.Add(10*time.Second))
 					So(findingFor(rep3, "gq", DetectorGroupStall), ShouldBeNil)
 				})
 			})

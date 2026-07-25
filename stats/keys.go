@@ -131,7 +131,21 @@ const (
 	// replicas serve byte-identical findings (debounce/since state lives
 	// in-process on the holder; the published report is the shared truth).
 	attentionCacheKey = "asynqmon:cache:attention"
+
+	// schedIndexKey is the ZSET of scheduler-entry stable keys scored by
+	// last-seen Unix seconds (§5.12). Unlike the stats cache these carry no
+	// TTL — surviving the scheduler (and the sweeper) is their entire point;
+	// the sweep prunes entries unobserved past schedulerSnapshotHorizon.
+	schedIndexKey = "asynqmon:sched"
+
+	// schedSnapshotPrefix + <stablekey> is the HASH holding one observed
+	// scheduler entry (fields: entry JSON, first_seen, last_seen,
+	// last_entry_id, entry_ids — scheduler.go).
+	schedSnapshotPrefix = "asynqmon:sched:"
 )
+
+// schedSnapshotKey returns the snapshot HASH key for a stable entry key.
+func schedSnapshotKey(stableKey string) string { return schedSnapshotPrefix + stableKey }
 
 // queueCacheKey returns the cache HASH key for the given queue.
 func queueCacheKey(qname string) string { return queueCachePrefix + qname }

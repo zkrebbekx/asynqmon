@@ -270,7 +270,7 @@ func TestSweepSeededFleet(t *testing.T) {
 			So(f.RefreshedAt.IsZero(), ShouldBeFalse)
 		})
 
-		Convey("Then the sweep cost matches the budget: 15 commands per queue, +1 per queue with pending, +3 per sweep, + bounded group reads", func() {
+		Convey("Then the sweep cost matches the budget: 15 commands per queue, +1 per queue with pending, +4 per sweep, + bounded group reads", func() {
 			cost := engine.LastSweep()
 			So(cost.Queues, ShouldEqual, 2)
 			// 1 SMEMBERS asynq:queues + 1 SMEMBERS cache index
@@ -279,7 +279,8 @@ func TestSweepSeededFleet(t *testing.T) {
 			// + 2 pending_since hops (both queues have pending tasks)
 			// + 1 INFO memory
 			// + 2 GROUP_STALL reads (q2 has one group: SMEMBERS + ZRANGE)
-			So(cost.ReadCmds, ShouldEqual, 37)
+			// + 1 ZRANGE of the (empty) scheduler snapshot index (§5.12)
+			So(cost.ReadCmds, ShouldEqual, 38)
 			// 2 queues x (HSET + PEXPIRE) + 1 SADD index + fleet HSET +
 			// PEXPIRE + 1 SET attention report
 			So(cost.WriteCmds, ShouldEqual, 8)

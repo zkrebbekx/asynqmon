@@ -9,37 +9,39 @@ import (
 
 // ****************************************************************************
 // This file defines:
-//   - the phase-4 attention engine (§3.1 detector table, §5.2): the eight
-//     INSTANTANEOUS detectors, evaluated once per sweep on the lease-holding
-//     replica as pure functions over the queue snapshots (plus the bounded
-//     extra reads the sweep performs for them)
+//   - the attention engine (§3.1 detector table, §5.2): the eight phase-4
+//     INSTANTANEOUS detectors plus SCHEDULER_GONE (#9, §3.8/§5.12 — its
+//     history substrate is the scheduler snapshot set, scheduler.go),
+//     evaluated once per sweep on the lease-holding replica as pure
+//     functions over the sweep's observations
 //   - finding construction: severity, human sentence, chips, since tracking,
 //     and the pre-written console query
 //   - the published report (asynqmon:cache:attention) served by every replica
 //
 // Baseline-dependent detectors (FAIL_SPIKE, DEPTH_ANOMALY, CONSUMERS_DROPPED,
-// SCHEDULER_GONE, AGG_SETS_STALE) are phase 10+: they need ring-buffer /
-// snapshot history that does not exist yet. They are absent — not "learning"
-// — so DetectorsLearning is 0 until that substrate lands.
+// AGG_SETS_STALE) are phase 10+: they need ring-buffer history that does not
+// exist yet. They are absent — not "learning" — so DetectorsLearning is 0
+// until that substrate lands.
 // ****************************************************************************
 
 // Detector identifiers — the `detector` field of the frozen API contract.
 const (
-	DetectorNoConsumers = "NO_CONSUMERS"
-	DetectorOrphans     = "ORPHANS"
-	DetectorPendingAge  = "PENDING_AGE"
-	DetectorRetryStorm  = "RETRY_STORM"
-	DetectorPastDue     = "PAST_DUE"
-	DetectorPausedLong  = "PAUSED_LONG"
-	DetectorArchiveTrim = "ARCHIVE_TRIM"
-	DetectorGroupStall  = "GROUP_STALL"
+	DetectorNoConsumers   = "NO_CONSUMERS"
+	DetectorOrphans       = "ORPHANS"
+	DetectorPendingAge    = "PENDING_AGE"
+	DetectorRetryStorm    = "RETRY_STORM"
+	DetectorPastDue       = "PAST_DUE"
+	DetectorPausedLong    = "PAUSED_LONG"
+	DetectorArchiveTrim   = "ARCHIVE_TRIM"
+	DetectorGroupStall    = "GROUP_STALL"
+	DetectorSchedulerGone = "SCHEDULER_GONE"
 )
 
 const (
-	// detectorsLive / detectorsLearning feed the report footer ("8 detectors
+	// detectorsLive / detectorsLearning feed the report footer ("9 detectors
 	// live, 0 learning"). Phase 10 moves its baseline detectors from absent
 	// to learning-then-live.
-	detectorsLive     = 8
+	detectorsLive     = 9
 	detectorsLearning = 0
 
 	// maxAttentionFindings caps the published rail at 20 ranked findings
@@ -159,9 +161,10 @@ func (a *attentionEvaluator) observe(next map[detectorKey]*detectorState, key de
 }
 
 // evaluate runs every detector over the sweep's snapshots. groupObs holds the
-// bounded group-head reads (only queues examined THIS sweep have an entry).
+// bounded group-head reads (only queues examined THIS sweep have an entry);
+// schedGone holds the sweep's SCHEDULER_GONE determinations (scheduler.go).
 // Pure over its inputs plus the evaluator's own cross-sweep state.
-func (a *attentionEvaluator) evaluate(snaps map[string]*QueueSnapshot, groupObs map[string]groupStallObs, now time.Time) *AttentionReport {
+func (a *attentionEvaluator) evaluate(snaps map[string]*QueueSnapshot, groupObs map[string]groupStallObs, schedGone []SchedulerGoneObs, now time.Time) *AttentionReport {
 	next := make(map[detectorKey]*detectorState)
 	findings := make([]AttentionFinding, 0)
 
@@ -345,6 +348,27 @@ func (a *attentionEvaluator) evaluate(snaps map[string]*QueueSnapshot, groupObs 
 				findings = append(findings, f)
 			}
 		}
+	}
+
+	// 9. SCHEDULER_GONE — severity 4 (§3.8/§5.12): a persisted entry snapshot
+	// with no live counterpart past the gone threshold. The observation is
+	// already time-gated by the sweep (last_seen older than SchedulerGoneAfter),
+	// so there is no extra debounce; `since` is the honest last observation,
+	// not when the sweeper first noticed. Auto-clears the moment the entry
+	// (same stable key) is observed live again. The finding's queue column is
+	// the entry's TARGET queue — where its tasks would have gone.
+	for _, obs := range schedGone {
+		findings = append(findings, AttentionFinding{
+			Queue:    obs.Queue,
+			Detector: DetectorSchedulerGone,
+			Severity: 4,
+			Sentence: fmt.Sprintf("entry %s last seen %s ago — scheduler process gone or entry removed",
+				obs.TaskType, humanDuration(now.Sub(obs.LastSeen))),
+			Value:          int64(now.Sub(obs.LastSeen).Seconds()),
+			Chips:          []string{"SCHEDULER GONE"},
+			Since:          rfc3339(obs.LastSeen),
+			SuggestedQuery: "schedulers type=" + obs.TaskType,
+		})
 	}
 
 	a.state = next

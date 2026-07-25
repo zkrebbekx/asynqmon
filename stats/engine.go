@@ -116,6 +116,12 @@ type Config struct {
 	// longer than this. Default 5m.
 	GroupStallAfter time.Duration
 
+	// SchedulerGoneAfter is the SCHEDULER_GONE threshold: a scheduler-entry
+	// snapshot with no live counterpart whose last_seen is older than this is
+	// GONE (§3.8/§5.12). Default DefaultSchedulerGoneAfter (30s). Exposed for
+	// tests.
+	SchedulerGoneAfter time.Duration
+
 	// Logf logs sweeper lifecycle events and errors. Default log.Printf.
 	Logf func(format string, args ...interface{})
 }
@@ -200,6 +206,9 @@ func NewEngine(cfg Config) *Engine {
 	}
 	if cfg.GroupStallAfter <= 0 {
 		cfg.GroupStallAfter = defaultGroupStallAfter
+	}
+	if cfg.SchedulerGoneAfter <= 0 {
+		cfg.SchedulerGoneAfter = DefaultSchedulerGoneAfter
 	}
 	logf := cfg.Logf
 	if logf == nil {
@@ -476,13 +485,23 @@ func (e *Engine) sweep(ctx context.Context) error {
 		return fmt.Errorf("reading group heads: %w", err)
 	}
 
+	// Scheduler-entry snapshot pass (§3.8/§5.12): upsert every live entry
+	// under its stable key and diff for GONE observations. One SchedulerEntries
+	// call (uncounted, Inspector's client — the Servers() precedent), 1 index
+	// read + 1 HGETALL per known snapshot, 2 writes per live entry.
+	schedGone, n, schedWrites, err := e.sweepSchedulers(ctx, now)
+	reads += n
+	if err != nil {
+		return fmt.Errorf("sweeping scheduler entries: %w", err)
+	}
+
 	fleet := aggregateFleet(snaps, len(servers), workersTotal, workersBusy, now)
 	fleet.RedisMemoryUsed = memUsed
 	fleet.RedisMemoryMax = memMax
 
 	// Attention findings: pure evaluation over this sweep's snapshots plus
 	// the evaluator's holder-local debounce state (§5.2).
-	report := e.attn.evaluate(snaps, groupObs, now)
+	report := e.attn.evaluate(snaps, groupObs, schedGone, now)
 	attentionJSON, err := json.Marshal(report)
 	if err != nil {
 		// Cannot happen for these types; guard so a future field never
@@ -504,7 +523,7 @@ func (e *Engine) sweep(ctx context.Context) error {
 		At:        now,
 		Queues:    len(qnames),
 		ReadCmds:  reads,
-		WriteCmds: writes,
+		WriteCmds: writes + schedWrites,
 		Duration:  time.Since(begin),
 	})
 	// Wake SSE listeners after the local publish so what they read is at

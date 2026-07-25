@@ -8,6 +8,8 @@
 import axios from "axios";
 import queryString from "query-string";
 
+import type { SchedulerEntry } from "./api";
+
 // Same base-URL convention as api.ts: production serves the API on the same
 // origin; development proxies /api via vite.
 const getBaseUrl = () =>
@@ -201,6 +203,77 @@ export interface CancelListenersResponse {
 
 export async function getCancelListeners(): Promise<CancelListenersResponse> {
   const resp = await axios({ method: "get", url: `${getBaseUrl()}/cancel-listeners` });
+  return resp.data;
+}
+
+/**************************************************************
+              GET /api/schedulers (§3.8/§5.12)
+ **************************************************************/
+
+// One merged Schedulers row: live entries ∪ persisted snapshots, keyed by the
+// stable entry identity hash(spec|type|payload|opts) so history survives
+// scheduler restarts (asynq entry IDs are fresh UUIDs per process).
+export interface SchedulerRow {
+  stable_key: string;
+  // The entry in the legacy /scheduler_entries shape.
+  entry: SchedulerEntry;
+  live: boolean;
+  // Snapshot stamps (RFC3339); "" while the entry is live but the sweeper has
+  // not persisted it yet — absent data is not "now".
+  first_seen: string;
+  last_seen: string;
+  // Present only when the entry is GONE: no live counterpart and last_seen
+  // older than the server's gone threshold. Equals last_seen.
+  gone_since?: string;
+}
+
+export interface SchedulersResponse {
+  entries: SchedulerRow[];
+}
+
+export async function listSchedulers(): Promise<SchedulersResponse> {
+  const resp = await axios({ method: "get", url: `${getBaseUrl()}/schedulers` });
+  return resp.data;
+}
+
+/**************************************************************
+        GET /api/schedulers/:stable_key/outcomes (§3.8)
+ **************************************************************/
+
+// Three-valued honestly (§3.8): succeeded = completed-state task found;
+// failed = archived, or retry-state with retries > 0; pending = still in
+// flight; unknown = task no longer in Redis (deleted, or Retention=0 erased
+// the completion).
+export type SchedulerOutcome = "succeeded" | "failed" | "pending" | "unknown";
+
+export interface SchedulerOutcomeEvent {
+  task_id: string;
+  enqueued_at: string; // RFC3339
+  outcome: SchedulerOutcome;
+  // Raw asynq task state when the task was found.
+  state?: string;
+  // Why an outcome is unknown ("not_found — task deleted or Retention=0").
+  reason?: string;
+}
+
+export interface SchedulerOutcomesResponse {
+  stable_key: string;
+  queue: string;
+  // The entry's asynq.Retention in whole seconds; 0 = completions are deleted
+  // immediately and success is unknowable — drives the §3.8 guidance callout.
+  retention_seconds: number;
+  // asynq's hard cap on per-entry enqueue history (1,000) — label it.
+  history_cap: number;
+  events: SchedulerOutcomeEvent[];
+}
+
+export async function getSchedulerOutcomes(
+  stableKey: string
+): Promise<SchedulerOutcomesResponse> {
+  const resp = await axios({
+    method: "get",
+    url: `${getBaseUrl()}/schedulers/${stableKey}/outcomes`,
+  });
   return resp.data;
 }
 

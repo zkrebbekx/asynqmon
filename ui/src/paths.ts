@@ -37,7 +37,12 @@ import { attentionTarget } from "./lib/fleet";
 
 export function attentionFindingPath(suggestedQuery: string): string {
   const target = attentionTarget(suggestedQuery);
-  const base = target.kind === "tasks" ? paths().TASKS : paths().QUEUES;
+  const base =
+    target.kind === "tasks"
+      ? paths().TASKS
+      : target.kind === "schedulers"
+        ? paths().SCHEDULERS
+        : paths().QUEUES;
   return `${base}${target.search}`;
 }
 
