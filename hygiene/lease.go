@@ -1,44 +1,30 @@
 package hygiene
 
 import (
-	"context"
-	"time"
-
 	"github.com/redis/go-redis/v9"
+
+	"github.com/hibiken/asynqmon/internal/leasefence"
 )
 
 // ****************************************************************************
-// The singleton lease guarding the hygiene scheduler role (§5.13) — the same
-// SET NX PX + compare-and-set renew/release pattern as the stats sweeper
-// lease (stats/lease.go), on asynqmon:lock:hygiene. No fencing token: a brief
-// two-scheduler overlap after a handover only risks a duplicate report
-// generation, and report writes are idempotent last-writer-wins.
+// The singleton lease guarding the hygiene scheduler role (§5.13), delegated
+// to the shared internal/leasefence helper since phase 12 — same lock key as
+// before ("asynqmon:lock:hygiene"), plus the additive fencing token: the
+// SCHEDULED report persists CAS on the token, so a paused/partitioned
+// ex-scheduler can never overwrite a newer holder's report with a staler one.
+// Run-now stays unfenced (token 0): any replica may generate on demand by
+// design, and its write is an idempotent last-writer-wins report the operator
+// explicitly asked for.
 // ****************************************************************************
 
-var renewScript = redis.NewScript(`
-if redis.call("GET", KEYS[1]) == ARGV[1] then
-	return redis.call("PEXPIRE", KEYS[1], ARGV[2])
-end
-return 0`)
+// schedulerRole names the role; the lock key derives from it
+// ("asynqmon:lock:hygiene") so it can never drift from what leasefence
+// acquires.
+const schedulerRole = "hygiene"
 
-var releaseScript = redis.NewScript(`
-if redis.call("GET", KEYS[1]) == ARGV[1] then
-	return redis.call("DEL", KEYS[1])
-end
-return 0`)
+var lockKey = leasefence.LockKey(schedulerRole)
 
-func tryAcquireLease(ctx context.Context, rc redis.UniversalClient, instanceID string, ttl time.Duration) (bool, error) {
-	return rc.SetNX(ctx, lockKey, instanceID, ttl).Result()
-}
-
-func renewLease(ctx context.Context, rc redis.UniversalClient, instanceID string, ttl time.Duration) (bool, error) {
-	n, err := renewScript.Run(ctx, rc, []string{lockKey}, instanceID, ttl.Milliseconds()).Int()
-	if err != nil {
-		return false, err
-	}
-	return n == 1, nil
-}
-
-func releaseLease(ctx context.Context, rc redis.UniversalClient, instanceID string) error {
-	return releaseScript.Run(ctx, rc, []string{lockKey}, instanceID).Err()
+// newSchedulerFence builds the role fence for the hygiene scheduler.
+func newSchedulerFence(rc redis.UniversalClient) *leasefence.Fence {
+	return leasefence.New(rc, schedulerRole)
 }

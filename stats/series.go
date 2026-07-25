@@ -51,12 +51,15 @@ import (
 // of delta accumulation; the slot decodes as no-sample, never as a wrong
 // number.
 //
-// Tier guard (§5.8 sampling tiers): per-queue series are sampled only while
-// the fleet is within SeriesQueueCeiling (default 2,000 — the §5.1 tier-1
-// bound). Fleet and per-server series are always sampled. Hot-set tiering for
-// larger fleets (sample the attention-flagged/top-K hot set at full
-// resolution, cold queues rollup-only) is phase 12 — see the phase-12 notes
-// in the sampler below.
+// Sampling tiers (§5.8, phase 12): per-queue sampling follows the sweep's
+// own tiering. Tier 1 samples every queue into both rings (pre-phase-12
+// behavior). Tiers 2-3 sample only the queues the tick actually refreshed:
+// hot-set queues feed both rings every tick (full resolution); cold queues
+// feed the ROLLUP ring only, on their rotation visit — their counter deltas
+// cover the whole interval since the previous visit, so hourly rollup sums
+// stay correct. Fleet and per-server series are always sampled.
+// SeriesQueueCeiling remains as a hard safety ceiling (default 50,000, far
+// above the old 2,000 cliff): beyond it only hot-set queues get series.
 // ****************************************************************************
 
 // Ring geometry (normative §5.8).
@@ -77,8 +80,13 @@ const (
 	seriesMagic1    = byte('S')
 	seriesVersion   = byte(0x01)
 
-	// defaultSeriesQueueCeiling is the per-queue-series tier guard (§5.8).
-	defaultSeriesQueueCeiling = 2000
+	// defaultSeriesQueueCeiling is the §5.8 HARD safety ceiling on per-queue
+	// series. Phase 12 removed the old 2,000-queue cliff: per-queue sampling
+	// now follows the sweep's tiering (hot set both rings every tick, cold
+	// queues rollup-only on their rotation visit), so this is a far-higher
+	// backstop — above it only hot-set queues (plus fleet/server series)
+	// are sampled at all.
+	defaultSeriesQueueCeiling = 50000
 )
 
 // Series metric names (normative §5.8 metric set).
@@ -361,12 +369,17 @@ func counterDelta(prevDate string, prev int64, today string, cur int64) int64 {
 // ----------------------------------------------------------------------------
 
 // slotAcc is one series' in-process accumulator: the value being built for
-// the period the sweep clock is currently inside.
+// the period the sweep clock is currently inside. queue is the owning queue
+// name for queue-scoped series ("" for fleet/server scopes) — the retention
+// rule needs it: a cold queue's accumulator must survive ticks that do not
+// visit the queue (phase-12 rotation), while a DELETED queue's accumulator
+// still flushes its partial slot and is forgotten.
 type slotAcc struct {
 	spec   ringSpec
 	period int64
 	value  int64
 	kind   metricKind
+	queue  string
 }
 
 // merge folds a new sample of the same period into the accumulator.
@@ -378,12 +391,18 @@ func (a *slotAcc) merge(v int64) {
 	}
 }
 
-// seriesSample is one (scope, metric, value) observation of a sweep.
+// seriesSample is one (scope, metric, value) observation of a sweep. queue
+// is set for queue-scoped samples (retention rule); rollupOnly marks cold
+// queues' samples (phase-12 tiering: rotation visits feed the rollup ring
+// only — writing 30s hot slots for a queue visited every few minutes would
+// produce a misleading mostly-null hot ring at full write cost).
 type seriesSample struct {
-	keyScope string
-	metric   string
-	kind     metricKind
-	value    int64
+	keyScope   string
+	metric     string
+	kind       metricKind
+	value      int64
+	queue      string
+	rollupOnly bool
 }
 
 // flushOp is one completed slot ready to be written.
@@ -420,8 +439,13 @@ func newSeriesSampler(rc redis.UniversalClient, queueCeiling int) *seriesSampler
 }
 
 // computeDeltas turns this sweep's daily counters into per-queue deltas and
-// updates the previous-counter memory. Queues gone from the fleet are pruned.
-func (s *seriesSampler) computeDeltas(now time.Time, snaps map[string]*QueueSnapshot) map[string]queueDeltas {
+// updates the previous-counter memory. snaps holds only the queues this tick
+// REFRESHED (phase 12) — a cold queue's delta therefore covers the whole
+// span since its previous rotation visit, which is exactly what its rollup
+// slot should accumulate. universe is the full current fleet: only queues
+// gone from the fleet are pruned from the counter memory (pruning by snaps
+// would wipe every cold queue's memory every tick).
+func (s *seriesSampler) computeDeltas(now time.Time, snaps map[string]*QueueSnapshot, universe map[string]bool) map[string]queueDeltas {
 	today := now.UTC().Format("2006-01-02")
 	out := make(map[string]queueDeltas, len(snaps))
 	for q, snap := range snaps {
@@ -435,16 +459,27 @@ func (s *seriesSampler) computeDeltas(now time.Time, snaps map[string]*QueueSnap
 		s.prev[q] = counterPrev{date: today, processed: snap.ProcessedToday, failed: snap.FailedToday}
 	}
 	for q := range s.prev {
-		if _, ok := snaps[q]; !ok {
+		if !universe[q] {
 			delete(s.prev, q)
 		}
 	}
 	return out
 }
 
+// seriesTick tells the sampler how the sweep tiered this tick (§5.1/§5.8):
+// which queues are hot (full resolution), the fleet size (hard-ceiling
+// check), and the tier. Tier 1 samples every refreshed queue into both
+// rings; snaps itself already contains only refreshed queues.
+type seriesTick struct {
+	tier      int
+	fleetSize int
+	hot       map[string]bool
+}
+
 // buildSamples assembles the sweep's full sample set: fleet always, servers
-// always, queues only under the tier guard.
-func (s *seriesSampler) buildSamples(snaps map[string]*QueueSnapshot, deltas map[string]queueDeltas, fleet *FleetSnapshot, servers []*asynq.ServerInfo) []seriesSample {
+// always, refreshed queues per the tick's tiering (tier 1: both rings; tiers
+// 2-3: hot both rings, cold rollup-only; above the hard ceiling: hot only).
+func (s *seriesSampler) buildSamples(snaps map[string]*QueueSnapshot, deltas map[string]queueDeltas, fleet *FleetSnapshot, servers []*asynq.ServerInfo, tick seriesTick) []seriesSample {
 	samples := make([]seriesSample, 0, 16+len(snaps)*7+len(servers)*2)
 
 	// Fleet aggregates. Delta metrics are the SUM of per-queue deltas (only
@@ -466,48 +501,52 @@ func (s *seriesSampler) buildSamples(snaps map[string]*QueueSnapshot, deltas map
 		}
 	}
 	samples = append(samples,
-		seriesSample{fleetScope, MetricPending, metricGauge, fleet.Pending},
-		seriesSample{fleetScope, MetricActive, metricGauge, fleet.Active},
-		seriesSample{fleetScope, MetricRetry, metricGauge, fleet.Retry},
-		seriesSample{fleetScope, MetricArchived, metricGauge, fleet.Archived},
-		seriesSample{fleetScope, MetricConsumerCount, metricGauge, fleetConsumers},
-		seriesSample{fleetScope, MetricBusyWorkers, metricGauge, int64(fleet.WorkersBusy)},
-		seriesSample{fleetScope, MetricConcurrency, metricGauge, int64(fleet.WorkersTotal)},
+		seriesSample{keyScope: fleetScope, metric: MetricPending, kind: metricGauge, value: fleet.Pending},
+		seriesSample{keyScope: fleetScope, metric: MetricActive, kind: metricGauge, value: fleet.Active},
+		seriesSample{keyScope: fleetScope, metric: MetricRetry, kind: metricGauge, value: fleet.Retry},
+		seriesSample{keyScope: fleetScope, metric: MetricArchived, kind: metricGauge, value: fleet.Archived},
+		seriesSample{keyScope: fleetScope, metric: MetricConsumerCount, kind: metricGauge, value: fleetConsumers},
+		seriesSample{keyScope: fleetScope, metric: MetricBusyWorkers, kind: metricGauge, value: int64(fleet.WorkersBusy)},
+		seriesSample{keyScope: fleetScope, metric: MetricConcurrency, kind: metricGauge, value: int64(fleet.WorkersTotal)},
 	)
 	if haveDelta {
 		samples = append(samples,
-			seriesSample{fleetScope, MetricProcessedDelta, metricDelta, dp},
-			seriesSample{fleetScope, MetricFailedDelta, metricDelta, df},
+			seriesSample{keyScope: fleetScope, metric: MetricProcessedDelta, kind: metricDelta, value: dp},
+			seriesSample{keyScope: fleetScope, metric: MetricFailedDelta, kind: metricDelta, value: df},
 		)
 	}
 
 	for _, srv := range servers {
 		scope := seriesKeyScopeServer(serverScopeID(srv.Host, srv.PID))
 		samples = append(samples,
-			seriesSample{scope, MetricBusyWorkers, metricGauge, int64(len(srv.ActiveWorkers))},
-			seriesSample{scope, MetricConcurrency, metricGauge, int64(srv.Concurrency)},
+			seriesSample{keyScope: scope, metric: MetricBusyWorkers, kind: metricGauge, value: int64(len(srv.ActiveWorkers))},
+			seriesSample{keyScope: scope, metric: MetricConcurrency, kind: metricGauge, value: int64(srv.Concurrency)},
 		)
 	}
 
-	// Tier guard (§5.8): per-queue series only within the ceiling. Above it,
-	// fleet + server series keep working; per-queue sparklines read as
-	// no-sample. Phase 12 replaces this cliff with hot-set tiering.
-	if len(snaps) <= s.queueCeiling {
-		for q, snap := range snaps {
-			scope := seriesKeyScopeQueue(q)
+	// Per-queue samples over the tick's REFRESHED queues (§5.8 phase-12
+	// tiering — the cliff is gone): tier 1 feeds both rings; tiers 2-3 feed
+	// hot queues both rings and cold queues rollup-only; above the hard
+	// ceiling only hot queues are sampled at all.
+	for q, snap := range snaps {
+		hot := tick.tier <= 1 || tick.hot[q]
+		if !hot && tick.fleetSize > s.queueCeiling {
+			continue // hard safety ceiling (§5.8)
+		}
+		rollupOnly := tick.tier > 1 && !hot
+		scope := seriesKeyScopeQueue(q)
+		samples = append(samples,
+			seriesSample{keyScope: scope, metric: MetricPending, kind: metricGauge, value: snap.Pending, queue: q, rollupOnly: rollupOnly},
+			seriesSample{keyScope: scope, metric: MetricActive, kind: metricGauge, value: snap.Active, queue: q, rollupOnly: rollupOnly},
+			seriesSample{keyScope: scope, metric: MetricRetry, kind: metricGauge, value: snap.Retry, queue: q, rollupOnly: rollupOnly},
+			seriesSample{keyScope: scope, metric: MetricArchived, kind: metricGauge, value: snap.Archived, queue: q, rollupOnly: rollupOnly},
+			seriesSample{keyScope: scope, metric: MetricConsumerCount, kind: metricGauge, value: int64(snap.Consumers), queue: q, rollupOnly: rollupOnly},
+		)
+		if d := deltas[q]; d.ok {
 			samples = append(samples,
-				seriesSample{scope, MetricPending, metricGauge, snap.Pending},
-				seriesSample{scope, MetricActive, metricGauge, snap.Active},
-				seriesSample{scope, MetricRetry, metricGauge, snap.Retry},
-				seriesSample{scope, MetricArchived, metricGauge, snap.Archived},
-				seriesSample{scope, MetricConsumerCount, metricGauge, int64(snap.Consumers)},
+				seriesSample{keyScope: scope, metric: MetricProcessedDelta, kind: metricDelta, value: d.processed, queue: q, rollupOnly: rollupOnly},
+				seriesSample{keyScope: scope, metric: MetricFailedDelta, kind: metricDelta, value: d.failed, queue: q, rollupOnly: rollupOnly},
 			)
-			if d := deltas[q]; d.ok {
-				samples = append(samples,
-					seriesSample{scope, MetricProcessedDelta, metricDelta, d.processed},
-					seriesSample{scope, MetricFailedDelta, metricDelta, d.failed},
-				)
-			}
 		}
 	}
 	return samples
@@ -516,10 +555,10 @@ func (s *seriesSampler) buildSamples(snaps map[string]*QueueSnapshot, deltas map
 // feed advances one series' accumulator with a sample at period p, appending
 // a flushOp when the sweep clock crossed into a later period. Regressions
 // (clock skew) are dropped rather than corrupting an already-flushed slot.
-func (s *seriesSampler) feed(spec ringSpec, key string, kind metricKind, p, v int64, flushes *[]flushOp) {
+func (s *seriesSampler) feed(spec ringSpec, key, queue string, kind metricKind, p, v int64, flushes *[]flushOp) {
 	a := s.acc[key]
 	if a == nil {
-		s.acc[key] = &slotAcc{spec: spec, period: p, value: v, kind: kind}
+		s.acc[key] = &slotAcc{spec: spec, period: p, value: v, kind: kind, queue: queue}
 		return
 	}
 	switch {
@@ -527,7 +566,7 @@ func (s *seriesSampler) feed(spec ringSpec, key string, kind metricKind, p, v in
 		a.merge(v)
 	case p > a.period:
 		*flushes = append(*flushes, flushOp{key: key, spec: a.spec, period: a.period, value: clampSeriesValue(a.value)})
-		s.acc[key] = &slotAcc{spec: spec, period: p, value: v, kind: kind}
+		s.acc[key] = &slotAcc{spec: spec, period: p, value: v, kind: kind, queue: queue}
 	}
 }
 
@@ -536,13 +575,12 @@ func (s *seriesSampler) feed(spec ringSpec, key string, kind metricKind, p, v in
 //
 // Per-flush cost: 2 SETRANGE (header last + slot) for known keys, 1 SETRANGE
 // for new keys (full init buffer), + PEXPIRE at ttl/4 cadence, + sentinel
-// SETRANGEs only when slots were skipped. Hot flushes happen once per 30s per
-// series; at the 2k-queue tier-guard ceiling that is ~2×7×2000/30 ≈ 930
-// cmd/s of writes on top of the sweep's reads — phase 12's command-budget
-// governor should fold series flushes into its shard rotation (documented
-// deviation: tier-1 + full per-queue series slightly exceeds the default
-// 2,000 cmd/s budget at exactly the ceiling).
-func (s *seriesSampler) sample(ctx context.Context, now time.Time, snaps map[string]*QueueSnapshot, fleet *FleetSnapshot, servers []*asynq.ServerInfo) (reads, writes int, err error) {
+// SETRANGEs only when slots were skipped. Since phase 12 the flush load
+// follows the sweep's shard rotation: only refreshed queues feed series, hot
+// queues at both resolutions, cold queues rollup-only (one flush per rotation
+// visit at most) — the old pre-governor note about tier-1-at-the-ceiling
+// exceeding the budget is resolved by the rotation itself.
+func (s *seriesSampler) sample(ctx context.Context, now time.Time, snaps map[string]*QueueSnapshot, universe map[string]bool, tick seriesTick, fleet *FleetSnapshot, servers []*asynq.ServerInfo) (reads, writes int, err error) {
 	// Anchor the learning clock exactly once (survives restarts/handovers).
 	if !s.sinceSet {
 		if err := s.rc.SetNX(ctx, seriesSinceKey, now.Unix(), 0).Err(); err != nil {
@@ -552,28 +590,48 @@ func (s *seriesSampler) sample(ctx context.Context, now time.Time, snaps map[str
 		s.sinceSet = true
 	}
 
-	deltas := s.computeDeltas(now, snaps)
-	samples := s.buildSamples(snaps, deltas, fleet, servers)
+	deltas := s.computeDeltas(now, snaps, universe)
+	samples := s.buildSamples(snaps, deltas, fleet, servers, tick)
 
 	var flushes []flushOp
 	seen := make(map[string]struct{}, len(samples)*2)
 	unix := now.Unix()
 	for _, ring := range []ringSpec{hotRing, rollupRing} {
+		if ring.name == hotRing.name {
+			// Hot ring: full-resolution samples only.
+			p := seriesPeriodIndex(unix, ring.period)
+			for _, smp := range samples {
+				if smp.rollupOnly {
+					continue
+				}
+				key := seriesKey(ring, smp.keyScope, smp.metric)
+				seen[key] = struct{}{}
+				s.feed(ring, key, smp.queue, smp.kind, p, smp.value, &flushes)
+			}
+			continue
+		}
 		p := seriesPeriodIndex(unix, ring.period)
 		for _, smp := range samples {
 			key := seriesKey(ring, smp.keyScope, smp.metric)
 			seen[key] = struct{}{}
-			s.feed(ring, key, smp.kind, p, smp.value, &flushes)
+			s.feed(ring, key, smp.queue, smp.kind, p, smp.value, &flushes)
 		}
 	}
 
-	// Series that stopped being sampled (deleted queue, dead server, tier
-	// guard engaged): flush their partial slot once, then forget them.
+	// Accumulators not fed this tick: a queue still in the fleet is merely
+	// cold (awaiting its rotation visit) — its accumulator MUST survive, or
+	// the partial slot would flush early and the regression guard would drop
+	// the rest of the hour's data. Everything else (deleted queue, dead
+	// server) flushes its partial slot once and is forgotten.
 	for key, a := range s.acc {
-		if _, ok := seen[key]; !ok {
-			flushes = append(flushes, flushOp{key: key, spec: a.spec, period: a.period, value: clampSeriesValue(a.value)})
-			delete(s.acc, key)
+		if _, ok := seen[key]; ok {
+			continue
 		}
+		if a.queue != "" && universe[a.queue] {
+			continue // cold queue between rotation visits: keep accumulating
+		}
+		flushes = append(flushes, flushOp{key: key, spec: a.spec, period: a.period, value: clampSeriesValue(a.value)})
+		delete(s.acc, key)
 	}
 	if len(flushes) == 0 {
 		return reads, writes, nil

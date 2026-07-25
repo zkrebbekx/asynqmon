@@ -17,6 +17,8 @@ import (
 
 	"github.com/hibiken/asynq"
 	"github.com/redis/go-redis/v9"
+
+	"github.com/hibiken/asynqmon/internal/leasefence"
 )
 
 // ****************************************************************************
@@ -84,6 +86,13 @@ type Indexer struct {
 	kick    chan struct{}
 	holding int32
 
+	// fence is the shared lease+fencing-token helper (§5.13, phase 12);
+	// token is the fencing token minted at acquisition (atomic; 0 while not
+	// holding — and for explicitly off-lease *Now calls, which write
+	// unfenced by design). Index writes CAS on it.
+	fence *leasefence.Fence
+	token int64 // atomic
+
 	mu      sync.Mutex
 	cancel  context.CancelFunc
 	wg      sync.WaitGroup
@@ -122,11 +131,12 @@ func NewIndexer(cfg Config) *Indexer {
 		logf = log.Printf
 	}
 	return &Indexer{
-		cfg:  cfg,
-		rc:   cfg.RedisClient,
-		insp: cfg.Inspector,
-		logf: logf,
-		kick: make(chan struct{}, 1),
+		cfg:   cfg,
+		rc:    cfg.RedisClient,
+		insp:  cfg.Inspector,
+		logf:  logf,
+		kick:  make(chan struct{}, 1),
+		fence: newIndexerFence(cfg.RedisClient),
 	}
 }
 
@@ -175,15 +185,19 @@ func (ix *Indexer) Stop() {
 	if atomic.LoadInt32(&ix.holding) == 1 {
 		ctx, cancelRelease := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancelRelease()
-		if err := releaseLease(ctx, ix.rc, ix.cfg.InstanceID); err != nil {
+		if err := ix.fence.Release(ctx, ix.cfg.InstanceID); err != nil {
 			ix.logf("asynqmon: errsig: releasing indexer lease: %v", err)
 		}
 		atomic.StoreInt32(&ix.holding, 0)
+		atomic.StoreInt64(&ix.token, 0)
 	}
 }
 
 // LeaseHeld reports whether this replica currently holds the indexer lease.
 func (ix *Indexer) LeaseHeld() bool { return atomic.LoadInt32(&ix.holding) == 1 }
+
+// InstanceID returns this replica's lease identity.
+func (ix *Indexer) InstanceID() string { return ix.cfg.InstanceID }
 
 func (ix *Indexer) leaseLoop(ctx context.Context) {
 	defer ix.wg.Done()
@@ -201,7 +215,7 @@ func (ix *Indexer) leaseLoop(ctx context.Context) {
 
 func (ix *Indexer) leaseTick(ctx context.Context) {
 	if atomic.LoadInt32(&ix.holding) == 1 {
-		ok, err := renewLease(ctx, ix.rc, ix.cfg.InstanceID, ix.cfg.LeaseTTL)
+		ok, err := ix.fence.Renew(ctx, ix.cfg.InstanceID, ix.cfg.LeaseTTL)
 		if err != nil || !ok {
 			if err != nil && ctx.Err() == nil {
 				ix.logf("asynqmon: errsig: renewing indexer lease: %v", err)
@@ -209,17 +223,19 @@ func (ix *Indexer) leaseTick(ctx context.Context) {
 				ix.logf("asynqmon: errsig: indexer lease lost; standing by")
 			}
 			atomic.StoreInt32(&ix.holding, 0)
+			atomic.StoreInt64(&ix.token, 0)
 		}
 		return
 	}
-	ok, err := tryAcquireLease(ctx, ix.rc, ix.cfg.InstanceID, ix.cfg.LeaseTTL)
+	token, err := ix.fence.Acquire(ctx, ix.cfg.InstanceID, ix.cfg.LeaseTTL)
 	if err != nil {
 		if ctx.Err() == nil {
 			ix.logf("asynqmon: errsig: acquiring indexer lease: %v", err)
 		}
 		return
 	}
-	if ok {
+	if token > 0 {
+		atomic.StoreInt64(&ix.token, token)
 		atomic.StoreInt32(&ix.holding, 1)
 		ix.logf("asynqmon: errsig: acquired indexer lease as %s", ix.cfg.InstanceID)
 		select {
@@ -263,6 +279,32 @@ func (ix *Indexer) workLoop(ctx context.Context) {
 // ----------------------------------------------------------------------------
 // Feeder 1: archived tail
 // ----------------------------------------------------------------------------
+
+// ErrSuperseded is returned by a feeder run whose fenced index write was
+// rejected: a newer claimant minted a higher fencing token, so this replica
+// stood down (§5.13).
+var ErrSuperseded = errors.New("errsig: fencing token superseded; another replica now holds the indexer role")
+
+// currentToken reads this replica's fencing token (0 = off-lease → unfenced
+// writes, the documented *Now semantics).
+func (ix *Indexer) currentToken() int64 { return atomic.LoadInt64(&ix.token) }
+
+// standDown clears holder state after a fence rejection so the lease loop
+// re-contends instead of retrying doomed writes.
+func (ix *Indexer) standDown() {
+	atomic.StoreInt32(&ix.holding, 0)
+	atomic.StoreInt64(&ix.token, 0)
+}
+
+// hsetCmd flattens a field map into one HSET command.
+func hsetCmd(key string, fields map[string]interface{}) leasefence.Cmd {
+	cmd := make(leasefence.Cmd, 0, 2+2*len(fields))
+	cmd = append(cmd, "HSET", key)
+	for f, v := range fields {
+		cmd = append(cmd, f, v)
+	}
+	return cmd
+}
 
 // tailCursor is one queue's resume point: the last (died-at score, task id)
 // examined. Scores are died-at Unix seconds; the archived zset only ever
@@ -485,20 +527,30 @@ func (ix *Indexer) mergeAndWrite(ctx context.Context, now time.Time, agg map[str
 		}
 	}
 
-	pipe := ix.rc.Pipeline()
+	// Fence-guarded batch (§5.13, phase 12): a superseded ex-holder's merge
+	// must never land over a newer holder's index. Token 0 (off-lease
+	// SweepTailNow — tests/tooling) writes unfenced by design.
+	token := ix.currentToken()
+	ttlMs := indexTTL.Milliseconds()
+	cmds := make([]leasefence.Cmd, 0, 6*len(writeSet)+8)
 	for sig := range writeSet {
 		s := all[sig]
 		fields, herr := s.toHash()
 		if herr != nil {
 			return fmt.Errorf("encoding signature %s: %w", sig, herr)
 		}
-		pipe.HSet(ctx, sigKey(sig), fields)
-		pipe.Expire(ctx, sigKey(sig), indexTTL)
-		pipe.ZAdd(ctx, indexKey, redis.Z{Score: float64(s.LastSeen.Unix()), Member: sig})
+		cmds = append(cmds,
+			hsetCmd(sigKey(sig), fields),
+			leasefence.Cmd{"PEXPIRE", sigKey(sig), ttlMs},
+			leasefence.Cmd{"ZADD", indexKey, float64(s.LastSeen.Unix()), sig})
 		if acc := agg[sig]; acc != nil && len(acc.refs) > 0 {
-			pipe.ZAdd(ctx, refsKey(sig), acc.refs...)
-			pipe.ZRemRangeByRank(ctx, refsKey(sig), 0, int64(-(maxRefsPerSig + 1)))
-			pipe.Expire(ctx, refsKey(sig), indexTTL)
+			zadd := leasefence.Cmd{"ZADD", refsKey(sig)}
+			for _, r := range acc.refs {
+				zadd = append(zadd, r.Score, r.Member)
+			}
+			cmds = append(cmds, zadd,
+				leasefence.Cmd{"ZREMRANGEBYRANK", refsKey(sig), 0, int64(-(maxRefsPerSig + 1))},
+				leasefence.Cmd{"PEXPIRE", refsKey(sig), ttlMs})
 		}
 	}
 
@@ -506,32 +558,39 @@ func (ix *Indexer) mergeAndWrite(ctx context.Context, now time.Time, agg map[str
 	if err != nil {
 		return fmt.Errorf("encoding trimmed queues: %w", err)
 	}
-	pipe.HSet(ctx, metaKey,
-		"failed_today_total", strconv.FormatInt(failedTotal, 10),
-		"trimmed_queues", string(trimmedJSON),
-		"tail_at", strconv.FormatInt(now.Unix(), 10),
-	)
-	pipe.Expire(ctx, metaKey, indexTTL)
+	cmds = append(cmds,
+		leasefence.Cmd{"HSET", metaKey,
+			"failed_today_total", strconv.FormatInt(failedTotal, 10),
+			"trimmed_queues", string(trimmedJSON),
+			"tail_at", strconv.FormatInt(now.Unix(), 10)},
+		leasefence.Cmd{"PEXPIRE", metaKey, ttlMs})
 	if len(newCursors) > 0 {
-		flat := make([]interface{}, 0, len(newCursors)*2)
+		hset := leasefence.Cmd{"HSET", cursorsKey}
 		for q, v := range newCursors {
-			flat = append(flat, q, v)
+			hset = append(hset, q, v)
 		}
-		pipe.HSet(ctx, cursorsKey, flat...)
+		cmds = append(cmds, hset)
 	}
-	pipe.Expire(ctx, cursorsKey, indexTTL)
-	// TTL prune (90d, mirroring the archive) + population cap.
-	pipe.ZRemRangeByScore(ctx, indexKey, "-inf", strconv.FormatInt(now.Add(-indexTTL).Unix(), 10))
-	pipe.Expire(ctx, indexKey, indexTTL)
-	if _, err := pipe.Exec(ctx); err != nil && !errors.Is(err, redis.Nil) {
+	cmds = append(cmds,
+		leasefence.Cmd{"PEXPIRE", cursorsKey, ttlMs},
+		// TTL prune (90d, mirroring the archive) + population cap.
+		leasefence.Cmd{"ZREMRANGEBYSCORE", indexKey, "-inf", strconv.FormatInt(now.Add(-indexTTL).Unix(), 10)},
+		leasefence.Cmd{"PEXPIRE", indexKey, ttlMs})
+	ok, err := ix.fence.Exec(ctx, token, cmds)
+	if err != nil {
 		return fmt.Errorf("writing signature index: %w", err)
 	}
+	if !ok {
+		ix.standDown()
+		return ErrSuperseded
+	}
 
-	return ix.enforceCap(ctx)
+	return ix.enforceCap(ctx, token)
 }
 
-// enforceCap evicts the lowest-last_seen signatures beyond maxSignatures.
-func (ix *Indexer) enforceCap(ctx context.Context) error {
+// enforceCap evicts the lowest-last_seen signatures beyond maxSignatures
+// (fence-guarded like every index write).
+func (ix *Indexer) enforceCap(ctx context.Context, token int64) error {
 	total, err := ix.rc.ZCard(ctx, indexKey).Result()
 	if err != nil || total <= maxSignatures {
 		return err
@@ -540,14 +599,22 @@ func (ix *Indexer) enforceCap(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	pipe := ix.rc.Pipeline()
+	cmds := make([]leasefence.Cmd, 0, 3*len(evict))
 	for _, sig := range evict {
-		pipe.Del(ctx, sigKey(sig), refsKey(sig))
-		pipe.ZRem(ctx, indexKey, sig)
-		pipe.SRem(ctx, retrySigsKey, sig)
+		cmds = append(cmds,
+			leasefence.Cmd{"DEL", sigKey(sig), refsKey(sig)},
+			leasefence.Cmd{"ZREM", indexKey, sig},
+			leasefence.Cmd{"SREM", retrySigsKey, sig})
 	}
-	_, err = pipe.Exec(ctx)
-	return err
+	ok, err := ix.fence.Exec(ctx, token, cmds)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		ix.standDown()
+		return ErrSuperseded
+	}
+	return nil
 }
 
 // ----------------------------------------------------------------------------
@@ -644,7 +711,11 @@ func (ix *Indexer) SampleRetryNow(ctx context.Context) error {
 		return fmt.Errorf("reading signature hashes: %w", err)
 	}
 
-	pipe := ix.rc.Pipeline()
+	// Fence-guarded batch (§5.13, phase 12); token 0 = off-lease
+	// SampleRetryNow, unfenced by design.
+	token := ix.currentToken()
+	ttlMs := indexTTL.Milliseconds()
+	cmds := make([]leasefence.Cmd, 0, 6*len(sigsList)+6)
 	var stillSampled []interface{}
 	for _, sig := range sigsList {
 		s := existing[sig]
@@ -681,8 +752,9 @@ func (ix *Indexer) SampleRetryNow(ctx context.Context) error {
 		}
 		s.Counts = kept
 		if s.ArchivedCount == 0 && s.RetrySampledTotal() == 0 {
-			pipe.Del(ctx, sigKey(sig), refsKey(sig))
-			pipe.ZRem(ctx, indexKey, sig)
+			cmds = append(cmds,
+				leasefence.Cmd{"DEL", sigKey(sig), refsKey(sig)},
+				leasefence.Cmd{"ZREM", indexKey, sig})
 			continue
 		}
 		s.rollSnapshot(now)
@@ -690,28 +762,40 @@ func (ix *Indexer) SampleRetryNow(ctx context.Context) error {
 		if herr != nil {
 			return fmt.Errorf("encoding signature %s: %w", sig, herr)
 		}
-		pipe.HSet(ctx, sigKey(sig), fields)
-		pipe.Expire(ctx, sigKey(sig), indexTTL)
-		pipe.ZAdd(ctx, indexKey, redis.Z{Score: float64(s.LastSeen.Unix()), Member: sig})
+		cmds = append(cmds,
+			hsetCmd(sigKey(sig), fields),
+			leasefence.Cmd{"PEXPIRE", sigKey(sig), ttlMs},
+			leasefence.Cmd{"ZADD", indexKey, float64(s.LastSeen.Unix()), sig})
 		if acc != nil && len(acc.refs) > 0 {
-			pipe.ZAdd(ctx, refsKey(sig), acc.refs...)
-			pipe.ZRemRangeByRank(ctx, refsKey(sig), 0, int64(-(maxRefsPerSig + 1)))
-			pipe.Expire(ctx, refsKey(sig), indexTTL)
+			zadd := leasefence.Cmd{"ZADD", refsKey(sig)}
+			for _, r := range acc.refs {
+				zadd = append(zadd, r.Score, r.Member)
+			}
+			cmds = append(cmds, zadd,
+				leasefence.Cmd{"ZREMRANGEBYRANK", refsKey(sig), 0, int64(-(maxRefsPerSig + 1))},
+				leasefence.Cmd{"PEXPIRE", refsKey(sig), ttlMs})
 		}
 		if s.RetrySampledTotal() > 0 {
 			stillSampled = append(stillSampled, sig)
 		}
 	}
-	pipe.Del(ctx, retrySigsKey)
+	cmds = append(cmds, leasefence.Cmd{"DEL", retrySigsKey})
 	if len(stillSampled) > 0 {
-		pipe.SAdd(ctx, retrySigsKey, stillSampled...)
-		pipe.Expire(ctx, retrySigsKey, indexTTL)
+		sadd := leasefence.Cmd{"SADD", retrySigsKey}
+		sadd = append(sadd, stillSampled...)
+		cmds = append(cmds, sadd, leasefence.Cmd{"PEXPIRE", retrySigsKey, ttlMs})
 	}
-	pipe.HSet(ctx, metaKey, "sample_at", strconv.FormatInt(now.Unix(), 10))
-	pipe.Expire(ctx, metaKey, indexTTL)
-	pipe.Expire(ctx, indexKey, indexTTL)
-	if _, err := pipe.Exec(ctx); err != nil && !errors.Is(err, redis.Nil) {
+	cmds = append(cmds,
+		leasefence.Cmd{"HSET", metaKey, "sample_at", strconv.FormatInt(now.Unix(), 10)},
+		leasefence.Cmd{"PEXPIRE", metaKey, ttlMs},
+		leasefence.Cmd{"PEXPIRE", indexKey, ttlMs})
+	ok, err := ix.fence.Exec(ctx, token, cmds)
+	if err != nil {
 		return fmt.Errorf("writing retry sample: %w", err)
+	}
+	if !ok {
+		ix.standDown()
+		return ErrSuperseded
 	}
 	return nil
 }

@@ -6,6 +6,7 @@
 package jobs
 
 import (
+	"context"
 	"encoding/json"
 	"strconv"
 	"strings"
@@ -104,12 +105,15 @@ type Scope struct {
 	// Meta are "key:value" payload constraints (AND, top-level JSON scalars),
 	// in the same wire format the search endpoint accepts.
 	Meta []string `json:"meta"`
-	// Aql is the console's AQL query (phase 6, §3.4). Compiled via
-	// aql.CompileMatcher at enumeration/execution start; env-dependent
-	// predicates (running>, deadline_pct>, orphaned, pending_age>,
-	// group_age>) are rejected at job-create time because the runner
-	// re-verifies from TaskInfo alone. Relative durations anchor to the
-	// moment the matcher is compiled.
+	// Aql is the console's AQL query (phase 6, §3.4). Compiled at
+	// enumeration/execution start. Since phase 12 env-dependent predicates
+	// (running>, deadline_pct>, orphaned, pending_age>, group_age>) are
+	// supported in job scopes too: the runner drives an aql.EnvBuilder
+	// session that reads Servers()/orphan sets once per batch window and
+	// pipelines pending_since/group scores per batch, so re-verification
+	// evaluates the full predicate against live data. Relative durations
+	// anchor to the moment the matcher is compiled; env observations carry
+	// the session's refresh clock.
 	Aql string `json:"aql,omitempty"`
 }
 
@@ -149,10 +153,11 @@ func ValidateScopeVerb(s Scope, v Verb) string {
 	return ""
 }
 
-// ValidateAql checks the scope's AQL clause: it must parse, be answerable
-// in the scope's state, and compile to an env-free matcher (the runner's
-// re-verification seam). Returns the positioned rejection for the HTTP 400
-// body, or nil.
+// ValidateAql checks the scope's AQL clause: it must parse, be answerable in
+// the scope's state, and compile. Since phase 12 env-dependent predicates
+// are VALID job scopes (the runner evaluates them through an env-builder
+// session), so validation no longer requires an env-free matcher. Returns
+// the positioned rejection for the HTTP 400 body, or nil.
 func (s Scope) ValidateAql() *aql.ParseError {
 	if s.Aql == "" {
 		return nil
@@ -168,15 +173,16 @@ func (s Scope) ValidateAql() *aql.ParseError {
 			Hint: "the scope's state and the query's state= clause must agree",
 		}
 	}
-	if _, perr := aql.CompileMatcher(q, s.State, time.Now()); perr != nil {
+	if _, perr := aql.Compile(q, s.State, time.Now()); perr != nil {
 		return perr
 	}
 	return nil
 }
 
-// Compile builds the scope's full predicate once: the legacy queue/state/
-// free-text/meta checks plus the compiled AQL matcher. The runner compiles
-// at enumeration/execution start so per-task re-verification never re-parses.
+// Compile builds the scope's env-FREE predicate: the legacy queue/state/
+// free-text/meta checks plus the compiled AQL matcher. Env-dependent AQL
+// still errors here — this remains the honest path for callers without live
+// data (Scope.Matches). The runner uses CompileEnv instead.
 func (s Scope) Compile() (Matcher, *aql.ParseError) {
 	var aqlMatch func(*asynq.TaskInfo) bool
 	if s.Aql != "" {
@@ -193,7 +199,60 @@ func (s Scope) Compile() (Matcher, *aql.ParseError) {
 	return compiledScope{scope: s, aqlMatch: aqlMatch}, nil
 }
 
-// compiledScope is Scope's Matcher: legacy predicate AND compiled AQL.
+// CompileEnv builds the scope's FULL predicate, env fields included (phase
+// 12): the legacy checks plus a compiled AQL plan driven through an
+// aql.EnvBuilder session. The runner calls PrepareBatch before matching each
+// batch — Servers()/orphan sets are read once per batch window, and
+// pending_since/group scores are pipelined per batch. A plan needing no env
+// data degenerates to zero extra reads.
+func (s Scope) CompileEnv(eb *aql.EnvBuilder) (*ScopeMatcher, *aql.ParseError) {
+	sm := &ScopeMatcher{scope: s}
+	if s.Aql == "" {
+		return sm, nil
+	}
+	q, perr := aql.Parse(s.Aql)
+	if perr != nil {
+		return nil, perr
+	}
+	plan, perr := aql.Compile(q, s.State, time.Now())
+	if perr != nil {
+		return nil, perr
+	}
+	sess, err := eb.NewSession(plan)
+	if err != nil {
+		return nil, &aql.ParseError{Msg: err.Error(), Pos: 0}
+	}
+	sm.sess = sess
+	return sm, nil
+}
+
+// ScopeMatcher is the env-capable Matcher the runner drives: PrepareBatch
+// then Matches per task (§4.3 step 5 re-verification, full predicate).
+type ScopeMatcher struct {
+	scope Scope
+	sess  *aql.Session // nil when the scope has no AQL clause
+}
+
+// PrepareBatch readies env data for one batch of tasks (no-op for scopes
+// whose plan needs none).
+func (m *ScopeMatcher) PrepareBatch(ctx context.Context, batch []*asynq.TaskInfo) error {
+	if m.sess == nil {
+		return nil
+	}
+	return m.sess.Prepare(ctx, batch)
+}
+
+// Matches evaluates the whole scope: legacy predicate AND the AQL plan
+// against the session's current env.
+func (m *ScopeMatcher) Matches(ti *asynq.TaskInfo) bool {
+	if !m.scope.matchesLegacy(ti) {
+		return false
+	}
+	return m.sess == nil || m.sess.Match(ti)
+}
+
+// compiledScope is Scope's env-free Matcher: legacy predicate AND compiled
+// AQL.
 type compiledScope struct {
 	scope    Scope
 	aqlMatch func(*asynq.TaskInfo) bool

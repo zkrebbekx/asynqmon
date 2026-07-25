@@ -121,10 +121,17 @@ const (
 	// the tier-1 ceiling of ~2k queues (§5.1 tiering table; revisit in phase 12).
 	queueIndexKey = "asynqmon:cache:queues"
 
-	// sweeperLockKey is the singleton lease guarding the stats sweeper role
-	// (§5.13): SET NX PX by the winning replica, renewed at ~1/3 TTL. Loser
-	// replicas stand by and serve reads from the Redis cache.
-	sweeperLockKey = "asynqmon:lock:stats"
+	// sweeperRole names the stats sweeper's singleton role for the shared
+	// lease+fence helper (internal/leasefence): lock key
+	// "asynqmon:lock:stats" (unchanged from pre-phase-12 replicas) plus the
+	// additive fence counter "asynqmon:lock:stats:fence" (§5.13).
+	sweeperRole = "stats"
+
+	// viewedKey is the ZSET of recently-viewed queue names (score = view time,
+	// Unix seconds), written best-effort by whichever replica serves a
+	// directory name= filter or a workspace endpoint and read by the sweeping
+	// holder to fold viewed queues into the §5.1 hot set (tiers 2-3 only).
+	viewedKey = "asynqmon:viewed"
 
 	// attentionCacheKey is the STRING holding the JSON attention report
 	// (§5.2). Published by the sweep holder after every sweep so standby

@@ -9,12 +9,15 @@ import (
 	"time"
 
 	"github.com/redis/go-redis/v9"
+
+	"github.com/hibiken/asynqmon/internal/leasefence"
 )
 
 // ****************************************************************************
 // This file defines:
 //   - the in-process snapshot store (zero-latency reads on the lease holder)
-//   - reading and writing the shared Redis cache (reads for standby replicas)
+//   - reading and writing the shared Redis cache (reads for standby replicas;
+//     the write path is fence-guarded on the leased sweep, §5.13 phase 12)
 // ****************************************************************************
 
 // memoryStore holds the latest sweep results in process. Snapshots are
@@ -29,14 +32,22 @@ type memoryStore struct {
 	lastSweep SweepStats
 }
 
-// SweepStats records the measured cost of the most recent sweep — the input
-// for the phase-12 command-budget governor and the Settings › Health readout.
+// SweepStats records the measured cost of the most recent sweep — the
+// phase-12 command-budget governor's own accounting and the Settings › Health
+// readout (§3.12).
 type SweepStats struct {
-	At        time.Time
+	At time.Time
+	// Queues is the fleet size (SCARD asynq:queues); Refreshed is how many
+	// queues this tick actually re-read (equal in tier 1 / full mode).
 	Queues    int
+	Refreshed int
 	ReadCmds  int // Redis commands issued to read asynq state
 	WriteCmds int // Redis commands issued to write the asynqmon cache
 	Duration  time.Duration
+	// Governor state of the sweep that produced these numbers (§5.1).
+	Tier               int
+	HotSetSize         int
+	FullRotationEstSec int
 }
 
 func newMemoryStore() *memoryStore {
@@ -83,6 +94,16 @@ func (m *memoryStore) getAttention() (*FleetSnapshot, *AttentionReport) {
 	return m.fleet, m.attention
 }
 
+// hashArgs flattens a field map into HSET arguments after the key.
+func hashArgs(key string, fields map[string]interface{}) leasefence.Cmd {
+	cmd := make(leasefence.Cmd, 0, 2+2*len(fields))
+	cmd = append(cmd, "HSET", key)
+	for f, v := range fields {
+		cmd = append(cmd, f, v)
+	}
+	return cmd
+}
+
 // writeCache publishes a sweep's results to the shared Redis cache so every
 // replica reads the same truth (§5.13). removed lists queues that were in the
 // cache index but no longer exist in asynq:queues; their cache entries are
@@ -95,35 +116,41 @@ func (m *memoryStore) getAttention() (*FleetSnapshot, *AttentionReport) {
 // snapshots (one SET, same TTL) so standby replicas serve findings that are
 // byte-identical to the holder's.
 //
+// The publish is fence-guarded (§5.13, phase 12): with token > 0 every batch
+// CASes on the sweeper role's fencing token, so a superseded ex-holder can
+// never overwrite a newer holder's rows; ok=false reports exactly that.
+// token 0 (SweepNow off-lease — tests, operational tooling) writes unfenced,
+// preserving the documented "duplicate reads + idempotent last-writer-wins
+// writes" semantics of explicit off-lease sweeps.
+//
 // Returns the number of Redis commands issued (for SweepStats).
-func writeCache(ctx context.Context, rc redis.UniversalClient, fleet *FleetSnapshot, queues map[string]*QueueSnapshot, removed []string, attentionJSON []byte, ttl time.Duration) (int, error) {
-	pipe := rc.Pipeline()
-	cmds := 0
+func writeCache(ctx context.Context, fence *leasefence.Fence, token int64, fleet *FleetSnapshot, queues map[string]*QueueSnapshot, removed []string, attentionJSON []byte, ttl time.Duration) (int, bool, error) {
+	ttlMs := ttl.Milliseconds()
+	cmds := make([]leasefence.Cmd, 0, 2*len(queues)+2*len(removed)+4)
 	names := make([]interface{}, 0, len(queues))
 	for name, snap := range queues {
-		pipe.HSet(ctx, queueCacheKey(name), snap.toHash())
-		pipe.PExpire(ctx, queueCacheKey(name), ttl)
+		cmds = append(cmds,
+			hashArgs(queueCacheKey(name), snap.toHash()),
+			leasefence.Cmd{"PEXPIRE", queueCacheKey(name), ttlMs})
 		names = append(names, name)
-		cmds += 2
 	}
 	if len(names) > 0 {
-		pipe.SAdd(ctx, queueIndexKey, names...)
-		cmds++
+		add := append(leasefence.Cmd{"SADD", queueIndexKey}, names...)
+		cmds = append(cmds, add)
 	}
 	for _, name := range removed {
-		pipe.SRem(ctx, queueIndexKey, name)
-		pipe.Del(ctx, queueCacheKey(name))
-		cmds += 2
+		cmds = append(cmds,
+			leasefence.Cmd{"SREM", queueIndexKey, name},
+			leasefence.Cmd{"DEL", queueCacheKey(name)})
 	}
-	pipe.HSet(ctx, fleetCacheKey, fleet.toHash())
-	pipe.PExpire(ctx, fleetCacheKey, ttl)
-	cmds += 2
+	cmds = append(cmds,
+		hashArgs(fleetCacheKey, fleet.toHash()),
+		leasefence.Cmd{"PEXPIRE", fleetCacheKey, ttlMs})
 	if len(attentionJSON) > 0 {
-		pipe.Set(ctx, attentionCacheKey, attentionJSON, ttl)
-		cmds++
+		cmds = append(cmds, leasefence.Cmd{"SET", attentionCacheKey, string(attentionJSON), "PX", ttlMs})
 	}
-	_, err := pipe.Exec(ctx)
-	return cmds, err
+	ok, err := fence.Exec(ctx, token, cmds)
+	return len(cmds), ok, err
 }
 
 // readCache loads the fleet snapshot and all queue snapshots from the shared

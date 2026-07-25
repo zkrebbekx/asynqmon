@@ -294,18 +294,18 @@ func TestSamplerDeltaLifecycle(t *testing.T) {
 		}
 
 		Convey("Then the FIRST observation yields no delta — no-sample, never zero", func() {
-			d := s.computeDeltas(day1, snaps(100, 10))
+			d := s.computeDeltas(day1, snaps(100, 10), map[string]bool{"q1": true})
 			So(d, ShouldBeEmpty)
 
 			Convey("And the second observation yields the movement", func() {
-				d := s.computeDeltas(day1.Add(5*time.Second), snaps(130, 12))
+				d := s.computeDeltas(day1.Add(5*time.Second), snaps(130, 12), map[string]bool{"q1": true})
 				So(d["q1"].ok, ShouldBeTrue)
 				So(d["q1"].processed, ShouldEqual, 30)
 				So(d["q1"].failed, ShouldEqual, 2)
 
 				Convey("And a sweep across UTC midnight uses the fresh counter verbatim", func() {
 					day2 := time.Date(2026, 7, 25, 0, 0, 5, 0, time.UTC)
-					d := s.computeDeltas(day2, snaps(7, 3))
+					d := s.computeDeltas(day2, snaps(7, 3), map[string]bool{"q1": true})
 					So(d["q1"].ok, ShouldBeTrue)
 					So(d["q1"].processed, ShouldEqual, 7)
 					So(d["q1"].failed, ShouldEqual, 3)
@@ -314,8 +314,8 @@ func TestSamplerDeltaLifecycle(t *testing.T) {
 		})
 
 		Convey("Then a deleted queue's previous counters are pruned (no ghost deltas)", func() {
-			s.computeDeltas(day1, snaps(100, 10))
-			s.computeDeltas(day1.Add(5*time.Second), map[string]*QueueSnapshot{})
+			s.computeDeltas(day1, snaps(100, 10), map[string]bool{"q1": true})
+			s.computeDeltas(day1.Add(5*time.Second), map[string]*QueueSnapshot{}, map[string]bool{})
 			So(s.prev, ShouldBeEmpty)
 		})
 	})
@@ -328,8 +328,8 @@ func TestSamplerAccumulator(t *testing.T) {
 		key := seriesKey(hotRing, "fleet", MetricPending)
 
 		Convey("When a gauge is fed twice within one period", func() {
-			s.feed(hotRing, key, metricGauge, 100, 5, &flushes)
-			s.feed(hotRing, key, metricGauge, 100, 9, &flushes)
+			s.feed(hotRing, key, "", metricGauge, 100, 5, &flushes)
+			s.feed(hotRing, key, "", metricGauge, 100, 9, &flushes)
 			Convey("Then nothing flushes and the accumulator holds the LAST value", func() {
 				So(flushes, ShouldBeEmpty)
 				So(s.acc[key].value, ShouldEqual, 9)
@@ -338,8 +338,8 @@ func TestSamplerAccumulator(t *testing.T) {
 
 		Convey("When a delta is fed twice within one period", func() {
 			key := seriesKey(hotRing, "fleet", MetricFailedDelta)
-			s.feed(hotRing, key, metricDelta, 100, 5, &flushes)
-			s.feed(hotRing, key, metricDelta, 100, 9, &flushes)
+			s.feed(hotRing, key, "", metricDelta, 100, 5, &flushes)
+			s.feed(hotRing, key, "", metricDelta, 100, 9, &flushes)
 			Convey("Then the accumulator holds the SUM", func() {
 				So(flushes, ShouldBeEmpty)
 				So(s.acc[key].value, ShouldEqual, 14)
@@ -347,8 +347,8 @@ func TestSamplerAccumulator(t *testing.T) {
 		})
 
 		Convey("When the sweep clock crosses into a later period", func() {
-			s.feed(hotRing, key, metricGauge, 100, 5, &flushes)
-			s.feed(hotRing, key, metricGauge, 102, 7, &flushes)
+			s.feed(hotRing, key, "", metricGauge, 100, 5, &flushes)
+			s.feed(hotRing, key, "", metricGauge, 102, 7, &flushes)
 			Convey("Then the completed slot flushes with its final value", func() {
 				So(flushes, ShouldHaveLength, 1)
 				So(flushes[0].period, ShouldEqual, 100)
@@ -359,8 +359,8 @@ func TestSamplerAccumulator(t *testing.T) {
 		})
 
 		Convey("When the clock regresses (skew)", func() {
-			s.feed(hotRing, key, metricGauge, 100, 5, &flushes)
-			s.feed(hotRing, key, metricGauge, 99, 3, &flushes)
+			s.feed(hotRing, key, "", metricGauge, 100, 5, &flushes)
+			s.feed(hotRing, key, "", metricGauge, 99, 3, &flushes)
 			Convey("Then the regressed sample is dropped, not merged into the wrong slot", func() {
 				So(flushes, ShouldBeEmpty)
 				So(s.acc[key].period, ShouldEqual, 100)

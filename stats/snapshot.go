@@ -131,6 +131,17 @@ type FleetSnapshot struct {
 	RedisMemoryUsed int64
 	RedisMemoryMax  int64
 
+	// Phase-12 governor metadata (§5.1 tiers, §3.12 health readout),
+	// persisted in the cache so standby replicas serve the identical
+	// coverage stamp: the tier the producing sweep ran in (1|2|3 by fleet
+	// size), the configured command budget (cmds/sec), the hot-set size the
+	// tick refreshed, and the estimated seconds for a full cold rotation
+	// (0 = every queue refreshed every tick).
+	Tier               int
+	CommandBudget      int
+	HotSetSize         int
+	FullRotationEstSec int
+
 	RefreshedAt time.Time
 }
 
@@ -249,6 +260,10 @@ func (f *FleetSnapshot) toHash() map[string]interface{} {
 		"workers_busy":         f.WorkersBusy,
 		"redis_memory_used":    f.RedisMemoryUsed,
 		"redis_memory_max":     f.RedisMemoryMax,
+		"tier":                 f.Tier,
+		"command_budget":       f.CommandBudget,
+		"hot_set_size":         f.HotSetSize,
+		"full_rotation_est_s":  f.FullRotationEstSec,
 		"refreshed_at":         encodeTime(f.RefreshedAt),
 	}
 }
@@ -274,6 +289,10 @@ func fleetSnapshotFromHash(h map[string]string) *FleetSnapshot {
 		WorkersBusy:        int(decodeInt(h["workers_busy"])),
 		RedisMemoryUsed:    decodeInt(h["redis_memory_used"]),
 		RedisMemoryMax:     decodeInt(h["redis_memory_max"]),
+		Tier:               int(decodeInt(h["tier"])),
+		CommandBudget:      int(decodeInt(h["command_budget"])),
+		HotSetSize:         int(decodeInt(h["hot_set_size"])),
+		FullRotationEstSec: int(decodeInt(h["full_rotation_est_s"])),
 		RefreshedAt:        decodeTime(h["refreshed_at"]),
 	}
 }

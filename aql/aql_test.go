@@ -549,11 +549,13 @@ func TestCompileMatcherSeam(t *testing.T) {
 			q, err := Parse("state=active orphaned")
 			So(err, ShouldBeNil)
 
-			Convey("Then CompileMatcher refuses with a structured, positioned error", func() {
+			Convey("Then CompileMatcher (the env-FREE path) refuses with a structured, positioned error", func() {
+				// Env-capable callers use EnvBuilder sessions instead (phase
+				// 12); the env-free matcher stays honest by refusing.
 				_, cerr := CompileMatcher(q, "active", now)
 				So(cerr, ShouldNotBeNil)
 				So(cerr.Msg, ShouldContainSubstring, "`orphaned`")
-				So(cerr.Hint, ShouldContainSubstring, "phase 12")
+				So(cerr.Hint, ShouldContainSubstring, "env-free")
 			})
 		})
 	})

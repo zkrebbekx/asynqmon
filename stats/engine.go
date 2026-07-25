@@ -18,6 +18,8 @@ import (
 
 	"github.com/hibiken/asynq"
 	"github.com/redis/go-redis/v9"
+
+	"github.com/hibiken/asynqmon/internal/leasefence"
 )
 
 // ****************************************************************************
@@ -144,11 +146,36 @@ type Config struct {
 	// anomaly-flag. Default 500.
 	DepthAnomalyMin int64
 
-	// SeriesQueueCeiling is the §5.8 tier guard: per-queue time series are
-	// sampled only while the fleet has at most this many queues (fleet and
-	// per-server series are always sampled). Default 2000. Hot-set tiering
-	// beyond the ceiling is phase 12.
+	// CommandBudget caps the sweep's Redis command spend, in commands per
+	// second (§5.1 phase-12 governor). It governs tiers 2-3: above the tier-1
+	// fleet size the sweep rotates shards so each tick spends at most
+	// CommandBudget × Interval commands, with the hot set refreshed every
+	// tick regardless. Tier-1 fleets (≤2,000 queues) always get the full
+	// sweep the §5.1 table mandates — the budget does not shrink tier 1.
+	// Default 2000.
+	CommandBudget int
+
+	// HotSetK caps the top-K (by last-known backlog/error-rate) component of
+	// the §5.1 hot set. 0 = tier default: 500 in tier 2, 1,000 in tier 3.
+	// Attention-flagged and currently-viewed queues join the hot set on top
+	// of K.
+	HotSetK int
+
+	// SeriesQueueCeiling is the §5.8 HARD safety ceiling on per-queue time
+	// series: above this fleet size only hot-set queues (plus fleet and
+	// per-server series, which are always sampled) get series. Since phase
+	// 12 the old 2,000-queue cliff is gone — per-queue sampling follows the
+	// sweep's own tiering (hot set at full resolution every tick, cold
+	// queues rollup-only on their rotation visit) — so the ceiling is now a
+	// far-higher backstop. Default 50000.
 	SeriesQueueCeiling int
+
+	// tier1Ceiling / tier2Ceiling override the §5.1 tier boundaries
+	// (Tier1MaxQueues / Tier2MaxQueues). In-package test knobs only: the
+	// rotation integration tests drive a 100-queue fleet into tiers 2-3
+	// without seeding 2,001 queues.
+	tier1Ceiling int
+	tier2Ceiling int
 
 	// Now supplies the sweep clock. Default time.Now. Injected by tests so
 	// ring-buffer slot math is deterministic (no wall-clock flakes).
@@ -189,6 +216,18 @@ type Engine struct {
 	// only touched from the sweep goroutine (like attn).
 	series *seriesSampler
 	base   *baselineRefresher
+
+	// fence is the shared lease+fencing-token helper (§5.13, phase 12); token
+	// is the fencing token minted at acquisition (atomic; 0 while not
+	// holding). Cache publishes CAS on it so a superseded ex-holder can never
+	// overwrite a newer holder's snapshots.
+	fence *leasefence.Fence
+	token int64 // atomic
+
+	// rotationCursor is the tiers-2-3 cold-rotation position (§5.1). Sweep
+	// goroutine only; holder-local (a lease handover restarts the rotation —
+	// coverage stamps stay honest because they derive from RefreshedAt).
+	rotationCursor int
 
 	holding int32 // atomic; 1 while this replica holds the sweeper lease
 
@@ -264,6 +303,9 @@ func NewEngine(cfg Config) *Engine {
 	if cfg.SeriesQueueCeiling <= 0 {
 		cfg.SeriesQueueCeiling = defaultSeriesQueueCeiling
 	}
+	if cfg.CommandBudget <= 0 {
+		cfg.CommandBudget = DefaultCommandBudget
+	}
 	if cfg.Now == nil {
 		cfg.Now = time.Now
 	}
@@ -292,7 +334,28 @@ func NewEngine(cfg Config) *Engine {
 		}),
 		series: newSeriesSampler(cfg.RedisClient, cfg.SeriesQueueCeiling),
 		base:   newBaselineRefresher(cfg.RedisClient),
+		fence:  newSweeperFence(cfg.RedisClient),
 		subs:   make(map[chan struct{}]struct{}),
+	}
+}
+
+// tierFor classifies the fleet size into its §5.1 tier, honoring the
+// in-package test overrides.
+func (e *Engine) tierFor(n int) int {
+	t1, t2 := e.cfg.tier1Ceiling, e.cfg.tier2Ceiling
+	if t1 <= 0 {
+		t1 = Tier1MaxQueues
+	}
+	if t2 <= 0 {
+		t2 = Tier2MaxQueues
+	}
+	switch {
+	case n <= t1:
+		return 1
+	case n <= t2:
+		return 2
+	default:
+		return 3
 	}
 }
 
@@ -347,11 +410,12 @@ func (e *Engine) Stop() {
 	if atomic.LoadInt32(&e.holding) == 1 {
 		ctx, cancelRelease := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancelRelease()
-		if err := releaseLease(ctx, e.rc, e.cfg.InstanceID); err != nil {
+		if err := releaseLease(ctx, e.fence, e.cfg.InstanceID); err != nil {
 			// The TTL is the backstop; a failed release only delays takeover.
 			e.logf("asynqmon: stats: releasing sweeper lease: %v", err)
 		}
 		atomic.StoreInt32(&e.holding, 0)
+		atomic.StoreInt64(&e.token, 0)
 	}
 }
 
@@ -368,6 +432,13 @@ func (e *Engine) LastSweep() SweepStats { return e.mem.sweepStats() }
 // Interval returns the configured sweep interval — the cadence standby
 // replicas (and the SSE broker) use to poll the shared cache.
 func (e *Engine) Interval() time.Duration { return e.cfg.Interval }
+
+// CommandBudget returns the configured §5.1 command budget (cmds/sec).
+func (e *Engine) CommandBudget() int { return e.cfg.CommandBudget }
+
+// SeriesQueueCeilingValue returns the §5.8 hard per-queue-series ceiling —
+// the Settings › Health readout labels the sampler mode with it.
+func (e *Engine) SeriesQueueCeilingValue() int { return e.cfg.SeriesQueueCeiling }
 
 // SubscribeSweeps registers a listener signaled after every completed local
 // sweep (lease holder only; standbys never sweep and therefore tick on
@@ -419,7 +490,7 @@ func (e *Engine) leaseLoop(ctx context.Context) {
 
 func (e *Engine) leaseTick(ctx context.Context) {
 	if atomic.LoadInt32(&e.holding) == 1 {
-		ok, err := renewLease(ctx, e.rc, e.cfg.InstanceID, e.cfg.LeaseTTL)
+		ok, err := renewLease(ctx, e.fence, e.cfg.InstanceID, e.cfg.LeaseTTL)
 		if err != nil || !ok {
 			if err != nil && ctx.Err() == nil {
 				e.logf("asynqmon: stats: renewing sweeper lease: %v", err)
@@ -427,17 +498,19 @@ func (e *Engine) leaseTick(ctx context.Context) {
 				e.logf("asynqmon: stats: sweeper lease lost; standing by")
 			}
 			atomic.StoreInt32(&e.holding, 0)
+			atomic.StoreInt64(&e.token, 0)
 		}
 		return
 	}
-	ok, err := tryAcquireLease(ctx, e.rc, e.cfg.InstanceID, e.cfg.LeaseTTL)
+	token, err := tryAcquireLease(ctx, e.fence, e.cfg.InstanceID, e.cfg.LeaseTTL)
 	if err != nil {
 		if ctx.Err() == nil {
 			e.logf("asynqmon: stats: acquiring sweeper lease: %v", err)
 		}
 		return
 	}
-	if ok {
+	if token > 0 {
+		atomic.StoreInt64(&e.token, token)
 		atomic.StoreInt32(&e.holding, 1)
 		e.logf("asynqmon: stats: acquired sweeper lease as %s", e.cfg.InstanceID)
 		// Sweep immediately on takeover instead of waiting out an interval,
@@ -478,11 +551,64 @@ func (e *Engine) sweepLoop(ctx context.Context) {
 // and every row is stamped with its own RefreshedAt).
 func (e *Engine) SweepNow(ctx context.Context) error { return e.sweep(ctx) }
 
-// sweep performs one full tier-1 pass: enumerate queues, pipeline the §5.1
-// hot read per queue, join server data, publish to memory + Redis cache.
+// ErrSuperseded is returned by a sweep whose fenced cache publish was
+// rejected: a newer claimant minted a higher fencing token, so this replica
+// stood down (§5.13).
+var ErrSuperseded = errors.New("stats: fencing token superseded; another replica now holds the sweeper role")
+
+// prevSnapshots returns the last-known snapshot per queue for tiered
+// planning and stale-row carry-forward: the in-process copy when this holder
+// has swept before, else a one-time load from the shared cache (a fresh
+// holder after failover must not forget the fleet and re-rotate from zero
+// knowledge). Returns the map and the number of Redis commands spent.
+func (e *Engine) prevSnapshots(ctx context.Context) (map[string]*QueueSnapshot, int) {
+	if _, queues := e.mem.get(); queues != nil {
+		out := make(map[string]*QueueSnapshot, len(queues))
+		for _, s := range queues {
+			out[s.Queue] = s
+		}
+		return out, 0
+	}
+	_, queues, err := readCache(ctx, e.rc, e.cfg.BatchSize)
+	if err != nil {
+		// No cache (first boot ever) — every queue is unseen; the rotation's
+		// unseen-first rule fills the fleet in over the first full rotation.
+		return map[string]*QueueSnapshot{}, 2
+	}
+	out := make(map[string]*QueueSnapshot, len(queues))
+	for _, s := range queues {
+		out[s.Queue] = s
+	}
+	return out, 2 + len(queues)
+}
+
+// lastAttentionQueues returns the queue names flagged by the most recent
+// attention report (hot-set input; holder-local).
+func (e *Engine) lastAttentionQueues() []string {
+	_, rep := e.mem.getAttention()
+	if rep == nil {
+		return nil
+	}
+	seen := make(map[string]bool, len(rep.Findings))
+	var out []string
+	for _, f := range rep.Findings {
+		if f.Queue != "" && !seen[f.Queue] {
+			seen[f.Queue] = true
+			out = append(out, f.Queue)
+		}
+	}
+	return out
+}
+
+// sweep performs one pass: enumerate queues, plan the tick under the command
+// budget (tier 1 = full sweep; tiers 2-3 = hot set + rotating cold shard,
+// §5.1), pipeline the hot read per refreshed queue, carry stale rows forward
+// with their honest RefreshedAt stamps, join server data, and publish to
+// memory + Redis cache (fence-guarded on the leased path).
 func (e *Engine) sweep(ctx context.Context) error {
 	begin := time.Now()
 	reads := 0
+	token := atomic.LoadInt64(&e.token)
 
 	qnames, err := e.rc.SMembers(ctx, allQueuesKey).Result()
 	reads++
@@ -498,6 +624,33 @@ func (e *Engine) sweep(ctx context.Context) error {
 	reads++
 	if err != nil {
 		return fmt.Errorf("reading cache index: %w", err)
+	}
+
+	// Phase-12 governor: plan this tick. Tier 1 keeps the pre-phase-12 full
+	// sweep byte-for-byte (no viewed read, no prev load — zero added cost).
+	tier := e.tierFor(len(qnames))
+	prev := map[string]*QueueSnapshot{}
+	var plan *sweepPlan
+	if tier > 1 {
+		var n int
+		prev, n = e.prevSnapshots(ctx)
+		reads += n
+		viewed, vn, verr := readViewed(ctx, e.rc, e.now())
+		reads += vn
+		if verr != nil {
+			// Best-effort input: a viewed-read failure costs hot-set accuracy,
+			// never the sweep.
+			viewed = nil
+		}
+		plan = planSweep(tier, qnames, prev, e.lastAttentionQueues(), viewed,
+			e.rotationCursor, e.cfg.CommandBudget, e.cfg.Interval, e.cfg.HotSetK)
+		e.rotationCursor = plan.cursor
+	} else {
+		plan = &sweepPlan{tier: 1, full: true}
+	}
+	refresh := qnames
+	if !plan.full {
+		refresh = plan.refreshList()
 	}
 
 	// One Servers() call per sweep: O(servers), the only non-queue-key data
@@ -519,16 +672,32 @@ func (e *Engine) sweep(ctx context.Context) error {
 	}
 
 	now := e.now()
-	snaps := make(map[string]*QueueSnapshot, len(qnames))
-	for i := 0; i < len(qnames); i += e.cfg.BatchSize {
+	snaps := make(map[string]*QueueSnapshot, len(refresh))
+	for i := 0; i < len(refresh); i += e.cfg.BatchSize {
 		end := i + e.cfg.BatchSize
-		if end > len(qnames) {
-			end = len(qnames)
+		if end > len(refresh) {
+			end = len(refresh)
 		}
-		n, err := e.sweepBatch(ctx, qnames[i:end], now, consumers, snaps)
+		n, err := e.sweepBatch(ctx, refresh[i:end], now, consumers, snaps)
 		reads += n
 		if err != nil {
 			return fmt.Errorf("sweeping queues: %w", err)
+		}
+	}
+
+	// Merged view: refreshed rows plus carried-forward stale rows (their old
+	// RefreshedAt is the staleness truth the directory dots and coverage
+	// stamps render). A queue never observed and not refreshed this tick is
+	// absent until its (unseen-prioritized) rotation turn.
+	merged := snaps
+	if !plan.full {
+		merged = make(map[string]*QueueSnapshot, len(qnames))
+		for _, q := range qnames {
+			if s, ok := snaps[q]; ok {
+				merged[q] = s
+			} else if p, ok := prev[q]; ok {
+				merged[q] = p
+			}
 		}
 	}
 
@@ -559,14 +728,34 @@ func (e *Engine) sweep(ctx context.Context) error {
 		return fmt.Errorf("sweeping scheduler entries: %w", err)
 	}
 
-	fleet := aggregateFleet(snaps, len(servers), workersTotal, workersBusy, now)
+	fleet := aggregateFleet(merged, len(servers), workersTotal, workersBusy, now)
 	fleet.RedisMemoryUsed = memUsed
 	fleet.RedisMemoryMax = memMax
+	// Governor metadata for the §3.1/§3.12 coverage stamps — persisted in the
+	// fleet hash so standby replicas serve the identical readout.
+	fleet.Tier = plan.tier
+	fleet.CommandBudget = e.cfg.CommandBudget
+	fleet.HotSetSize = plan.hotSetSize
+	fleet.FullRotationEstSec = plan.fullRotationEstSec
 
-	// §5.8 ring-buffer sampling (phase 10): accumulate this sweep's samples
-	// and flush any completed 30s/1h slots. Runs before the baseline
-	// refresher so the learning anchor (asynqmon:series:since) exists.
-	seriesReads, seriesWrites, err := e.series.sample(ctx, now, snaps, fleet, servers)
+	// §5.8 ring-buffer sampling (phase 10; phase-12 tiering): only refreshed
+	// queues feed per-queue series — hot queues at full resolution (both
+	// rings), cold queues rollup-only on their rotation visit. Fleet and
+	// per-server series sample every tick. Runs before the baseline refresher
+	// so the learning anchor (asynqmon:series:since) exists.
+	universe := make(map[string]bool, len(qnames))
+	for _, q := range qnames {
+		universe[q] = true
+	}
+	hotLookup := make(map[string]bool, len(plan.hot))
+	for _, q := range plan.hot {
+		hotLookup[q] = true
+	}
+	seriesReads, seriesWrites, err := e.series.sample(ctx, now, snaps, universe, seriesTick{
+		tier:      plan.tier,
+		fleetSize: len(qnames),
+		hot:       hotLookup,
+	}, fleet, servers)
 	reads += seriesReads
 	if err != nil {
 		return fmt.Errorf("sampling time series: %w", err)
@@ -575,16 +764,17 @@ func (e *Engine) sweep(ctx context.Context) error {
 	// Phase-10 detector baselines (baseline.go): cadenced reads — 7-day
 	// fail counters daily, rollup depth rings hourly, consumer-window seed
 	// once per holder. Steady-state per-sweep cost is zero reads.
-	baseReads, err := e.base.refresh(ctx, now, snaps)
+	baseReads, err := e.base.refresh(ctx, now, merged)
 	reads += baseReads
 	if err != nil {
 		return fmt.Errorf("refreshing detector baselines: %w", err)
 	}
 
-	// Attention findings: pure evaluation over this sweep's snapshots plus
-	// the evaluator's holder-local debounce state (§5.2) and the phase-10
+	// Attention findings: pure evaluation over the merged snapshots (stale
+	// rows evaluate on their last-known, honestly-stamped values) plus the
+	// evaluator's holder-local debounce state (§5.2) and the phase-10
 	// baseline inputs.
-	report := e.attn.evaluate(snaps, groupObs, schedGone, e.base.inputs(now, snaps), now)
+	report := e.attn.evaluate(merged, groupObs, schedGone, e.base.inputs(now, merged), now)
 	attentionJSON, err := json.Marshal(report)
 	if err != nil {
 		// Cannot happen for these types; guard so a future field never
@@ -592,22 +782,38 @@ func (e *Engine) sweep(ctx context.Context) error {
 		return fmt.Errorf("encoding attention report: %w", err)
 	}
 
+	// Removal = gone from asynq:queues (the universe), NEVER "not refreshed
+	// this tick" — in tiered mode most queues are not refreshed on any given
+	// tick and must keep their cache rows.
 	var removed []string
 	for _, name := range prevIndex {
-		if _, ok := snaps[name]; !ok {
+		if !universe[name] {
 			removed = append(removed, name)
 		}
 	}
 
-	writes, werr := writeCache(ctx, e.rc, fleet, snaps, removed, attentionJSON, e.cfg.CacheTTL)
+	// Cache rows written this tick: refreshed rows only in tiered mode (the
+	// write side of the budget), everything in full mode. Cold rows must
+	// outlive their rotation, so the queue-hash TTL stretches to cover it.
+	effTTL := e.cfg.CacheTTL
+	if plan.fullRotationEstSec > 0 {
+		if min := time.Duration(3*plan.fullRotationEstSec) * time.Second; effTTL < min {
+			effTTL = min
+		}
+	}
+	writes, fenceOK, werr := writeCache(ctx, e.fence, token, fleet, snaps, removed, attentionJSON, effTTL)
 	// Publish to memory even if the cache write failed: local data is good,
 	// and this replica keeps serving it while Redis recovers.
-	e.mem.replace(fleet, snaps, report, SweepStats{
-		At:        now,
-		Queues:    len(qnames),
-		ReadCmds:  reads,
-		WriteCmds: writes + schedWrites + seriesWrites,
-		Duration:  time.Since(begin),
+	e.mem.replace(fleet, merged, report, SweepStats{
+		At:                 now,
+		Queues:             len(qnames),
+		Refreshed:          len(refresh),
+		ReadCmds:           reads,
+		WriteCmds:          writes + schedWrites + seriesWrites,
+		Duration:           time.Since(begin),
+		Tier:               plan.tier,
+		HotSetSize:         plan.hotSetSize,
+		FullRotationEstSec: plan.fullRotationEstSec,
 	})
 	// Wake SSE listeners after the local publish so what they read is at
 	// least as fresh as the signal (cache-write failures still notify: the
@@ -615,6 +821,14 @@ func (e *Engine) sweep(ctx context.Context) error {
 	e.notifySweeps()
 	if werr != nil {
 		return fmt.Errorf("writing cache: %w", werr)
+	}
+	if !fenceOK {
+		// A newer claimant holds the role: stand down immediately instead of
+		// waiting for the lease loop to notice (§5.13).
+		atomic.StoreInt32(&e.holding, 0)
+		atomic.StoreInt64(&e.token, 0)
+		e.logf("asynqmon: stats: %v", ErrSuperseded)
+		return ErrSuperseded
 	}
 	return nil
 }

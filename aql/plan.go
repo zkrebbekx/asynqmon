@@ -432,11 +432,13 @@ func metaScalarString(v interface{}) string {
 // jobs.Matcher seam
 // ----------------------------------------------------------------------------
 
-// CompileMatcher compiles the query into an env-free predicate for the bulk
-// job runner's per-task re-verification (§4.3 step 5). Predicates that need
-// live env data (running>, deadline_pct>, orphaned, pending_age>,
-// group_age>) return a structured error: the runner re-fetches TaskInfo
-// only, and pretending to evaluate them would silently act on wrong tasks.
+// CompileMatcher compiles the query into an env-free predicate. Predicates
+// that need live env data (running>, deadline_pct>, orphaned, pending_age>,
+// group_age>) return a structured error — pretending to evaluate them
+// without env would silently mismatch. Callers that CAN supply live data
+// (the bulk-job runner since phase 12) compile the plan and drive an
+// EnvBuilder Session instead (env.go); this function remains the honest
+// fallback for env-less contexts.
 // Relative durations anchor to now — the moment the matcher is built.
 func CompileMatcher(q *Query, state string, now time.Time) (func(*asynq.TaskInfo) bool, *ParseError) {
 	plan, err := Compile(q, state, now)
@@ -453,10 +455,10 @@ func CompileMatcher(q *Query, state string, now time.Time) (func(*asynq.TaskInfo
 			}
 		}
 		return nil, &ParseError{
-			Msg: fmt.Sprintf("`%s` reads live worker/lease data and cannot be re-verified by the job runner", offender),
+			Msg: fmt.Sprintf("`%s` reads live worker/lease data and cannot be evaluated without a live env", offender),
 			Pos: pos,
-			Hint: "job scopes support the message-backed fields (queue, type, id, payload~, meta.*, retries, error~, " +
-				"next_run, past_due, failed_after/before, died>, expires<, group=); scan-tier support arrives in phase 12",
+			Hint: "this execution path is env-free; supported here are the message-backed fields (queue, type, id, " +
+				"payload~, meta.*, retries, error~, next_run, past_due, failed_after/before, died>, expires<, group=)",
 		}
 	}
 	env := &Env{Now: now}

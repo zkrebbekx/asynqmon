@@ -23,6 +23,8 @@ import (
 	"time"
 
 	"github.com/redis/go-redis/v9"
+
+	"github.com/hibiken/asynqmon/internal/leasefence"
 )
 
 // Report kinds (URL slugs — frozen frontend contract, ui/src/api-hygiene.ts).
@@ -145,9 +147,8 @@ const (
 	// scheduler's cheap due-check without decoding full report bodies.
 	lastGenKey = "asynqmon:hygiene:lastgen"
 
-	// lockKey is the singleton lease guarding the hygiene scheduler role
-	// (§5.13; same SET NX PX + CAS-renew pattern as the stats sweeper).
-	lockKey = "asynqmon:lock:hygiene"
+	// The singleton lease guarding the hygiene scheduler role lives in
+	// lease.go (lockKey, derived from the leasefence role since phase 12).
 
 	// reportTTL bounds persisted reports: refreshed on every write, so
 	// reports die with a long-dead scheduler instead of serving forever-stale
@@ -219,18 +220,21 @@ func ReadReport(ctx context.Context, rc redis.UniversalClient, kind string) (*Re
 }
 
 // persistReport writes the report body, stamps the last-generation clock and
-// refreshes the store TTL.
-func persistReport(ctx context.Context, rc redis.UniversalClient, rep *Report) error {
+// refreshes the store TTL. Fence-guarded (§5.13, phase 12): scheduled runs
+// pass the holder's fencing token so a superseded ex-scheduler cannot
+// overwrite a newer holder's report (ok=false reports rejection); Run-now
+// passes token 0 — explicitly unfenced, any replica may generate on demand.
+func persistReport(ctx context.Context, fence *leasefence.Fence, token int64, rep *Report) (bool, error) {
 	raw, err := json.Marshal(rep)
 	if err != nil {
-		return err
+		return false, err
 	}
-	pipe := rc.Pipeline()
-	pipe.Set(ctx, reportKey(rep.Kind), raw, reportTTL)
-	pipe.HSet(ctx, lastGenKey, rep.Kind, strconv.FormatInt(rep.GeneratedAt.Unix(), 10))
-	pipe.PExpire(ctx, lastGenKey, reportTTL)
-	_, err = pipe.Exec(ctx)
-	return err
+	ttlMs := reportTTL.Milliseconds()
+	return fence.Exec(ctx, token, []leasefence.Cmd{
+		{"SET", reportKey(rep.Kind), string(raw), "PX", ttlMs},
+		{"HSET", lastGenKey, rep.Kind, strconv.FormatInt(rep.GeneratedAt.Unix(), 10)},
+		{"PEXPIRE", lastGenKey, ttlMs},
+	})
 }
 
 // readLastGenerated returns each kind's last generation time (absent kinds

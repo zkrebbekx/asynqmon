@@ -17,6 +17,8 @@ import (
 
 	"github.com/hibiken/asynq"
 	"github.com/redis/go-redis/v9"
+
+	"github.com/hibiken/asynqmon/aql"
 )
 
 // ****************************************************************************
@@ -97,6 +99,12 @@ type Runner struct {
 	insp  *asynq.Inspector
 	logf  func(format string, args ...interface{})
 
+	// envB builds per-job env sessions (phase 12): env-dependent AQL scopes
+	// (pending_age>, running>, deadline_pct>, orphaned, group_age>) read
+	// Servers()/orphan sets once per batch window and pipeline
+	// pending_since/group scores per batch.
+	envB *aql.EnvBuilder
+
 	working sync.Map // job id -> struct{} (jobs this replica is working)
 	slots   chan struct{}
 
@@ -144,6 +152,7 @@ func NewRunner(cfg Config) *Runner {
 		store: NewStore(cfg.RedisClient),
 		insp:  cfg.Inspector,
 		logf:  logf,
+		envB:  &aql.EnvBuilder{RC: cfg.RedisClient, Inspector: cfg.Inspector},
 		slots: make(chan struct{}, cfg.Concurrency),
 	}
 }
@@ -454,10 +463,10 @@ func (r *Runner) finalize(ctx context.Context, j *Job, token int64, state State,
 // persisted per batch, so a restarted replica claims and continues instead
 // of rescanning (§5.4). Returns true when enumeration ran to completion.
 func (r *Runner) enumerate(ctx context.Context, j *Job, token int64, cs *claimSession) bool {
-	// Compile the scope predicate once (legacy fields + AQL via the Matcher
-	// seam); a scope that no longer compiles is a failed job, never a
-	// silently-unfiltered one.
-	matcher, perr := j.Scope.Compile()
+	// Compile the scope predicate once (legacy fields + AQL, env fields
+	// included via the phase-12 env-builder session); a scope that no longer
+	// compiles is a failed job, never a silently-unfiltered one.
+	matcher, perr := j.Scope.CompileEnv(r.envB)
 	if perr != nil {
 		r.finalize(ctx, j, token, StateFailed, "compiling scope: "+perr.Msg)
 		return false
@@ -555,6 +564,15 @@ func (r *Runner) enumerate(ctx context.Context, j *Job, token int64, cs *claimSe
 					return false
 				}
 
+				if err := matcher.PrepareBatch(ctx, batch); err != nil {
+					// Env prep failing (Redis blip) aborts this claim; the
+					// persisted cursor makes the job resumable — never a
+					// silently-unfiltered enumeration.
+					if ctx.Err() == nil {
+						r.logf("asynqmon: jobs: %s: preparing env for %s page %d: %v", j.ID, qname, page, err)
+					}
+					return false
+				}
 				var refs []string
 				var sample []SampleRow
 				for _, ti := range batch {
@@ -719,8 +737,9 @@ func mustJSON(v interface{}) string {
 // (capped; overflow counted). Inter-batch sleep derives from the throttle.
 func (r *Runner) execute(ctx context.Context, j *Job, token int64, cs *claimSession) {
 	// Same compile-once seam as enumerate: re-verification must apply the
-	// full predicate, AQL included (§4.3 step 5).
-	matcher, perr := j.Scope.Compile()
+	// full predicate, AQL included — env fields against live data (§4.3
+	// step 5, phase 12).
+	matcher, perr := j.Scope.CompileEnv(r.envB)
 	if perr != nil {
 		r.finalize(ctx, j, token, StateFailed, "compiling scope: "+perr.Msg)
 		return
@@ -751,7 +770,11 @@ func (r *Runner) execute(ctx context.Context, j *Job, token int64, cs *claimSess
 			return
 		}
 
+		// Re-fetch the whole chunk first so batch env data (pending_since,
+		// group scores, window Servers()/orphans) is prepared once per chunk,
+		// then re-match and act per task (§4.3 step 5).
 		var failures []ItemFailure
+		fetched := make([]*asynq.TaskInfo, 0, len(refs))
 		for _, ref := range refs {
 			qname, taskID := ref[0], ref[1]
 			ti, gerr := r.insp.GetTaskInfo(qname, taskID)
@@ -765,13 +788,25 @@ func (r *Runner) execute(ctx context.Context, j *Job, token int64, cs *claimSess
 				failures = append(failures, ItemFailure{Queue: qname, ID: taskID, Error: "re-fetch: " + gerr.Error()})
 				continue
 			}
+			fetched = append(fetched, ti)
+		}
+		if err := matcher.PrepareBatch(ctx, fetched); err != nil {
+			// Env prep failing (Redis blip) aborts this claim; act_cursor was
+			// persisted at the previous batch, so the job resumes — never an
+			// unverified act.
+			if ctx.Err() == nil {
+				r.logf("asynqmon: jobs: %s: preparing env for execute batch: %v", j.ID, err)
+			}
+			return
+		}
+		for _, ti := range fetched {
 			if !matcher.Matches(ti) {
 				j.Counts.Skipped++
 				continue
 			}
-			if aerr := r.act(j.Verb, qname, taskID); aerr != nil {
+			if aerr := r.act(j.Verb, ti.Queue, ti.ID); aerr != nil {
 				j.Counts.Failed++
-				failures = append(failures, ItemFailure{Queue: qname, ID: taskID, Error: aerr.Error()})
+				failures = append(failures, ItemFailure{Queue: ti.Queue, ID: ti.ID, Error: aerr.Error()})
 			} else {
 				j.Counts.Acted++
 			}

@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -17,6 +18,7 @@ import (
 	"github.com/hibiken/asynq"
 	"github.com/redis/go-redis/v9"
 
+	"github.com/hibiken/asynqmon/internal/leasefence"
 	"github.com/hibiken/asynqmon/stats"
 )
 
@@ -93,6 +95,12 @@ type Engine struct {
 
 	holding int32 // atomic; 1 while this replica holds the scheduler lease
 
+	// fence is the shared lease+fencing-token helper (§5.13, phase 12);
+	// token is minted at acquisition (atomic; 0 while not holding). The
+	// SCHEDULED report persist CASes on it; Run-now writes unfenced.
+	fence *leasefence.Fence
+	token int64 // atomic
+
 	// runMu serializes report generation on this replica: a scheduled pass
 	// and a Run-now must not interleave their bounded read bursts.
 	runMu sync.Mutex
@@ -135,12 +143,13 @@ func NewEngine(cfg Config) *Engine {
 		hc = &http.Client{Timeout: webhookTimeout}
 	}
 	return &Engine{
-		cfg:  cfg,
-		rc:   cfg.RedisClient,
-		insp: cfg.Inspector,
-		http: hc,
-		now:  cfg.Now,
-		logf: logf,
+		cfg:   cfg,
+		rc:    cfg.RedisClient,
+		insp:  cfg.Inspector,
+		http:  hc,
+		now:   cfg.Now,
+		logf:  logf,
+		fence: newSchedulerFence(cfg.RedisClient),
 	}
 }
 
@@ -189,10 +198,11 @@ func (e *Engine) Stop() {
 	if atomic.LoadInt32(&e.holding) == 1 {
 		ctx, cancelRelease := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancelRelease()
-		if err := releaseLease(ctx, e.rc, e.cfg.InstanceID); err != nil {
+		if err := e.fence.Release(ctx, e.cfg.InstanceID); err != nil {
 			e.logf("asynqmon: hygiene: releasing scheduler lease: %v", err)
 		}
 		atomic.StoreInt32(&e.holding, 0)
+		atomic.StoreInt64(&e.token, 0)
 	}
 }
 
@@ -218,7 +228,7 @@ func (e *Engine) leaseLoop(ctx context.Context) {
 
 func (e *Engine) leaseTick(ctx context.Context) {
 	if atomic.LoadInt32(&e.holding) == 1 {
-		ok, err := renewLease(ctx, e.rc, e.cfg.InstanceID, e.cfg.LeaseTTL)
+		ok, err := e.fence.Renew(ctx, e.cfg.InstanceID, e.cfg.LeaseTTL)
 		if err != nil || !ok {
 			if err != nil && ctx.Err() == nil {
 				e.logf("asynqmon: hygiene: renewing scheduler lease: %v", err)
@@ -226,17 +236,19 @@ func (e *Engine) leaseTick(ctx context.Context) {
 				e.logf("asynqmon: hygiene: scheduler lease lost; standing by")
 			}
 			atomic.StoreInt32(&e.holding, 0)
+			atomic.StoreInt64(&e.token, 0)
 		}
 		return
 	}
-	ok, err := tryAcquireLease(ctx, e.rc, e.cfg.InstanceID, e.cfg.LeaseTTL)
+	token, err := e.fence.Acquire(ctx, e.cfg.InstanceID, e.cfg.LeaseTTL)
 	if err != nil {
 		if ctx.Err() == nil {
 			e.logf("asynqmon: hygiene: acquiring scheduler lease: %v", err)
 		}
 		return
 	}
-	if ok {
+	if token > 0 {
+		atomic.StoreInt64(&e.token, token)
 		atomic.StoreInt32(&e.holding, 1)
 		e.logf("asynqmon: hygiene: acquired scheduler lease as %s", e.cfg.InstanceID)
 	}
@@ -261,9 +273,14 @@ func (e *Engine) tickLoop(ctx context.Context) {
 	}
 }
 
+// ErrSuperseded is returned by a scheduled report persist whose fencing
+// token was rejected: a newer claimant holds the scheduler role (§5.13).
+var ErrSuperseded = errors.New("hygiene: fencing token superseded; another replica now holds the scheduler role")
+
 // SchedulePass generates every enabled report whose interval has elapsed
 // since its last generation. Exported for tests and operational tooling;
-// the tick loop calls it on the lease holder only.
+// the tick loop calls it on the lease holder only. Scheduled persists are
+// fence-guarded with the holder's token; a supersession stops the pass.
 func (e *Engine) SchedulePass(ctx context.Context) error {
 	configs, err := ReadConfigs(ctx, e.rc)
 	if err != nil {
@@ -274,6 +291,7 @@ func (e *Engine) SchedulePass(ctx context.Context) error {
 		return err
 	}
 	now := e.now()
+	token := atomic.LoadInt64(&e.token)
 	for _, kind := range Kinds() {
 		cfg := configs[kind]
 		if !cfg.Enabled {
@@ -282,7 +300,13 @@ func (e *Engine) SchedulePass(ctx context.Context) error {
 		if now.Sub(lastGen[kind]) < time.Duration(cfg.IntervalSeconds)*time.Second {
 			continue
 		}
-		if _, err := e.Run(ctx, kind); err != nil {
+		if _, err := e.run(ctx, kind, token); err != nil {
+			if errors.Is(err, ErrSuperseded) {
+				// Stand down: a newer scheduler owns the cadence now.
+				atomic.StoreInt32(&e.holding, 0)
+				atomic.StoreInt64(&e.token, 0)
+				return err
+			}
 			// One report failing (e.g. stats not ready) must not starve the
 			// others; log and continue.
 			e.logf("asynqmon: hygiene: scheduled %s report failed: %v", kind, err)
@@ -295,7 +319,13 @@ func (e *Engine) SchedulePass(ctx context.Context) error {
 // the webhook when configured. Serves both the scheduler and the Run-now
 // endpoint (any replica may run it — generation only reads asynq state and
 // writes asynqmon-owned report keys, so it is safe in read-only mode too).
+// Run-now writes are explicitly unfenced (token 0): the operator asked this
+// replica to generate, lease or not.
 func (e *Engine) Run(ctx context.Context, kind string) (*Report, error) {
+	return e.run(ctx, kind, 0)
+}
+
+func (e *Engine) run(ctx context.Context, kind string, token int64) (*Report, error) {
 	if !ValidKind(kind) {
 		return nil, fmt.Errorf("unknown hygiene report kind %q", kind)
 	}
@@ -344,8 +374,12 @@ func (e *Engine) Run(ctx context.Context, kind string) (*Report, error) {
 		}
 	}
 
-	if err := persistReport(ctx, e.rc, rep); err != nil {
+	ok, err := persistReport(ctx, e.fence, token, rep)
+	if err != nil {
 		return nil, fmt.Errorf("persisting %s report: %w", kind, err)
+	}
+	if !ok {
+		return nil, ErrSuperseded
 	}
 	e.deliverWebhook(rep)
 	return rep, nil

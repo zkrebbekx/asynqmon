@@ -180,6 +180,21 @@ type Filter struct {
 // Empty reports whether the filter has no effective clauses.
 func (f Filter) Empty() bool { return len(f.clauses) == 0 }
 
+// ExactNames returns the queue names of exact `name=` clauses — the
+// directory's "currently viewed" signal (§5.1 hot set, phase 12): a filter
+// pinning specific queues marks them viewed so the sweeping replica keeps
+// them fresh every tick. Substring matches are deliberately excluded (a broad
+// `name~e` must not flood the hot set).
+func (f Filter) ExactNames() []string {
+	var out []string
+	for _, c := range f.clauses {
+		if c.kind == kindNameEq {
+			out = append(out, c.str)
+		}
+	}
+	return out
+}
+
 // Match reports whether s satisfies every clause.
 func (f Filter) Match(s *QueueSnapshot, now time.Time) bool {
 	for _, c := range f.clauses {
