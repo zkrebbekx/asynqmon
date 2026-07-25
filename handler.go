@@ -41,11 +41,40 @@ type Options struct {
 	// This field is optional.
 	ResultFormatter ResultFormatter
 
+	// ------------------------------------------------------------------
+	// Full payload on the task DETAIL endpoint (upstream
+	// hibiken/asynqmon#301): list endpoints keep formatting through
+	// PayloadFormatter/ResultFormatter (row cells stay truncated), while
+	// GET /api/queues/{qname}/tasks/{task_id} formats through these when
+	// set — so the task drawer can show the whole payload.
+	// ------------------------------------------------------------------
+
+	// DetailPayloadFormatter formats the payload on the task detail
+	// endpoint only. Optional; falls back to PayloadFormatter when nil,
+	// which preserves the old truncate-everywhere behavior for embedders.
+	DetailPayloadFormatter PayloadFormatter
+
+	// DetailResultFormatter is DetailPayloadFormatter for task results.
+	DetailResultFormatter ResultFormatter
+
+	// DetailPayloadLimit is the character cap the detail formatters apply
+	// (0 = unlimited/unknown). Informational only — it is surfaced through
+	// GET /api/features as "payload_detail_limit" so the task drawer can
+	// render an honest "truncated at N chars" note instead of guessing.
+	DetailPayloadLimit int
+	// --------------------------- end #301 ------------------------------
+
 	// PrometheusAddress specifies the address of the Prometheus to connect to.
 	//
 	// This field is optional. If this field is set, asynqmon will query the Prometheus server
 	// to get the time series data about queue metrics and show them in the web UI.
 	PrometheusAddress string
+
+	// PrometheusBasicAuth is optional "user:password" basic-auth credentials
+	// attached to every request proxied to PrometheusAddress (upstream
+	// hibiken/asynqmon#248). Empty means no Authorization header. The value
+	// is never logged.
+	PrometheusBasicAuth string
 
 	// Set ReadOnly to true to restrict user to view-only mode.
 	ReadOnly bool
@@ -360,6 +389,21 @@ func muxRouter(opts Options, rc redis.UniversalClient, inspector *asynq.Inspecto
 		resultFmt = opts.ResultFormatter
 	}
 
+	// ── Full payload on task detail (upstream hibiken/asynqmon#301) ──
+	// The list endpoints keep the (typically truncating) formatters above;
+	// the task DETAIL endpoint gets its own pair so the drawer can show
+	// the whole payload. Falling back to the list formatters when unset
+	// keeps embedders that configure only PayloadFormatter unchanged.
+	detailPayloadFmt := payloadFmt
+	if opts.DetailPayloadFormatter != nil {
+		detailPayloadFmt = opts.DetailPayloadFormatter
+	}
+	detailResultFmt := resultFmt
+	if opts.DetailResultFormatter != nil {
+		detailResultFmt = opts.DetailResultFormatter
+	}
+	// ── end #301 detail formatters ──
+
 	api := router.PathPrefix("/api").Subrouter()
 
 	// ── Phase 12: "currently viewed" tracking (§5.1 hot set) ──
@@ -467,7 +511,9 @@ func muxRouter(opts Options, rc redis.UniversalClient, inspector *asynq.Inspecto
 	api.HandleFunc("/queues/{qname}/groups/{gname}/aggregating_tasks:archive_all", newArchiveAllAggregatingTasksHandlerFunc(inspector)).Methods("POST")
 	api.HandleFunc("/queues/{qname}/groups/{gname}/aggregating_tasks:batch_archive", newBatchArchiveTasksHandlerFunc(inspector)).Methods("POST")
 
-	api.HandleFunc("/queues/{qname}/tasks/{task_id}", newGetTaskHandlerFunc(inspector, payloadFmt, resultFmt)).Methods("GET")
+	// Task detail serves the FULL formatted payload/result via the #301
+	// detail formatters — list rows above stay truncated.
+	api.HandleFunc("/queues/{qname}/tasks/{task_id}", newGetTaskHandlerFunc(inspector, detailPayloadFmt, detailResultFmt)).Methods("GET")
 
 	// ── Observed run history (opt-in observe/ middleware) ──
 	// Serves per-attempt records + run-duration summary written by workers
@@ -539,9 +585,11 @@ func muxRouter(opts Options, rc redis.UniversalClient, inspector *asynq.Inspecto
 
 	// Time series metrics endpoints.
 	// Use a dedicated client with a timeout: a hanging Prometheus must not leak
-	// goroutines on every metrics poll.
+	// goroutines on every metrics poll. Optional basic-auth credentials for
+	// the proxied Prometheus requests (upstream hibiken/asynqmon#248) are
+	// parsed once here and never logged.
 	metricsClient := &http.Client{Timeout: 10 * time.Second}
-	api.HandleFunc("/metrics", newGetMetricsHandlerFunc(metricsClient, opts.PrometheusAddress)).Methods("GET")
+	api.HandleFunc("/metrics", newGetMetricsHandlerFunc(metricsClient, opts.PrometheusAddress, parsePrometheusBasicAuth(opts.PrometheusBasicAuth))).Methods("GET")
 
 	// ------------------------------------------------------------------
 	// Fleet Console phase 5 — bulk jobs + audit + identity (§3.9, §4.3,
@@ -652,7 +700,7 @@ func muxRouter(opts Options, rc redis.UniversalClient, inspector *asynq.Inspecto
 	// ------------------------------------------------------------------
 	enqueueEnabled := opts.EnableEnqueue && !opts.ReadOnly
 	api.HandleFunc("/features",
-		newFeaturesHandlerFunc(enqueueEnabled, normalizeCorrelationKeys(opts.CorrelationKeys))).Methods("GET")
+		newFeaturesHandlerFunc(enqueueEnabled, normalizeCorrelationKeys(opts.CorrelationKeys), opts.DetailPayloadLimit)).Methods("GET")
 	if enqueueEnabled {
 		ec := opts.enqueueClient
 		if ec == nil {
@@ -661,6 +709,14 @@ func muxRouter(opts Options, rc redis.UniversalClient, inspector *asynq.Inspecto
 			ec = asynq.NewClient(opts.RedisConnOpt)
 		}
 		api.HandleFunc("/queues/{qname}/tasks", newEnqueueTaskHandlerFunc(ec, jobsStore, payloadFmt, resultFmt)).Methods("POST")
+		// Run a scheduler entry's task NOW (upstream hibiken/asynqmon#337):
+		// resolves the stable key against live entries ∪ snapshots (GONE
+		// entries are exactly the ones you want to fire manually) and
+		// enqueues a fresh task through the same gated client. Handler
+		// lives in scheduler_run_handlers.go; gated and audited exactly
+		// like the enqueue route above.
+		api.HandleFunc("/schedulers/{stable_key}/run",
+			newRunSchedulerEntryHandlerFunc(inspector, rc, ec, jobsStore, payloadFmt, resultFmt)).Methods("POST")
 	} else {
 		// Registered on the parent router, not the api subrouter: the
 		// read-only method filter below would otherwise answer with a bare
@@ -668,8 +724,21 @@ func muxRouter(opts Options, rc redis.UniversalClient, inspector *asynq.Inspecto
 		// POST falls out of the api subrouter (it has no NotFoundHandler
 		// of its own) and reaches this route.
 		router.HandleFunc("/api/queues/{qname}/tasks", newEnqueueDisabledHandlerFunc(opts.ReadOnly)).Methods("POST")
+		// #337 run-now is enqueue-gated identically: 403 JSON, never 405.
+		router.HandleFunc("/api/schedulers/{stable_key}/run", newEnqueueDisabledHandlerFunc(opts.ReadOnly)).Methods("POST")
 	}
 	// --------------------------- end §5.10 -----------------------------
+
+	// ------------------------------------------------------------------
+	// Health check probe (upstream hibiken/asynqmon#276). Registered on the
+	// PARENT router, outside /api, so it bypasses the actor middleware and
+	// the read-only method filter below — it is a k8s liveness/readiness
+	// probe, not an API: no auth, no side effects. PINGs redis with a 2s
+	// budget; 200 {"status":"ok"} or 503 {"status":"unavailable",...}.
+	// Handler lives in health_handlers.go.
+	// ------------------------------------------------------------------
+	router.HandleFunc("/healthz", newHealthzHandlerFunc(rc)).Methods("GET")
+	// --------------------------- end #276 ------------------------------
 
 	// Restrict APIs when running in read-only mode.
 	if opts.ReadOnly {

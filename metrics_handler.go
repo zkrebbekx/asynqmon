@@ -37,7 +37,26 @@ type metricsFetchOptions struct {
 	queues []string
 }
 
-func newGetMetricsHandlerFunc(client *http.Client, prometheusAddr string) http.HandlerFunc {
+// prometheusBasicAuth holds optional credentials attached to every request
+// proxied to the configured Prometheus server (upstream hibiken/asynqmon#248).
+// nil means no Authorization header. Values are held only to be set on the
+// outgoing request — they are never logged and never echoed in errors.
+type prometheusBasicAuth struct {
+	username, password string
+}
+
+// parsePrometheusBasicAuth parses the "user:password" flag/option value.
+// Empty input means auth is disabled; a value without a colon is treated as
+// a bare username with an empty password.
+func parsePrometheusBasicAuth(s string) *prometheusBasicAuth {
+	if s == "" {
+		return nil
+	}
+	user, pass, _ := strings.Cut(s, ":")
+	return &prometheusBasicAuth{username: user, password: pass}
+}
+
+func newGetMetricsHandlerFunc(client *http.Client, prometheusAddr string, basicAuth *prometheusBasicAuth) http.HandlerFunc {
 	// res is the result of calling a JSON API endpoint.
 	type res struct {
 		query string
@@ -87,7 +106,7 @@ func newGetMetricsHandlerFunc(client *http.Client, prometheusAddr string) http.H
 		for _, q := range queries {
 			go func(q string) {
 				url := buildPrometheusURL(prometheusAddr, q, opts)
-				msg, err := fetchPrometheusMetrics(r.Context(), client, url)
+				msg, err := fetchPrometheusMetrics(r.Context(), client, url, basicAuth)
 				ch <- res{q, msg, err}
 			}(q)
 		}
@@ -198,10 +217,15 @@ func applyQueueFilter(promQL string, qnames []string) string {
 	return strings.ReplaceAll(promQL, "QUEUE_FILTER", b.String())
 }
 
-func fetchPrometheusMetrics(ctx context.Context, client *http.Client, url string) (*json.RawMessage, error) {
+func fetchPrometheusMetrics(ctx context.Context, client *http.Client, url string, basicAuth *prometheusBasicAuth) (*json.RawMessage, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, err
+	}
+	// Authenticate against a basic-auth-protected Prometheus (upstream
+	// hibiken/asynqmon#248). Credentials go only onto the outgoing request.
+	if basicAuth != nil {
+		req.SetBasicAuth(basicAuth.username, basicAuth.password)
 	}
 	resp, err := client.Do(req)
 	if err != nil {

@@ -685,6 +685,11 @@ export interface FeaturesResponse {
   // correlation ids (§3.5), in priority order. Absent on older backends —
   // the client falls back to DEFAULT_CORRELATION_KEYS.
   correlation_keys?: string[];
+  // Character cap the task DETAIL endpoint's formatters apply
+  // (--max-detail-payload-length, upstream hibiken/asynqmon#301);
+  // 0/absent = unlimited/unknown. Drives the drawer's honest
+  // "truncated at N chars" note on capped payloads.
+  payload_detail_limit?: number;
 }
 
 export async function getFeatures(): Promise<FeaturesResponse> {

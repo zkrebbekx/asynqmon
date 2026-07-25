@@ -2,6 +2,8 @@ package asynqmon
 
 import (
 	"context"
+	"encoding/json"
+	"net/http"
 	"testing"
 	"time"
 
@@ -18,6 +20,58 @@ import (
 // root fleet-handler suite's database). Fixtures seeded through the real
 // asynq client; skipped when Redis does not answer PING.
 // ****************************************************************************
+
+// GET /healthz probe (upstream hibiken/asynqmon#276): 200 {"status":"ok"}
+// while redis answers PING; 503 {"status":"unavailable","error":...} when it
+// does not — simulated with a closed client, which fails PING without needing
+// redis itself to be down. Requests run imperatively before the Convey tree
+// (the repo's goconvey discipline); the tree only reads captured results.
+func TestHealthzEndpoint(t *testing.T) {
+	ctx := context.Background()
+	rc := redis.NewClient(&redis.Options{Addr: statsTestRedisAddr, DB: statsTestRedisDB})
+	if err := rc.Ping(ctx).Err(); err != nil {
+		rc.Close()
+		t.Skipf("skipping: redis not available on %s: %v", statsTestRedisAddr, err)
+	}
+	t.Cleanup(func() { rc.Close() })
+
+	var okBody struct {
+		Status string `json:"status"`
+		Error  string `json:"error"`
+	}
+	okW := getJSON(t, newHealthzHandlerFunc(rc), "/healthz", &okBody)
+
+	// A closed client makes every PING fail — the redis-down path without
+	// touching the shared server.
+	closed := redis.NewClient(&redis.Options{Addr: statsTestRedisAddr, DB: statsTestRedisDB})
+	closed.Close()
+	downW := getJSON(t, newHealthzHandlerFunc(closed), "/healthz", nil)
+	var downBody struct {
+		Status string `json:"status"`
+		Error  string `json:"error"`
+	}
+	downDecodeErr := json.Unmarshal(downW.Body.Bytes(), &downBody)
+
+	Convey("Given the GET /healthz probe endpoint (#276)", t, func() {
+		Convey("When redis answers PING", func() {
+			Convey("Then it reports 200 ok as JSON", func() {
+				So(okW.Code, ShouldEqual, http.StatusOK)
+				So(okW.Header().Get("Content-Type"), ShouldContainSubstring, "application/json")
+				So(okBody.Status, ShouldEqual, "ok")
+				So(okBody.Error, ShouldBeEmpty)
+			})
+		})
+		Convey("When redis does not answer (closed client)", func() {
+			Convey("Then it reports 503 unavailable with the error", func() {
+				So(downW.Code, ShouldEqual, http.StatusServiceUnavailable)
+				So(downW.Header().Get("Content-Type"), ShouldContainSubstring, "application/json")
+				So(downDecodeErr, ShouldBeNil)
+				So(downBody.Status, ShouldEqual, "unavailable")
+				So(downBody.Error, ShouldNotBeEmpty)
+			})
+		})
+	})
+}
 
 func TestHealthRolesEndpoint(t *testing.T) {
 	ctx := context.Background()

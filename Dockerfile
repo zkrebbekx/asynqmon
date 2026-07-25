@@ -3,7 +3,11 @@
 # Building a frontend.
 #
 
-FROM node:20-alpine AS frontend
+# Multi-arch build (hibiken/asynqmon#292): both build stages are pinned to the
+# BUILD platform so npm/go run natively (no QEMU emulation); Go cross-compiles
+# to the TARGET platform via TARGETOS/TARGETARCH below. The frontend bundle is
+# architecture-independent.
+FROM --platform=$BUILDPLATFORM node:20-alpine AS frontend
 
 # Move to a working directory (/static).
 WORKDIR /static
@@ -19,7 +23,7 @@ RUN npm ci && npm run build
 # Building a backend.
 #
 
-FROM golang:1.21-alpine AS backend
+FROM --platform=$BUILDPLATFORM golang:1.21-alpine AS backend
 
 # Move to a working directory (/build).
 WORKDIR /build
@@ -34,8 +38,15 @@ COPY . .
 # Copy frontend static files from /static to the root folder of the backend container.
 COPY --from=frontend ["/static/build", "ui/build"]
 
+# Cross-compile for the platform requested via `docker buildx --platform`
+# (hibiken/asynqmon#292). TARGETOS/TARGETARCH are auto-populated by BuildKit;
+# on a plain `docker build` they resolve to the host platform, so the Makefile
+# `docker` target keeps working unchanged.
+ARG TARGETOS
+ARG TARGETARCH
+
 # Set necessary environmet variables needed for the image and build the server.
-ENV CGO_ENABLED=0 GOOS=linux GOARCH=amd64
+ENV CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH}
 
 # Run go build (with ldflags to reduce binary size).
 RUN go build -ldflags="-s -w" -o asynqmon ./cmd/asynqmon

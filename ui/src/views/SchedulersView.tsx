@@ -15,13 +15,16 @@
 
 import React, { useCallback, useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { ChevronDown, ChevronRight, Loader2 } from "lucide-react";
+import { ChevronDown, ChevronRight, Loader2, Play } from "lucide-react";
 import { useSelector } from "react-redux";
+import { toast } from "sonner";
 import { AppState } from "../store";
 import { usePolling, useQuery } from "../hooks";
+import { useEnqueueEnabled } from "../hooks/useFeatures";
 import {
   listSchedulers,
   getSchedulerOutcomes,
+  runSchedulerEntry,
   SchedulerRow,
   SchedulerOutcomesResponse,
 } from "../api-fleet";
@@ -38,7 +41,8 @@ import {
   showRetentionGuidance,
   sortSchedulerRows,
 } from "../lib/schedulers";
-import { taskDetailsPath } from "../paths";
+import { paths, taskDetailsPath } from "../paths";
+import { serializePeek } from "../lib/urlstate";
 import { timeAgo, durationBefore, uuidPrefix, toErrorString } from "../utils";
 import { FcChip, MicroLabel } from "../components/FleetBits";
 import SyntaxHighlighter from "../components/SyntaxHighlighter";
@@ -146,6 +150,105 @@ function OutcomeTrace({ stableKey }: { stableKey: string }) {
 }
 
 /**************************************************************
+        Run now (upstream hibiken/asynqmon#337, §5.10-gated)
+ **************************************************************/
+
+// RunNowButton fires the entry's task immediately through the flag-gated
+// enqueue client — live or GONE (a gone entry is precisely the one you want
+// to fire by hand). Two-step inline confirm with the honest label: this is a
+// fresh enqueue of the entry's type/payload, NOT a scheduler tick. Success
+// lands a toast linking to the created task's drawer; options the server
+// skipped (schedule opts, unparsables) are listed right in the toast.
+function RunNowButton({ row }: { row: SchedulerRow }) {
+  const navigate = useNavigate();
+  const [confirming, setConfirming] = useState(false);
+  const [busy, setBusy] = useState(false);
+
+  // Reset the confirm step when the underlying entry changes.
+  useEffect(() => setConfirming(false), [row.stable_key]);
+
+  const fire = async () => {
+    if (busy) return;
+    setBusy(true);
+    try {
+      const resp = await runSchedulerEntry(row.stable_key);
+      const { queue, id } = resp.task;
+      const skipped = resp.skipped_options ?? [];
+      toast.success(`Task enqueued into ${queue}`, {
+        description:
+          skipped.length > 0 ? (
+            <span className="text-[11px]">
+              <span className="font-mono">{id}</span> · not applied:{" "}
+              {skipped.join("; ")}
+            </span>
+          ) : (
+            <span className="font-mono text-[11px]">{id}</span>
+          ),
+        action: {
+          label: "View task",
+          onClick: () =>
+            navigate(
+              `${paths().TASKS}?queue=${encodeURIComponent(queue)}&peek=${encodeURIComponent(
+                serializePeek({ queue, id })
+              )}`
+            ),
+        },
+      });
+      setConfirming(false);
+    } catch (e) {
+      toast.error(`Run now failed: ${toErrorString(e)}`);
+    }
+    setBusy(false);
+  };
+
+  // Everything stops propagation: the parent row toggles expand on
+  // click/Enter/Space and must not react to the button interaction.
+  const stop = {
+    onClick: (e: React.MouseEvent) => e.stopPropagation(),
+    onKeyDown: (e: React.KeyboardEvent) => e.stopPropagation(),
+  };
+
+  if (confirming) {
+    return (
+      <div className="flex max-w-[250px] flex-col gap-1.5" {...stop}>
+        <span className="text-[10.5px] leading-snug text-[var(--fc-ink2)]">
+          Enqueues a fresh task with this entry's type/payload — not a scheduler
+          tick.
+        </span>
+        <span className="flex gap-1.5">
+          <button
+            onClick={fire}
+            disabled={busy}
+            className="inline-flex items-center gap-1 rounded-md border border-[var(--fc-acc)] bg-[var(--fc-acc)] px-2 py-0.5 text-[11px] font-semibold text-white disabled:opacity-50"
+          >
+            {busy ? <Loader2 size={11} className="animate-spin" /> : <Play size={11} />}
+            {busy ? "Enqueuing…" : "Confirm run"}
+          </button>
+          <button
+            onClick={() => setConfirming(false)}
+            disabled={busy}
+            className="rounded-md border border-[var(--fc-line)] px-2 py-0.5 text-[11px] text-[var(--fc-ink2)] hover:border-[var(--fc-ink3)] disabled:opacity-50"
+          >
+            Cancel
+          </button>
+        </span>
+      </div>
+    );
+  }
+  return (
+    <span {...stop}>
+      <button
+        onClick={() => setConfirming(true)}
+        title="Enqueue this entry's task immediately (not a scheduler tick)"
+        className="inline-flex items-center gap-1 whitespace-nowrap rounded-md border border-[var(--fc-line)] bg-[var(--fc-raise)] px-2 py-0.5 text-[11px] font-semibold text-[var(--fc-ink)] transition-colors hover:border-[var(--fc-acc)] hover:text-[var(--fc-acc)]"
+      >
+        <Play size={11} /> Run now
+      </button>
+    </span>
+  );
+}
+
+/**************************************************************
                         Entries table
  **************************************************************/
 
@@ -154,11 +257,14 @@ function SchedulerEntryRow({
   isOpen,
   onToggle,
   nowMs,
+  canRunNow,
 }: {
   row: SchedulerRow;
   isOpen: boolean;
   onToggle: () => void;
   nowMs: number;
+  // The §5.10 enqueue capability gates the #337 Run-now column entirely.
+  canRunNow: boolean;
 }) {
   const gone = isGone(row);
   const queue = queueFromOptions(row.entry.options);
@@ -231,11 +337,16 @@ function SchedulerEntryRow({
             </FcChip>
           )}
         </td>
+        {canRunNow && (
+          <td className={cn(cellClass, "text-right")}>
+            <RunNowButton row={row} />
+          </td>
+        )}
       </tr>
       {isOpen && (
         <tr>
           <td className={cellClass} />
-          <td colSpan={7} className={cn(cellClass, "py-2")}>
+          <td colSpan={canRunNow ? 8 : 7} className={cn(cellClass, "py-2")}>
             {row.entry.task_payload && row.entry.task_payload !== "{}" && (
               <div className="mb-2">
                 <SyntaxHighlighter>{row.entry.task_payload}</SyntaxHighlighter>
@@ -256,6 +367,9 @@ function SchedulerEntryRow({
 export default function SchedulersView() {
   const pollInterval = useSelector((s: AppState) => s.settings.pollInterval);
   const query = useQuery();
+  // Run-now (#337) rides on the §5.10 enqueue capability: the column hides
+  // entirely when the deployment has enqueue off (or is read-only).
+  const canRunNow = useEnqueueEnabled();
 
   const [rows, setRows] = useState<SchedulerRow[] | null>(null);
   const [error, setError] = useState("");
@@ -337,6 +451,7 @@ export default function SchedulersView() {
                 <th className={theadClass}>Next</th>
                 <th className={theadClass}>Prev</th>
                 <th className={theadClass}>Status</th>
+                {canRunNow && <th className={cn(theadClass, "text-right")}>Actions</th>}
               </tr>
             </thead>
             <tbody>
@@ -347,6 +462,7 @@ export default function SchedulersView() {
                   isOpen={expanded.has(row.stable_key)}
                   onToggle={() => toggle(row.stable_key)}
                   nowMs={nowMs}
+                  canRunNow={canRunNow}
                 />
               ))}
             </tbody>
