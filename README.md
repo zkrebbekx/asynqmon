@@ -255,6 +255,51 @@ tasks that were deleted or never enqueued simply don't appear. The view
 labels this honestly in the UI; treat it as a strong hint about related
 work, not a distributed trace.
 
+### Observing run durations (opt-in middleware)
+
+asynq stores no run duration for finished tasks and no per-attempt history —
+`LastErr` is overwritten on every retry, `pending_since` is deleted at
+dequeue, and completed tasks carry no start/end. The dashboard therefore
+cannot honestly show "how long did this run" or "what happened on attempt 2"
+— unless your workers opt in.
+
+The `github.com/hibiken/asynqmon/observe` package provides an asynq server
+middleware that records exactly that:
+
+```go
+import "github.com/hibiken/asynqmon/observe"
+
+rc := redis.NewClient(&redis.Options{Addr: "localhost:6379"}) // same Redis/DB as the asynq server
+mux := asynq.NewServeMux()
+mux.Use(observe.Middleware(rc))
+mux.HandleFunc("email:send", handleEmailSend)
+```
+
+**What it records.** One JSON record per attempt: attempt number, start
+time, duration, outcome (`ok`, `error` with the message capped at 500 bytes,
+or `panic` — recorded, then rethrown so asynq's own recovery is untouched),
+worker `host:pid`, and the task's queue/id/type. A small summary hash tracks
+`first_seen`, `total_attempts`, `last_duration_ms` and `total_busy_ms`.
+
+**Bounds.** Records live in asynqmon-owned keys
+(`asynqmon:obs:<queue>:<task_id>`), trimmed to the last 30 attempts and
+expiring 7 days after the last write — tune with `observe.WithAttemptCap`,
+`observe.WithTTL` and `observe.WithKeyPrefix`. Writes are best-effort: a
+recording failure never fails or delays the task (dropped writes are counted;
+see `observe.DroppedWrites`).
+
+**What the dashboard shows.** The task drawer grows an **Attempt history**
+section (per-attempt rows with duration, outcome and worker), and finished
+tasks show "last run 3.4s · observed" in the drawer lifecycle and the
+Completed/Archived tables, served by
+`GET /api/queues/{qname}/tasks/{task_id}/observed`.
+
+**Honesty statement.** Coverage depends on worker adoption: only attempts
+that ran through an adopting worker are recorded, and the dashboard labels
+observed data as such ("recorded by observe middleware — attempts before
+adoption are not shown"). Tasks without records simply show nothing — the
+dashboard never fabricates history.
+
 **Settings and adaptive dark mode**
 
 ![Web UI Settings and adaptive dark mode](./docs/screenshots/settings-dark.png)

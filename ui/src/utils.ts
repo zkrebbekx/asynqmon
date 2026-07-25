@@ -74,6 +74,25 @@ export function stringifyDuration(d: Duration): string {
   );
 }
 
+// stringifyDurationMs renders an observed run duration recorded in
+// milliseconds: sub-millisecond as "<1ms", sub-second in ms, sub-minute in
+// seconds with one decimal, longer via the h/m/s formatter.
+export function stringifyDurationMs(ms: number): string {
+  if (!Number.isFinite(ms) || ms < 0) {
+    return "-";
+  }
+  if (ms < 1) {
+    return "<1ms";
+  }
+  if (ms < 1000) {
+    return `${Math.round(ms)}ms`;
+  }
+  if (ms < 60000) {
+    return `${(ms / 1000).toFixed(1)}s`;
+  }
+  return stringifyDuration(durationFromSeconds(Math.round(ms / 1000)));
+}
+
 const zeroTimestamp = "0001-01-01T00:00:00Z";
 
 // parseTimestamp returns the epoch milliseconds for an RFC3339 timestamp, or
