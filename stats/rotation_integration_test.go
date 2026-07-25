@@ -83,13 +83,20 @@ func TestRotationRefreshesFleetWithinWindow(t *testing.T) {
 	firstStats := eng.LastSweep()
 
 	// Phase A: tick until the unseen-first rotation has observed the whole
-	// fleet (bounded), so the hot set and rotation reach steady state.
+	// fleet (bounded), so the hot set and rotation reach steady state. The
+	// fixture has no live workers, so every queue raises NO_CONSUMERS after
+	// its 2-sweep debounce; three settle ticks let the LAST-observed queues'
+	// findings mature so the severity-ranked attention component of the hot
+	// set is stable before the window measurement starts.
 	warmup := 1
 	for len(refreshedAt) < 100 && warmup < 40 {
 		tick()
 		warmup++
 	}
 	observedAll := len(refreshedAt)
+	for i := 0; i < 3; i++ {
+		tick()
+	}
 
 	// Phase B: one full steady-state rotation window, as computed by the
 	// engine itself — the §5.1 contract is "every queue refreshed within

@@ -360,7 +360,7 @@ func TestBaselineInputsAssembly(t *testing.T) {
 	t0 := time.Date(2026, 7, 25, 12, 0, 0, 0, time.UTC)
 
 	Convey("Given a refresher with an anchored series history", t, func() {
-		b := newBaselineRefresher(nil)
+		b := newBaselineRefresher(nil, 0)
 		b.since = t0.Add(-2 * time.Hour)
 		b.sinceProbed = true
 

@@ -13,6 +13,7 @@ import { TableCell, TableRow } from "./ui/table";
 import { TooltipProvider } from "./ui/tooltip";
 import SyntaxHighlighter from "./SyntaxHighlighter";
 import DeleteConfirmButton from "./DeleteConfirmButton";
+import ObservedRunStamp from "./ObservedRunStamp";
 import { clickableRowClass, clickableRowProps } from "../lib/utils";
 
 interface Props {
@@ -48,7 +49,12 @@ function Row({ task, isSelected, onSelectChange }: RowProps) {
           <SyntaxHighlighter>{prettifyPayload(task.payload)}</SyntaxHighlighter>
         </div>
       </TableCell>
-      <TableCell className="text-xs text-[hsl(var(--muted-foreground))]">{timeAgo(task.completed_at)}</TableCell>
+      <TableCell className="text-xs text-[hsl(var(--muted-foreground))]">
+        {timeAgo(task.completed_at)}
+        {/* Run duration exists only when the worker adopted the observe
+            middleware; the stamp renders nothing otherwise. */}
+        <ObservedRunStamp queue={task.queue} id={task.id} />
+      </TableCell>
       <TableCell className="text-xs text-[hsl(var(--muted-foreground))]">
         {task.ttl_seconds > 0 ? stringifyDuration(durationFromSeconds(task.ttl_seconds)) : "–"}
       </TableCell>

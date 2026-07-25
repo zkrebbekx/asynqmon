@@ -469,6 +469,15 @@ func muxRouter(opts Options, rc redis.UniversalClient, inspector *asynq.Inspecto
 
 	api.HandleFunc("/queues/{qname}/tasks/{task_id}", newGetTaskHandlerFunc(inspector, payloadFmt, resultFmt)).Methods("GET")
 
+	// ── Observed run history (opt-in observe/ middleware) ──
+	// Serves per-attempt records + run-duration summary written by workers
+	// that adopted github.com/hibiken/asynqmon/observe — data asynq itself
+	// never stores. Reads asynqmon-owned keys only; 404 {"present": false}
+	// when absent (middleware not adopted, or TTL expired). GET-only, so
+	// read-only mode is unaffected. Handler: observed_handlers.go.
+	api.HandleFunc("/queues/{qname}/tasks/{task_id}/observed", newObservedTaskHandlerFunc(rc)).Methods("GET")
+	// ── end observed run history ──
+
 	// Cross-queue server-side task search / filter / pagination. `q` accepts
 	// AQL (phase 6, §3.4): cursorable plans return exact totals + (score,id)
 	// cursor pages; scan plans return budgeted partial results + a resume

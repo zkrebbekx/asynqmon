@@ -16,6 +16,7 @@ import { Button } from "./ui/button";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "./ui/tooltip";
 import SyntaxHighlighter from "./SyntaxHighlighter";
 import DeleteConfirmButton from "./DeleteConfirmButton";
+import ObservedRunStamp from "./ObservedRunStamp";
 import { clickableRowClass, clickableRowProps } from "../lib/utils";
 
 interface Props {
@@ -54,7 +55,12 @@ function Row({ task, isSelected, onSelectChange }: RowProps) {
       </TableCell>
       <TableCell className="text-xs">{task.retried}/{task.max_retry}</TableCell>
       <TableCell className="text-xs text-[hsl(var(--muted-foreground))] max-w-xs truncate">{task.error_message || "–"}</TableCell>
-      <TableCell className="text-xs text-[hsl(var(--muted-foreground))]">{timeAgo(task.last_failed_at)}</TableCell>
+      <TableCell className="text-xs text-[hsl(var(--muted-foreground))]">
+        {timeAgo(task.last_failed_at)}
+        {/* Run duration exists only when the worker adopted the observe
+            middleware; the stamp renders nothing otherwise. */}
+        <ObservedRunStamp queue={task.queue} id={task.id} />
+      </TableCell>
       {!window.READ_ONLY && (
         <TableCell className="text-center" onClick={(e) => e.stopPropagation()}>
           <TooltipProvider>

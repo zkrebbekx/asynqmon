@@ -594,6 +594,54 @@ export async function getTaskInfo(
   return resp.data;
 }
 
+// Observed run history — data recorded by the OPT-IN worker-side middleware
+// (github.com/hibiken/asynqmon/observe), which asynq itself never stores.
+// Field names are a backend contract (observed_handlers.go). Coverage
+// depends on worker adoption: the UI must label this data as observed and
+// render NOTHING when absent.
+export interface ObservedAttempt {
+  n: number; // attempt number (1-based)
+  start: string; // RFC3339Nano
+  duration_ms: number;
+  outcome: "ok" | "error" | "panic";
+  error?: string; // capped at 500 bytes by the middleware
+  worker: string; // host:pid
+}
+
+export interface ObservedSummary {
+  first_seen?: string; // first attempt observed (NOT the enqueue time)
+  total_attempts: number; // counts all observed attempts, beyond the list cap
+  last_duration_ms: number;
+  last_outcome?: string;
+  total_busy_ms: number;
+}
+
+export interface ObservedTaskResponse {
+  present: boolean;
+  attempts: ObservedAttempt[]; // newest first, capped (default 30)
+  summary: ObservedSummary | null;
+}
+
+// getObservedTask resolves null on 404: absence is the expected case (the
+// middleware not adopted, or records expired), never an error.
+export async function getObservedTask(
+  qname: string,
+  id: string
+): Promise<ObservedTaskResponse | null> {
+  try {
+    const resp = await axios({
+      method: "get",
+      url: `${getBaseUrl()}/queues/${qname}/tasks/${id}/observed`,
+    });
+    return resp.data;
+  } catch (error) {
+    if (axios.isAxiosError(error) && error.response?.status === 404) {
+      return null;
+    }
+    throw error;
+  }
+}
+
 // The flag-gated enqueue capability (§5.10). Field names are a backend
 // contract (enqueue.go enqueueTaskRequest). Absent optional fields fall back
 // to asynq defaults server-side.

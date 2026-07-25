@@ -49,6 +49,28 @@ const (
 	// pending work).
 	perQueueSweepCost = 16
 
+	// perQueueCacheWriteCost is the cache-publish cost of one refreshed row
+	// (HSET + PEXPIRE). Scale validation (docs/SCALE.md) showed that sizing
+	// shards by the read cost alone systematically overspends the budget by
+	// ~12% before any burst work is added, so the planner budgets the FULL
+	// per-queue tick cost.
+	perQueueCacheWriteCost = 2
+
+	// perQueueTickCost is the total budgeted spend of refreshing one queue in
+	// one tick: hot read + cache publish.
+	perQueueTickCost = perQueueSweepCost + perQueueCacheWriteCost
+
+	// auxBudgetDiv reserves 1/auxBudgetDiv of each tick's budget for the
+	// sweep's auxiliary spend — series-slot flushes (bursty: every hot-ring
+	// key flushes when the clock crosses a slot boundary), cadenced baseline
+	// loads, the bounded GROUP_STALL reads and the fixed per-sweep overhead
+	// (queue-set/index/viewed reads, INFO memory, scheduler index). Without
+	// the reserve those bursts land on top of a fully-spent refresh budget
+	// (scale validation measured slot-boundary ticks at ~1.6× budget). The
+	// auxiliary consumers are themselves capped against this reserve
+	// (Engine caps: series flush cap, baseline command cap).
+	auxBudgetDiv = 4
+
 	// viewedWindow is how recently a queue must have been requested to count
 	// as "currently viewed" (documented approximation: views are recorded
 	// best-effort by whichever replica served the request, with a per-queue
@@ -62,6 +84,23 @@ const (
 	// viewedKeyTTL keeps the viewed zset from outliving an idle console.
 	viewedKeyTTL = 5 * time.Minute
 )
+
+// tickCommandBudgets splits one tick's total command allowance
+// (budget × interval) into the auxiliary reserve and the refresh budget the
+// shard planner may spend on per-queue reads+writes. Pure; shared by the
+// planner and by NewEngine when deriving the auxiliary caps.
+func tickCommandBudgets(budget int, interval time.Duration) (perTick, aux, refresh int) {
+	if budget <= 0 {
+		budget = DefaultCommandBudget
+	}
+	perTick = int(float64(budget) * interval.Seconds())
+	if perTick < 1 {
+		perTick = 1
+	}
+	aux = perTick / auxBudgetDiv
+	refresh = perTick - aux
+	return perTick, aux, refresh
+}
 
 // TierForFleet classifies a fleet size into the §5.1 tier (1, 2 or 3).
 func TierForFleet(n int) int {
@@ -93,23 +132,40 @@ func hotScore(s *QueueSnapshot) float64 {
 }
 
 // hotSet selects the queues refreshed every tick (§5.1 tiers 2-3):
-// attention-flagged ∪ currently-viewed ∪ top-K by hotScore over the
-// last-known snapshots. Only names present in the current queue universe are
-// returned, sorted. Queues never observed yet cannot be scored and are
-// handled by the cold rotation's unseen-first rule instead.
-func hotSet(universe map[string]bool, prev map[string]*QueueSnapshot, attention, viewed []string, k int) []string {
+// currently-viewed ∪ attention-flagged ∪ top-K by hotScore over the
+// last-known snapshots, bounded at maxHot members (maxHot <= 0 = unbounded).
+//
+// The ceiling is the scale-validation fix (docs/SCALE.md) for mass
+// incidents: a fleet-wide event (every queue NO_CONSUMERS, say) must not
+// inflate the hot set until the cold rotation starves at its minimum
+// quantum. Members join in priority order — viewed first (a human is
+// looking at that queue right now), then attention in the report's
+// severity-ranked order, then top-K by score — and queues that miss the
+// ceiling simply stay on their rotation cadence with honest RefreshedAt
+// stamps. Only names present in the current queue universe are returned,
+// sorted. Queues never observed yet cannot be scored and are handled by the
+// cold rotation's unseen-first rule instead.
+func hotSet(universe map[string]bool, prev map[string]*QueueSnapshot, attention, viewed []string, k, maxHot int) []string {
 	set := make(map[string]bool)
-	for _, q := range attention {
-		if universe[q] {
-			set[q] = true
-		}
-	}
+	room := func() bool { return maxHot <= 0 || len(set) < maxHot }
 	for _, q := range viewed {
+		if !room() {
+			break
+		}
 		if universe[q] {
 			set[q] = true
 		}
 	}
-	// Top-K by score. Only scored (previously observed) queues compete.
+	for _, q := range attention {
+		if !room() {
+			break
+		}
+		if universe[q] {
+			set[q] = true
+		}
+	}
+	// Top-K by score fills the remaining room. Only scored (previously
+	// observed) queues compete.
 	type scored struct {
 		q string
 		v float64
@@ -126,11 +182,15 @@ func hotSet(universe map[string]bool, prev map[string]*QueueSnapshot, attention,
 		}
 		return candidates[i].q < candidates[j].q
 	})
-	if k > len(candidates) {
-		k = len(candidates)
-	}
-	for _, c := range candidates[:k] {
-		set[c.q] = true
+	taken := 0
+	for _, c := range candidates {
+		if taken >= k || !room() {
+			break
+		}
+		if !set[c.q] {
+			set[c.q] = true
+		}
+		taken++
 	}
 	out := make([]string, 0, len(set))
 	for q := range set {
@@ -206,23 +266,40 @@ func (p *sweepPlan) refreshList() []string {
 // (a new queue in a big fleet becomes visible on the next tick, not after a
 // full rotation), then a wrapping cursor rotation over the rest, so every
 // queue is refreshed within ~N×cost/budget seconds.
+//
+// Budget accounting (scale-validated, docs/SCALE.md): the shard is sized
+// against the refresh budget — budget×interval minus the 25% auxiliary
+// reserve (series flushes, baseline loads, fixed overhead) — at the FULL
+// per-queue tick cost (16-command hot read + 2-command cache publish). The
+// hot set is bounded at half the refresh budget so the cold rotation always
+// keeps at least half: unbounded, the tier default K=500 at interval 1s
+// alone would spend 4× the default budget every tick, and a mass incident
+// (fleet-wide NO_CONSUMERS) would starve the rotation at its minimum
+// quantum. An EXPLICIT Config.HotSetK raises the ceiling to at least K —
+// the documented visible-overrun escape hatch.
 func planSweep(tier int, qnames []string, prev map[string]*QueueSnapshot, attention, viewed []string, cursor int, budget int, interval time.Duration, hotK int) *sweepPlan {
 	n := len(qnames)
-	if budget <= 0 {
-		budget = DefaultCommandBudget
-	}
 	if tier <= 1 {
 		return &sweepPlan{tier: 1, full: true, cursor: 0}
 	}
+	_, _, refreshBudget := tickCommandBudgets(budget, interval)
+	maxHot := refreshBudget / (2 * perQueueTickCost)
+	if maxHot < 1 {
+		maxHot = 1
+	}
 	if hotK <= 0 {
 		hotK = defaultHotSetK(tier)
+	} else if hotK > maxHot {
+		// The operator explicitly asked for a bigger scored hot set: honor
+		// it, visibly overrunning the budget rather than silently shrinking.
+		maxHot = hotK
 	}
 
 	universe := make(map[string]bool, n)
 	for _, q := range qnames {
 		universe[q] = true
 	}
-	hot := hotSet(universe, prev, attention, viewed, hotK)
+	hot := hotSet(universe, prev, attention, viewed, hotK, maxHot)
 	hotLookup := make(map[string]bool, len(hot))
 	for _, q := range hot {
 		hotLookup[q] = true
@@ -243,9 +320,8 @@ func planSweep(tier int, qnames []string, prev map[string]*QueueSnapshot, attent
 	}
 	coldTotal := len(unseen) + len(seen)
 
-	// Budget: commands available this tick, minus the hot set's fixed cost.
-	budgetPerTick := int(float64(budget) * interval.Seconds())
-	shardSize := (budgetPerTick - len(hot)*perQueueSweepCost) / perQueueSweepCost
+	// Refresh budget available this tick, minus the hot set's fixed cost.
+	shardSize := (refreshBudget - len(hot)*perQueueTickCost) / perQueueTickCost
 	if shardSize < 1 {
 		// A hot set at (or beyond) the whole budget still leaves the cold
 		// rotation a minimum quantum of one queue per tick — otherwise cold

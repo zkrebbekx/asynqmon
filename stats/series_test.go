@@ -284,7 +284,7 @@ func TestCounterDeltaRules(t *testing.T) {
 
 func TestSamplerDeltaLifecycle(t *testing.T) {
 	Convey("Given a sampler observing two sweeps of daily counters", t, func() {
-		s := newSeriesSampler(nil, 0)
+		s := newSeriesSampler(nil, 0, 0)
 		day1 := time.Date(2026, 7, 24, 23, 59, 40, 0, time.UTC)
 
 		snaps := func(processed, failed int64) map[string]*QueueSnapshot {
@@ -323,7 +323,7 @@ func TestSamplerDeltaLifecycle(t *testing.T) {
 
 func TestSamplerAccumulator(t *testing.T) {
 	Convey("Given the in-process slot accumulator", t, func() {
-		s := newSeriesSampler(nil, 0)
+		s := newSeriesSampler(nil, 0, 0)
 		var flushes []flushOp
 		key := seriesKey(hotRing, "fleet", MetricPending)
 

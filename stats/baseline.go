@@ -3,6 +3,7 @@ package stats
 import (
 	"context"
 	"fmt"
+	"sort"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -26,6 +27,15 @@ import (
 //   - consumer seed: 1 GET per queue (hot consumer ring), once per holder
 //   - learning anchor: 1 GET (asynqmon:series:since), once per holder
 // Per-sweep steady-state cost is zero reads.
+//
+// Tiers 2-3 additionally cap the per-sweep spend at cmdCap commands (§5.1
+// auxiliary budget reserve, phase-12 scale validation): "once per UTC day"
+// means EVERY queue's fail baseline goes stale on the same tick at midnight —
+// at 5,000 queues that was a single 35,000-command burst, 17× the default
+// tick budget (docs/SCALE.md). Capped loads simply resume on the next sweep
+// (stale/pending queues remain queued), trading a few minutes of LEARNING
+// state on freshly-discovered queues for a bounded per-tick spend. Tier 1
+// keeps the uncapped pre-phase-12 behavior — the budget does not govern it.
 // ****************************************************************************
 
 const (
@@ -107,28 +117,47 @@ type failCacheEntry struct {
 type baselineRefresher struct {
 	rc redis.UniversalClient
 
+	// cmdCap bounds the Redis commands one refresh() may issue in tiers 2-3
+	// (derived from the §5.1 auxiliary budget reserve by NewEngine; 0 =
+	// unlimited). Tier 1 always runs uncapped.
+	cmdCap int
+
 	since            time.Time // decoded asynqmon:series:since anchor
 	sinceProbed      bool
 	failCache        map[string]failCacheEntry
 	depthCache       map[string]depthBaseline
 	lastDepthRefresh time.Time
+	depthPending     []string // queues awaiting this hour's capped depth reload
 	consumerSeeded   bool
 	windows          map[string][]consumerObsPoint
 }
 
-func newBaselineRefresher(rc redis.UniversalClient) *baselineRefresher {
+func newBaselineRefresher(rc redis.UniversalClient, cmdCap int) *baselineRefresher {
 	return &baselineRefresher{
 		rc:         rc,
+		cmdCap:     cmdCap,
 		failCache:  make(map[string]failCacheEntry),
 		depthCache: make(map[string]depthBaseline),
 		windows:    make(map[string][]consumerObsPoint),
 	}
 }
 
+// capFor returns this sweep's command cap: 0 (unlimited) in tier 1, cmdCap
+// in tiers 2-3.
+func (b *baselineRefresher) capFor(tier int) int {
+	if tier <= 1 {
+		return 0
+	}
+	return b.cmdCap
+}
+
 // refresh runs once per sweep AFTER the series sampler (so the since anchor
-// exists). Returns the number of Redis read commands issued.
-func (b *baselineRefresher) refresh(ctx context.Context, now time.Time, snaps map[string]*QueueSnapshot) (int, error) {
+// exists). tier is the sweep plan's §5.1 tier: tiers 2-3 cap the per-sweep
+// spend (see the file header). Returns the number of Redis read commands
+// issued.
+func (b *baselineRefresher) refresh(ctx context.Context, now time.Time, snaps map[string]*QueueSnapshot, tier int) (int, error) {
 	reads := 0
+	capCmds := b.capFor(tier)
 
 	if !b.sinceProbed {
 		v, err := b.rc.Get(ctx, seriesSinceKey).Int64()
@@ -142,17 +171,17 @@ func (b *baselineRefresher) refresh(ctx context.Context, now time.Time, snaps ma
 		b.sinceProbed = true
 	}
 
-	n, err := b.refreshFailBaselines(ctx, now, snaps)
+	n, err := b.refreshFailBaselines(ctx, now, snaps, capCmds)
 	reads += n
 	if err != nil {
 		return reads, err
 	}
-	n, err = b.refreshDepthBaselines(ctx, now, snaps)
+	n, err = b.refreshDepthBaselines(ctx, now, snaps, capCmds)
 	reads += n
 	if err != nil {
 		return reads, err
 	}
-	n, err = b.seedConsumerWindows(ctx, now, snaps)
+	n, err = b.seedConsumerWindows(ctx, now, snaps, capCmds)
 	reads += n
 	if err != nil {
 		return reads, err
@@ -163,8 +192,12 @@ func (b *baselineRefresher) refresh(ctx context.Context, now time.Time, snaps ma
 
 // refreshFailBaselines loads the previous 7 days' failed counters for queues
 // whose cached baseline is missing or from a previous UTC day. Baselines only
-// change at UTC midnight, so steady-state cost is zero.
-func (b *baselineRefresher) refreshFailBaselines(ctx context.Context, now time.Time, snaps map[string]*QueueSnapshot) (int, error) {
+// change at UTC midnight, so steady-state cost is zero. capCmds > 0 bounds
+// this sweep's spend: the stale list is processed in sorted order, at most
+// capCmds/7 queues per sweep — loaded queues leave the stale set, so capped
+// sweeps march through the remainder deterministically (a not-yet-loaded
+// queue's FAIL_SPIKE detector simply stays silent until its turn).
+func (b *baselineRefresher) refreshFailBaselines(ctx context.Context, now time.Time, snaps map[string]*QueueSnapshot, capCmds int) (int, error) {
 	today := now.UTC().Format("2006-01-02")
 	var stale []string
 	for q := range snaps {
@@ -179,6 +212,13 @@ func (b *baselineRefresher) refreshFailBaselines(ctx context.Context, now time.T
 	}
 	if len(stale) == 0 {
 		return 0, nil
+	}
+	sort.Strings(stale)
+	if maxQueues := capCmds / failBaselineDays; capCmds > 0 && len(stale) > maxQueues {
+		if maxQueues < 1 {
+			maxQueues = 1
+		}
+		stale = stale[:maxQueues]
 	}
 
 	reads := 0
@@ -216,17 +256,34 @@ func (b *baselineRefresher) refreshFailBaselines(ctx context.Context, now time.T
 }
 
 // refreshDepthBaselines re-reads every queue's rollup pending ring once per
-// hour (the ring only gains a slot per hour) and computes the 24h mean.
-func (b *baselineRefresher) refreshDepthBaselines(ctx context.Context, now time.Time, snaps map[string]*QueueSnapshot) (int, error) {
-	if !b.lastDepthRefresh.IsZero() && now.Sub(b.lastDepthRefresh) < time.Hour {
+// hour (the ring only gains a slot per hour) and computes the 24h mean. The
+// hourly pass enqueues every current queue and drains at most capCmds GETs
+// per sweep (capCmds > 0): re-reading 5,000 rings in one tick was a 2.5×
+// budget burst (docs/SCALE.md). Results merge into the cache as they load;
+// queues gone from the fleet are pruned at each hourly rebuild.
+func (b *baselineRefresher) refreshDepthBaselines(ctx context.Context, now time.Time, snaps map[string]*QueueSnapshot, capCmds int) (int, error) {
+	if b.lastDepthRefresh.IsZero() || now.Sub(b.lastDepthRefresh) >= time.Hour {
+		b.lastDepthRefresh = now
+		b.depthPending = b.depthPending[:0]
+		for q := range snaps {
+			b.depthPending = append(b.depthPending, q)
+		}
+		sort.Strings(b.depthPending)
+		for q := range b.depthCache {
+			if _, ok := snaps[q]; !ok {
+				delete(b.depthCache, q)
+			}
+		}
+	}
+	if len(b.depthPending) == 0 {
 		return 0, nil
 	}
-	b.lastDepthRefresh = now
-
-	names := make([]string, 0, len(snaps))
-	for q := range snaps {
-		names = append(names, q)
+	names := b.depthPending
+	if capCmds > 0 && len(names) > capCmds {
+		names = names[:capCmds]
 	}
+	b.depthPending = b.depthPending[len(names):]
+
 	reads := 0
 	pipe := b.rc.Pipeline()
 	cmds := make([]*redis.StringCmd, len(names))
@@ -237,12 +294,10 @@ func (b *baselineRefresher) refreshDepthBaselines(ctx context.Context, now time.
 	if _, err := pipe.Exec(ctx); err != nil && err != redis.Nil {
 		return reads, fmt.Errorf("reading depth baselines: %w", err)
 	}
-	next := make(map[string]depthBaseline, len(names))
 	for i, q := range names {
 		raw, _ := cmds[i].Bytes()
-		next[q] = computeDepthBaseline(raw, now)
+		b.depthCache[q] = computeDepthBaseline(raw, now)
 	}
-	b.depthCache = next
 	return reads, nil
 }
 
@@ -275,8 +330,11 @@ func computeDepthBaseline(raw []byte, now time.Time) depthBaseline {
 // seedConsumerWindows initializes the 30m consumer windows from the hot
 // consumer_count rings once per holder session, so a lease handover does not
 // blind the detector for 30 minutes (§3.1 CONSUMERS_DROPPED: "server-level
-// series collected from day one").
-func (b *baselineRefresher) seedConsumerWindows(ctx context.Context, now time.Time, snaps map[string]*QueueSnapshot) (int, error) {
+// series collected from day one"). capCmds > 0 bounds the one-time seed (a
+// failover holder inheriting a 5,000-queue cache would otherwise spend 5,000
+// GETs in its first sweep); unseeded queues learn organically from
+// observeConsumers, exactly like queues discovered after the seed.
+func (b *baselineRefresher) seedConsumerWindows(ctx context.Context, now time.Time, snaps map[string]*QueueSnapshot, capCmds int) (int, error) {
 	if b.consumerSeeded {
 		return 0, nil
 	}
@@ -285,6 +343,10 @@ func (b *baselineRefresher) seedConsumerWindows(ctx context.Context, now time.Ti
 	names := make([]string, 0, len(snaps))
 	for q := range snaps {
 		names = append(names, q)
+	}
+	sort.Strings(names)
+	if capCmds > 0 && len(names) > capCmds {
+		names = names[:capCmds]
 	}
 	reads := 0
 	pipe := b.rc.Pipeline()

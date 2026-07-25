@@ -17,7 +17,7 @@ import { usePolling } from "../hooks";
 import { useCorrelationKeys, useEnqueueEnabled } from "../hooks/useFeatures";
 import {
   durationBefore, durationFromSeconds, durationSince, formatTimestamp,
-  prettifyPayload, stringifyDuration, timeAgo, toErrorString,
+  prettifyPayload, stringifyDuration, stringifyDurationMs, timeAgo, toErrorString,
 } from "../utils";
 import { MetaPair, metaId, parseMetadata } from "../lib/metadata";
 import {
@@ -174,6 +174,10 @@ export default function TaskDrawer({ peek, resultList, onClose, onPeek, onPivot 
   const [flow, setFlow] = useState<FlowResult | null>(null);
   const [flowLoading, setFlowLoading] = useState(false);
   const [flowErr, setFlowErr] = useState("");
+  // Observed run history (opt-in observe middleware) — null means "no data",
+  // which is the expected case until workers adopt the middleware; the drawer
+  // then renders nothing for it (§7 honesty ledger).
+  const [observed, setObserved] = useState<api.ObservedTaskResponse | null>(null);
 
   // 1s tick so countdowns (next retry, expires-in) stay live between polls.
   const [now, setNow] = useState(() => Date.now());
@@ -193,6 +197,14 @@ export default function TaskDrawer({ peek, resultList, onClose, onPeek, onPivot 
     } catch (e) {
       setFetchErr(toErrorString(e));
     }
+    try {
+      // Best-effort side read: getObservedTask resolves null on 404 (the
+      // expected no-adoption case); a transient failure keeps the last
+      // snapshot rather than surfacing an error for optional data.
+      setObserved(await api.getObservedTask(peek.queue, peek.id));
+    } catch {
+      // ignore — observed data is optional
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [peekKey]);
   usePolling(fetchInfo, pollInterval, [peekKey]);
@@ -204,6 +216,7 @@ export default function TaskDrawer({ peek, resultList, onClose, onPeek, onPivot 
     setTab("detail");
     setFlow(null);
     setFlowErr("");
+    setObserved(null);
     setConfirmDelete(false);
     setCloneOpen(false);
   }, [peekKey]);
@@ -494,6 +507,23 @@ export default function TaskDrawer({ peek, resultList, onClose, onPeek, onPivot 
         ),
       });
     }
+    // Run duration is only knowable when the worker adopted the observe
+    // middleware — asynq stores no start/end for finished tasks. Absent
+    // observed data adds nothing here.
+    if (observed?.present && observed.summary) {
+      events.push({
+        key: "observed-run",
+        node: (
+          <>
+            <b className="text-[var(--fc-ink)]">last run</b>{" "}
+            <span className="font-mono tabular-nums">
+              {stringifyDurationMs(observed.summary.last_duration_ms)}
+            </span>{" "}
+            · <Stamp>observed</Stamp>
+          </>
+        ),
+      });
+    }
   }
 
   const payloadBytes = task ? new TextEncoder().encode(task.payload).length : 0;
@@ -638,6 +668,50 @@ export default function TaskDrawer({ peek, resultList, onClose, onPeek, onPivot 
                   ))}
                 </div>
               </section>
+
+              {/* Attempt history — only what the observe middleware recorded;
+                  no section at all when absent (§7 honesty ledger). */}
+              {observed?.present && observed.attempts.length > 0 && (
+                <section className="mb-5">
+                  <SectionTitle>
+                    Attempt history · {observed.attempts.length}
+                    {(observed.summary?.total_attempts ?? 0) > observed.attempts.length &&
+                      ` of ${observed.summary!.total_attempts}`}
+                  </SectionTitle>
+                  <div className="flex flex-col gap-1">
+                    {observed.attempts.map((a) => (
+                      <div
+                        key={`${a.n}:${a.start}`}
+                        className="flex flex-wrap items-baseline gap-x-2.5 gap-y-0.5 rounded-md border border-[var(--fc-line)] bg-[var(--fc-raise)] px-2.5 py-1.5 text-xs"
+                      >
+                        <span className="font-mono tabular-nums text-[var(--fc-ink3)]">
+                          #{a.n}
+                        </span>
+                        <span className="text-[var(--fc-ink2)]">{timeAgo(a.start)}</span>
+                        <span className="font-mono tabular-nums">
+                          {stringifyDurationMs(a.duration_ms)}
+                        </span>
+                        <StateChip
+                          state={a.outcome === "ok" ? "completed" : "archived"}
+                          label={a.outcome}
+                        />
+                        <span className="flex-1" />
+                        <span className="font-mono text-[11px] text-[var(--fc-ink3)]">
+                          {a.worker}
+                        </span>
+                        {a.error && (
+                          <code className="w-full text-[11px] text-[var(--fc-crit)]">
+                            {a.error}
+                          </code>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                  <Stamp className="mt-1.5 block">
+                    recorded by observe middleware — attempts before adoption are not shown
+                  </Stamp>
+                </section>
+              )}
 
               {/* Task fields — every field is a pivot */}
               <section className="mb-5">
