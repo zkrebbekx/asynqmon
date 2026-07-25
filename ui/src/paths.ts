@@ -1,10 +1,14 @@
 export const paths = () => ({
-  HOME: `${window.ROOT_PATH}/`,
+  HOME: `${window.ROOT_PATH}/`, // Fleet landing
+  QUEUES: `${window.ROOT_PATH}/queues`, // Queues Directory
   SETTINGS: `${window.ROOT_PATH}/settings`,
   SERVERS: `${window.ROOT_PATH}/servers`,
   SCHEDULERS: `${window.ROOT_PATH}/schedulers`,
   QUEUE_DETAILS: `${window.ROOT_PATH}/queues/:qname`,
   TASKS: `${window.ROOT_PATH}/tasks`,
+  ERRORS: `${window.ROOT_PATH}/errors`, // Errors — failure-signature explorer (§3.6)
+  OPS: `${window.ROOT_PATH}/ops`, // Operations — bulk jobs + audit (§3.9)
+  HYGIENE: `${window.ROOT_PATH}/hygiene`, // Hygiene — scheduled rot reports (§3.10)
   REDIS: `${window.ROOT_PATH}/redis`,
   TASK_DETAILS: `${window.ROOT_PATH}/queues/:qname/tasks/:taskId`,
   QUEUE_METRICS: `${window.ROOT_PATH}/q/metrics`,
@@ -26,6 +30,27 @@ export function taskDetailsPath(qname: string, taskId: string): string {
   return paths()
     .TASK_DETAILS.replace(":qname", qname)
     .replace(":taskId", taskId);
+}
+
+// attentionFindingPath resolves an attention finding's suggested query to the
+// surface that can answer it (Tasks console or Queues Directory), with the
+// query pre-filled in the URL. The pure mapping lives in lib/fleet.ts.
+import { attentionTarget } from "./lib/fleet";
+
+export function attentionFindingPath(suggestedQuery: string): string {
+  const target = attentionTarget(suggestedQuery);
+  // Queue-state anomalies open the queue's workspace pre-focused on the
+  // anomalous state (§3.3): /queues/<qname>?focus=<state>.
+  if (target.kind === "workspace" && target.queue) {
+    return `${queueDetailsPath(target.queue)}${target.search}`;
+  }
+  const base =
+    target.kind === "tasks"
+      ? paths().TASKS
+      : target.kind === "schedulers"
+        ? paths().SCHEDULERS
+        : paths().QUEUES;
+  return `${base}${target.search}`;
 }
 
 /**************************************************************

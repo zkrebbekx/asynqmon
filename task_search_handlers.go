@@ -11,6 +11,10 @@ import (
 	"time"
 
 	"github.com/hibiken/asynq"
+	"github.com/redis/go-redis/v9"
+
+	"github.com/hibiken/asynqmon/aql"
+	"github.com/hibiken/asynqmon/stats"
 )
 
 // ****************************************************************************
@@ -19,6 +23,15 @@ import (
 //     what client-side filtering can handle (100k+ tasks).
 //
 //   GET /api/tasks?queue=&state=&q=&meta=key:val&meta=...&page=&size=&max_scan=
+//
+// Phase 6 (§3.4, §5.3, §5.9): `q` may now be an AQL query. Clause-shaped
+// strings are parsed, per-state gated, and compiled to either an exact
+// cursor listing (score-cursorable predicates) or a budgeted progressive
+// scan with an explicit resume cursor. Plain free-text `q` values keep the
+// legacy substring semantics untouched. Also:
+//
+//   GET /api/tasks/state_counts?queue=   — all seven per-state counts in one
+//   pipelined pass (fleet-wide = stats cache sums)
 // ****************************************************************************
 
 const (
@@ -76,11 +89,20 @@ type searchTask struct {
 
 type searchTasksResponse struct {
 	Tasks     []*searchTask `json:"tasks"`
-	Total     int           `json:"total"`     // number of matches found (within scan cap)
+	Total     int64         `json:"total"`     // matches found (exact in cursor mode; within budget otherwise)
 	Scanned   int           `json:"scanned"`   // number of tasks examined
-	Truncated bool          `json:"truncated"` // true if the scan cap was hit (more may exist)
+	Truncated bool          `json:"truncated"` // back-compat: true when the scan stopped before completion
 	Page      int           `json:"page"`
 	Size      int           `json:"size"`
+
+	// Phase 6 additions (§3.4, §5.3, §5.9). Zero-valued on the legacy path.
+	Mode              string `json:"mode,omitempty"`  // "cursor" | "scan" | "legacy"
+	Exact             bool   `json:"exact"`           // total is exact (cursor mode)
+	State             string `json:"state,omitempty"` // resolved state
+	Cursor            string `json:"cursor,omitempty"`      // cursor-mode next page ("" = last page)
+	ScanCursor        string `json:"scan_cursor,omitempty"` // scan-mode resume ("" = scan complete)
+	CandidateEstimate int64  `json:"candidate_estimate,omitempty"`
+	Budget            int    `json:"budget,omitempty"` // scan budget applied this call
 }
 
 // metaFilter is a single key=value payload constraint.
@@ -295,9 +317,28 @@ func scanMatchingTasks(
 	return matches, scanned, truncated, nil
 }
 
-func newSearchTasksHandlerFunc(inspector *asynq.Inspector, pf PayloadFormatter) http.HandlerFunc {
+// writeAqlError writes the structured 400 rejection body the console's
+// inline banner renders: {error, position, hint} (frontend contract).
+func writeAqlError(w http.ResponseWriter, perr *aql.ParseError) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(http.StatusBadRequest)
+	json.NewEncoder(w).Encode(perr)
+}
+
+func newSearchTasksHandlerFunc(inspector *asynq.Inspector, rc redis.UniversalClient, statsEngine *stats.Engine, pf PayloadFormatter) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		q := r.URL.Query()
+		search := q.Get("q")
+
+		// AQL path: clause-shaped queries get parse-time state gating,
+		// cursor listings, and budgeted progressive scans. Plain free text
+		// keeps the pre-AQL substring semantics below, so old URLs and old
+		// clients behave identically.
+		if aql.IsQuery(search) {
+			serveAqlSearch(w, r, inspector, rc, statsEngine, pf, search)
+			return
+		}
+
 		state := q.Get("state")
 		if state == "" {
 			state = "pending"
@@ -306,7 +347,6 @@ func newSearchTasksHandlerFunc(inspector *asynq.Inspector, pf PayloadFormatter) 
 			writeErrorMsg(w, http.StatusBadRequest, fmt.Sprintf("invalid state %q", state))
 			return
 		}
-		search := q.Get("q")
 		metaFilters := parseMetaFilters(q["meta"])
 
 		page := atoiDefault(q.Get("page"), 1)
@@ -350,13 +390,292 @@ func newSearchTasksHandlerFunc(inspector *asynq.Inspector, pf PayloadFormatter) 
 
 		writeResponseJSON(w, searchTasksResponse{
 			Tasks:     pageTasks,
-			Total:     total,
+			Total:     int64(total),
 			Scanned:   scanned,
 			Truncated: truncated,
 			Page:      page,
 			Size:      size,
+			Mode:      "legacy",
+			State:     state,
 		})
 	}
+}
+
+// serveAqlSearch handles GET /api/tasks when q is an AQL query: parse →
+// resolve state (explicit clause > legacy state param > inference) →
+// compile → execute as an exact cursor listing or a budgeted scan.
+func serveAqlSearch(w http.ResponseWriter, r *http.Request, inspector *asynq.Inspector, rc redis.UniversalClient, statsEngine *stats.Engine, pf PayloadFormatter, search string) {
+	q := r.URL.Query()
+	now := time.Now()
+
+	parsed, perr := aql.Parse(search)
+	if perr != nil {
+		writeAqlError(w, perr)
+		return
+	}
+	state, perr := parsed.ResolveState(q.Get("state"))
+	if perr != nil {
+		writeAqlError(w, perr)
+		return
+	}
+	plan, perr := aql.Compile(parsed, state, now)
+	if perr != nil {
+		writeAqlError(w, perr)
+		return
+	}
+
+	// Queue precedence: an explicit queue= clause wins; the legacy queue
+	// param is honored otherwise.
+	queueParam := plan.Queue
+	if queueParam == "" {
+		queueParam = q.Get("queue")
+	}
+	queues, err := resolveQueues(inspector, queueParam)
+	if err != nil {
+		writeError(w, errorStatus(err), err)
+		return
+	}
+
+	size := atoiDefault(q.Get("size"), defaultSearchTop)
+	if size < 1 {
+		size = defaultSearchTop
+	}
+	if size > maxPageSize {
+		size = maxPageSize
+	}
+
+	// Legacy meta params are still honored (ANDed); their presence forces a
+	// scan because they need payload decode.
+	metaFilters := parseMetaFilters(q["meta"])
+	var extra func(*searchTask) bool
+	if len(metaFilters) > 0 {
+		extra = func(st *searchTask) bool { return taskMatchesMeta(st.rawPayload, metaFilters) }
+	}
+
+	if plan.Mode == aql.ModeCursor && extra == nil {
+		tasks, total, next, cerr := execCursorPlan(r.Context(), rc, inspector, plan, queues, q.Get("cursor"), size, pf)
+		if cerr != nil {
+			writeError(w, errorStatus(cerr), cerr)
+			return
+		}
+		writeResponseJSON(w, searchTasksResponse{
+			Tasks:   tasks,
+			Total:   total,
+			Scanned: len(tasks),
+			Page:    1,
+			Size:    size,
+			Mode:    "cursor",
+			Exact:   true,
+			State:   state,
+			Cursor:  next,
+		})
+		return
+	}
+
+	// Scan mode: budgeted, resumable.
+	budget := clampMaxScan(atoiDefault(q.Get("max_scan"), defaultMaxScan))
+	env, eerr := prepareRequestEnv(r.Context(), rc, inspector, plan, queues, now)
+	if eerr != nil {
+		writeError(w, errorStatus(eerr), eerr)
+		return
+	}
+	estimate, eerr := estimateCandidates(r.Context(), rc, inspector, statsEngine, state, queues, plan.Group)
+	if eerr != nil {
+		writeError(w, errorStatus(eerr), eerr)
+		return
+	}
+
+	scanCursor := q.Get("scan_cursor")
+	out, serr := execScanPlan(r.Context(), rc, inspector, plan, env, queues, extra, scanCursor, budget, pf)
+	if serr != nil {
+		writeError(w, errorStatus(serr), serr)
+		return
+	}
+
+	// First call (no scan_cursor): legacy in-window pagination over the
+	// matches, so existing paging UI keeps working. Continuation calls
+	// return the new window's matches wholesale — the console appends them.
+	page := atoiDefault(q.Get("page"), 1)
+	if page < 1 || scanCursor != "" {
+		page = 1
+	}
+	matches := out.matches
+	var pageTasks []*searchTask
+	if scanCursor == "" {
+		start := (page - 1) * size
+		if start > len(matches) {
+			start = len(matches)
+		}
+		end := start + size
+		if end > len(matches) {
+			end = len(matches)
+		}
+		pageTasks = matches[start:end]
+	} else {
+		pageTasks = matches
+	}
+	if pageTasks == nil {
+		pageTasks = make([]*searchTask, 0)
+	}
+
+	writeResponseJSON(w, searchTasksResponse{
+		Tasks:             pageTasks,
+		Total:             int64(len(matches)),
+		Scanned:           out.scanned,
+		Truncated:         out.cursor != "", // back-compat flag; the cursor is the real signal
+		Page:              page,
+		Size:              size,
+		Mode:              "scan",
+		State:             state,
+		ScanCursor:        out.cursor,
+		CandidateEstimate: estimate,
+		Budget:            budget,
+	})
+}
+
+// ----------------------------------------------------------------------------
+// GET /api/tasks/state_counts — all seven per-state counts (§3.4 state pills)
+// ----------------------------------------------------------------------------
+
+type stateCountsResponse struct {
+	Queue string `json:"queue"`
+	// Counts has an entry for every state. Aggregating is -1 when the
+	// fleet-wide sum is unknowable from the cache (the snapshot stores group
+	// COUNTS, not member totals) and the fleet is too large to enumerate —
+	// honesty over a guess.
+	Counts      map[string]int64 `json:"counts"`
+	Source      string           `json:"source"` // "cache" | "live"
+	RefreshedAt string           `json:"refreshed_at"`
+}
+
+// aggregatingFleetMaxQueues bounds the fleet-wide aggregating enumeration:
+// beyond this many group-bearing queues the count reports -1 (unknown)
+// instead of an unbounded pass.
+const aggregatingFleetMaxQueues = 100
+
+// stateCountsFleetMaxQueues bounds the live fallback (no stats cache): a
+// fleet larger than this must run the stats engine for fleet-wide pills.
+const stateCountsFleetMaxQueues = 1000
+
+func newStateCountsHandlerFunc(inspector *asynq.Inspector, rc redis.UniversalClient, statsEngine *stats.Engine) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		qname := r.URL.Query().Get("queue")
+		if qname != "" && qname != "all" {
+			counts, err := stateCountsForQueues(r.Context(), rc, inspector, []string{qname})
+			if err != nil {
+				writeError(w, errorStatus(err), err)
+				return
+			}
+			writeResponseJSON(w, stateCountsResponse{
+				Queue: qname, Counts: counts, Source: "live",
+				RefreshedAt: time.Now().Format(time.RFC3339),
+			})
+			return
+		}
+
+		// Fleet-wide: stats cache sums when available (§3.4 "fleet-wide =
+		// cache sums") …
+		if statsEngine != nil {
+			if res, err := statsEngine.Read(r.Context()); err == nil && res != nil && res.Fleet != nil {
+				counts := map[string]int64{
+					"pending":   res.Fleet.Pending,
+					"active":    res.Fleet.Active,
+					"scheduled": res.Fleet.Scheduled,
+					"retry":     res.Fleet.Retry,
+					"archived":  res.Fleet.Archived,
+					"completed": res.Fleet.Completed,
+				}
+				counts["aggregating"] = fleetAggregating(inspector, res.Queues)
+				writeResponseJSON(w, stateCountsResponse{
+					Queue: "all", Counts: counts, Source: "cache",
+					RefreshedAt: res.Fleet.RefreshedAt.Format(time.RFC3339),
+				})
+				return
+			}
+		}
+
+		// … live pipelined fallback otherwise (small fleets / tests).
+		queues, err := inspector.Queues()
+		if err != nil {
+			writeError(w, errorStatus(err), err)
+			return
+		}
+		if len(queues) > stateCountsFleetMaxQueues {
+			writeErrorMsg(w, http.StatusServiceUnavailable,
+				fmt.Sprintf("fleet-wide counts need the stats engine above %d queues", stateCountsFleetMaxQueues))
+			return
+		}
+		sort.Strings(queues)
+		counts, err := stateCountsForQueues(r.Context(), rc, inspector, queues)
+		if err != nil {
+			writeError(w, errorStatus(err), err)
+			return
+		}
+		writeResponseJSON(w, stateCountsResponse{
+			Queue: "all", Counts: counts, Source: "live",
+			RefreshedAt: time.Now().Format(time.RFC3339),
+		})
+	}
+}
+
+// fleetAggregating sums group member counts across the cached queues that
+// report groups, bounded by aggregatingFleetMaxQueues; -1 when unknowable.
+func fleetAggregating(inspector *asynq.Inspector, snaps []*stats.QueueSnapshot) int64 {
+	var withGroups []string
+	for _, s := range snaps {
+		if s.Groups > 0 {
+			withGroups = append(withGroups, s.Queue)
+		}
+	}
+	if len(withGroups) > aggregatingFleetMaxQueues {
+		return -1
+	}
+	total, err := aggregatingCount(inspector, withGroups, "")
+	if err != nil {
+		return -1
+	}
+	return total
+}
+
+// collectAqlMatches runs one budgeted scan of an AQL query for the facet /
+// aggregate / bulk-filtered endpoints, which need the whole match set (not a
+// page). Always a scan — those endpoints decode payloads regardless of the
+// plan's mode. truncated reports whether the budget stopped the scan early.
+func collectAqlMatches(r *http.Request, inspector *asynq.Inspector, rc redis.UniversalClient, pf PayloadFormatter, search, stateParam, queueParam string, metaFilters []metaFilter, budget int) (matches []*searchTask, scanned int, truncated bool, aqlErr *aql.ParseError, err error) {
+	now := time.Now()
+	parsed, perr := aql.Parse(search)
+	if perr != nil {
+		return nil, 0, false, perr, nil
+	}
+	state, perr := parsed.ResolveState(stateParam)
+	if perr != nil {
+		return nil, 0, false, perr, nil
+	}
+	plan, perr := aql.Compile(parsed, state, now)
+	if perr != nil {
+		return nil, 0, false, perr, nil
+	}
+	qParam := plan.Queue
+	if qParam == "" {
+		qParam = queueParam
+	}
+	queues, err := resolveQueues(inspector, qParam)
+	if err != nil {
+		return nil, 0, false, nil, err
+	}
+	env, err := prepareRequestEnv(r.Context(), rc, inspector, plan, queues, now)
+	if err != nil {
+		return nil, 0, false, nil, err
+	}
+	var extra func(*searchTask) bool
+	if len(metaFilters) > 0 {
+		extra = func(st *searchTask) bool { return taskMatchesMeta(st.rawPayload, metaFilters) }
+	}
+	out, err := execScanPlan(r.Context(), rc, inspector, plan, env, queues, extra, "", budget, pf)
+	if err != nil {
+		return nil, 0, false, nil, err
+	}
+	return out.matches, out.scanned, out.cursor != "", nil, nil
 }
 
 type metaFacet struct {
@@ -479,19 +798,12 @@ func aggregateBy(matches []*searchTask, by string, limit int) []aggregateGroup {
 
 // newTaskAggregateHandlerFunc groups the filtered task set by type, error, or
 // queue — powering failure analytics ("top failing types", "top errors").
+// AQL-shaped q values are compiled and scanned like GET /api/tasks (phase 6).
 //
 //	GET /api/task_aggregate?queue=&state=&q=&meta=&by=type|error|queue&max_scan=&limit=
-func newTaskAggregateHandlerFunc(inspector *asynq.Inspector, pf PayloadFormatter) http.HandlerFunc {
+func newTaskAggregateHandlerFunc(inspector *asynq.Inspector, rc redis.UniversalClient, pf PayloadFormatter) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		q := r.URL.Query()
-		state := q.Get("state")
-		if state == "" {
-			state = "retry"
-		}
-		if !searchableStates[state] {
-			writeErrorMsg(w, http.StatusBadRequest, fmt.Sprintf("invalid state %q", state))
-			return
-		}
 		by := q.Get("by")
 		if by == "" {
 			by = "type"
@@ -504,16 +816,40 @@ func newTaskAggregateHandlerFunc(inspector *asynq.Inspector, pf PayloadFormatter
 			limit = defaultFacetLimit
 		}
 
-		queues, err := resolveQueues(inspector, q.Get("queue"))
-		if err != nil {
-			writeError(w, errorStatus(err), err)
-			return
-		}
-
-		matches, scanned, truncated, err := scanMatchingTasks(inspector, queues, state, search, metaFilters, maxScan, pf)
-		if err != nil {
-			writeError(w, errorStatus(err), err)
-			return
+		var matches []*searchTask
+		var scanned int
+		var truncated bool
+		if aql.IsQuery(search) {
+			var aqlErr *aql.ParseError
+			var err error
+			matches, scanned, truncated, aqlErr, err = collectAqlMatches(r, inspector, rc, pf, search, q.Get("state"), q.Get("queue"), metaFilters, maxScan)
+			if aqlErr != nil {
+				writeAqlError(w, aqlErr)
+				return
+			}
+			if err != nil {
+				writeError(w, errorStatus(err), err)
+				return
+			}
+		} else {
+			state := q.Get("state")
+			if state == "" {
+				state = "retry"
+			}
+			if !searchableStates[state] {
+				writeErrorMsg(w, http.StatusBadRequest, fmt.Sprintf("invalid state %q", state))
+				return
+			}
+			queues, err := resolveQueues(inspector, q.Get("queue"))
+			if err != nil {
+				writeError(w, errorStatus(err), err)
+				return
+			}
+			matches, scanned, truncated, err = scanMatchingTasks(inspector, queues, state, search, metaFilters, maxScan, pf)
+			if err != nil {
+				writeError(w, errorStatus(err), err)
+				return
+			}
 		}
 		writeResponseJSON(w, taskAggregateResponse{
 			By:        by,
@@ -527,20 +863,13 @@ func newTaskAggregateHandlerFunc(inspector *asynq.Inspector, pf PayloadFormatter
 
 // newTaskMetadataHandlerFunc returns metadata facets (distinct key=value pairs
 // with counts) across the whole filtered result set, so the UI can offer global
-// drill-down chips rather than ones limited to the current page.
+// drill-down chips rather than ones limited to the current page. AQL-shaped q
+// values are compiled and scanned like GET /api/tasks (phase 6).
 //
 //	GET /api/task_metadata?queue=&state=&q=&meta=key:val&max_scan=&limit=
-func newTaskMetadataHandlerFunc(inspector *asynq.Inspector, pf PayloadFormatter) http.HandlerFunc {
+func newTaskMetadataHandlerFunc(inspector *asynq.Inspector, rc redis.UniversalClient, pf PayloadFormatter) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		q := r.URL.Query()
-		state := q.Get("state")
-		if state == "" {
-			state = "pending"
-		}
-		if !searchableStates[state] {
-			writeErrorMsg(w, http.StatusBadRequest, fmt.Sprintf("invalid state %q", state))
-			return
-		}
 		search := q.Get("q")
 		metaFilters := parseMetaFilters(q["meta"])
 		maxScan := clampMaxScan(atoiDefault(q.Get("max_scan"), defaultMaxScan))
@@ -549,16 +878,40 @@ func newTaskMetadataHandlerFunc(inspector *asynq.Inspector, pf PayloadFormatter)
 			limit = defaultFacetLimit
 		}
 
-		queues, err := resolveQueues(inspector, q.Get("queue"))
-		if err != nil {
-			writeError(w, errorStatus(err), err)
-			return
-		}
-
-		matches, scanned, truncated, err := scanMatchingTasks(inspector, queues, state, search, metaFilters, maxScan, pf)
-		if err != nil {
-			writeError(w, errorStatus(err), err)
-			return
+		var matches []*searchTask
+		var scanned int
+		var truncated bool
+		if aql.IsQuery(search) {
+			var aqlErr *aql.ParseError
+			var err error
+			matches, scanned, truncated, aqlErr, err = collectAqlMatches(r, inspector, rc, pf, search, q.Get("state"), q.Get("queue"), metaFilters, maxScan)
+			if aqlErr != nil {
+				writeAqlError(w, aqlErr)
+				return
+			}
+			if err != nil {
+				writeError(w, errorStatus(err), err)
+				return
+			}
+		} else {
+			state := q.Get("state")
+			if state == "" {
+				state = "pending"
+			}
+			if !searchableStates[state] {
+				writeErrorMsg(w, http.StatusBadRequest, fmt.Sprintf("invalid state %q", state))
+				return
+			}
+			queues, err := resolveQueues(inspector, q.Get("queue"))
+			if err != nil {
+				writeError(w, errorStatus(err), err)
+				return
+			}
+			matches, scanned, truncated, err = scanMatchingTasks(inspector, queues, state, search, metaFilters, maxScan, pf)
+			if err != nil {
+				writeError(w, errorStatus(err), err)
+				return
+			}
 		}
 
 		writeResponseJSON(w, taskMetadataResponse{
@@ -587,10 +940,12 @@ type bulkFilteredResponse struct {
 
 // newBulkFilteredTasksHandlerFunc applies an action to every task matching a
 // queue/state/search/metadata filter (within the scan cap), not just the rows
-// on the current page.
+// on the current page. AQL-shaped q values are compiled and scanned like
+// GET /api/tasks (phase 6). §4.3 note: the jobs API is the first-class bulk
+// primitive; this endpoint remains for selection-sized scopes.
 //
 //	POST /api/tasks:batch_filtered  {queue,state,q,meta,action,max_scan}
-func newBulkFilteredTasksHandlerFunc(inspector *asynq.Inspector, pf PayloadFormatter) http.HandlerFunc {
+func newBulkFilteredTasksHandlerFunc(inspector *asynq.Inspector, rc redis.UniversalClient, pf PayloadFormatter) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodySize)
 		dec := json.NewDecoder(r.Body)
@@ -616,16 +971,32 @@ func newBulkFilteredTasksHandlerFunc(inspector *asynq.Inspector, pf PayloadForma
 		}
 		maxScan := clampMaxScan(req.MaxScan)
 
-		queues, err := resolveQueues(inspector, req.Queue)
-		if err != nil {
-			writeError(w, errorStatus(err), err)
-			return
-		}
-
-		matches, scanned, truncated, err := scanMatchingTasks(inspector, queues, req.State, req.Q, parseMetaFilters(req.Meta), maxScan, pf)
-		if err != nil {
-			writeError(w, errorStatus(err), err)
-			return
+		var matches []*searchTask
+		var scanned int
+		var truncated bool
+		if aql.IsQuery(req.Q) {
+			var aqlErr *aql.ParseError
+			var err error
+			matches, scanned, truncated, aqlErr, err = collectAqlMatches(r, inspector, rc, pf, req.Q, req.State, req.Queue, parseMetaFilters(req.Meta), maxScan)
+			if aqlErr != nil {
+				writeAqlError(w, aqlErr)
+				return
+			}
+			if err != nil {
+				writeError(w, errorStatus(err), err)
+				return
+			}
+		} else {
+			queues, err := resolveQueues(inspector, req.Queue)
+			if err != nil {
+				writeError(w, errorStatus(err), err)
+				return
+			}
+			matches, scanned, truncated, err = scanMatchingTasks(inspector, queues, req.State, req.Q, parseMetaFilters(req.Meta), maxScan, pf)
+			if err != nil {
+				writeError(w, errorStatus(err), err)
+				return
+			}
 		}
 
 		processed, errCount := 0, 0

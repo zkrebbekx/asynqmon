@@ -1,5 +1,4 @@
 import {
-  DAILY_STATS_KEY_CHANGE,
   POLL_INTERVAL_CHANGE,
   POLL_TICK,
   SettingsActionTypes,
@@ -8,7 +7,7 @@ import {
   TOGGLE_DRAWER,
   TOGGLE_POLLING,
 } from "../actions/settingsActions";
-import { defaultPageSize, DailyStatsKey, defaultDailyStatsKey } from "../constants";
+import { defaultPageSize } from "../constants";
 
 export enum ThemePreference {
   SystemDefault,
@@ -29,9 +28,6 @@ export interface SettingsState {
   // Number of tasks displayed in task table.
   taskRowsPerPage: number,
 
-  // Type of the chart displayed for "Processed Tasks" section in dashboard.
-  dailyStatsChartType: DailyStatsKey;
-
   // Whether periodic background refresh (polling) is active.
   pollingActive: boolean;
 
@@ -44,7 +40,6 @@ export const initialState: SettingsState = {
   themePreference: ThemePreference.SystemDefault,
   isDrawerOpen: true,
   taskRowsPerPage: defaultPageSize,
-  dailyStatsChartType: defaultDailyStatsKey,
   pollingActive: true,
   lastUpdatedAt: 0,
 };
@@ -76,12 +71,6 @@ function settingsReducer(
       return {
         ...state,
         taskRowsPerPage: action.value,
-      }
-
-    case DAILY_STATS_KEY_CHANGE:
-      return {
-        ...state,
-        dailyStatsChartType: action.value,
       }
 
     case TOGGLE_POLLING:

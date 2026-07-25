@@ -586,6 +586,11 @@ type workerInfo struct {
 	TaskType    string `json:"task_type"`
 	TaskPayload string `json:"task_payload"`
 	Started     string `json:"start_time"`
+	// Deadline is when the worker must finish the task (asynq's
+	// WorkerInfo.Deadline: start time + timeout, or the task deadline).
+	// RFC3339; empty when unknown. Drives the Workers screen's
+	// elapsed-vs-deadline budget bars (§3.7).
+	Deadline string `json:"deadline"`
 }
 
 func toWorkerInfo(info *asynq.WorkerInfo, pf PayloadFormatter) *workerInfo {
@@ -595,6 +600,7 @@ func toWorkerInfo(info *asynq.WorkerInfo, pf PayloadFormatter) *workerInfo {
 		TaskType:    info.TaskType,
 		TaskPayload: pf.FormatPayload(info.TaskType, info.TaskPayload),
 		Started:     info.Started.Format(time.RFC3339),
+		Deadline:    formatTimeInRFC3339(info.Deadline),
 	}
 }
 

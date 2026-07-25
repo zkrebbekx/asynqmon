@@ -31,6 +31,25 @@ export interface SearchTasksResponse {
   truncated: boolean;
   page: number;
   size: number;
+  // Phase 6 (AQL) additions — absent/zero on the legacy free-text path.
+  mode?: "cursor" | "scan" | "legacy";
+  exact?: boolean; // total is exact (cursor mode)
+  state?: string; // resolved state
+  cursor?: string; // cursor-mode next page ("" / absent = last page)
+  scan_cursor?: string; // scan-mode resume ("" / absent = scan complete)
+  candidate_estimate?: number;
+  budget?: number;
+}
+
+// The structured 400 rejection body for unanswerable AQL:
+// {error, position, hint} — rendered as the console's inline banner.
+export interface StateCountsResponse {
+  queue: string;
+  // counts[state]; aggregating is -1 when unknowable fleet-wide (the UI
+  // renders "—", never a guess).
+  counts: Record<string, number>;
+  source: "cache" | "live";
+  refreshed_at: string;
 }
 
 export interface TaskMetadataResponse {
@@ -96,10 +115,6 @@ export interface ArchiveAllTasksResponse {
 
 export interface RunAllTasksResponse {
   scheduled: number;
-}
-
-export interface ListQueueStatsResponse {
-  stats: { [qname: string]: DailyStat[] };
 }
 
 export interface ListGroupsResponse {
@@ -325,14 +340,6 @@ export interface Queue {
   timestamp: string;
 }
 
-export interface DailyStat {
-  queue: string;
-  date: string;
-  processed: number;
-  succeeded: number;
-  failed: number;
-}
-
 export interface TaskInfo {
   id: string;
   queue: string;
@@ -376,6 +383,9 @@ export interface WorkerInfo {
   task_type: string;
   task_payload: string;
   start_time: string;
+  // RFC3339 deadline the worker must finish by (start + timeout, or the task
+  // deadline); "" when unknown. Drives the Workers screen budget bars (§3.7).
+  deadline: string;
 }
 
 export interface SchedulerEntry {
@@ -408,6 +418,31 @@ export async function listQueues(): Promise<ListQueuesResponse> {
   return resp.data;
 }
 
+// GET /api/queues/:qname — the legacy single-queue snapshot. GetQueueInfo
+// samples MEMORY USAGE server-side, so the Queue Workspace calls this
+// on-demand ("Sample now") rather than on a poll loop; `history` carries the
+// last 10 daily counters (archived-delta note, §3.3).
+export interface DailyStat {
+  queue: string;
+  processed: number;
+  succeeded: number;
+  failed: number;
+  date: string; // "2006-01-02" (UTC)
+}
+
+export interface GetQueueResponse {
+  current: Queue;
+  history: DailyStat[];
+}
+
+export async function getQueue(qname: string): Promise<GetQueueResponse> {
+  const resp = await axios({
+    method: "get",
+    url: `${getBaseUrl()}/queues/${qname}`,
+  });
+  return resp.data;
+}
+
 export async function deleteQueue(qname: string): Promise<void> {
   await axios({
     method: "delete",
@@ -429,14 +464,6 @@ export async function resumeQueue(qname: string): Promise<void> {
   });
 }
 
-export async function listQueueStats(): Promise<ListQueueStatsResponse> {
-  const resp = await axios({
-    method: "get",
-    url: `${getBaseUrl()}/queue_stats`,
-  });
-  return resp.data;
-}
-
 export async function listGroups(qname: string): Promise<ListGroupsResponse> {
   const resp = await axios({
     method: "get",
@@ -448,11 +475,13 @@ export async function listGroups(qname: string): Promise<ListGroupsResponse> {
 export async function searchTasks(params: {
   queue?: string;
   state: string;
-  q?: string;
+  q?: string; // free text OR an AQL query (clause-shaped strings are parsed)
   meta?: string[];
   page?: number;
   size?: number;
   maxScan?: number;
+  cursor?: string; // cursor-mode page cursor
+  scanCursor?: string; // scan-mode resume cursor
 }): Promise<SearchTasksResponse> {
   const usp = new URLSearchParams();
   if (params.queue) usp.set("queue", params.queue);
@@ -462,9 +491,24 @@ export async function searchTasks(params: {
   if (params.page) usp.set("page", String(params.page));
   if (params.size) usp.set("size", String(params.size));
   if (params.maxScan) usp.set("max_scan", String(params.maxScan));
+  if (params.cursor) usp.set("cursor", params.cursor);
+  if (params.scanCursor) usp.set("scan_cursor", params.scanCursor);
   const resp = await axios({
     method: "get",
     url: `${getBaseUrl()}/tasks?${usp.toString()}`,
+  });
+  return resp.data;
+}
+
+// All seven per-state counts in one pipelined pass (state pills, §3.4).
+// Fleet-wide (queue omitted/"all") answers come from the stats cache sums.
+export async function taskStateCounts(queue?: string): Promise<StateCountsResponse> {
+  const usp = new URLSearchParams();
+  if (queue && queue !== "all") usp.set("queue", queue);
+  const qs = usp.toString();
+  const resp = await axios({
+    method: "get",
+    url: `${getBaseUrl()}/tasks/state_counts${qs ? `?${qs}` : ""}`,
   });
   return resp.data;
 }
@@ -546,6 +590,59 @@ export async function getTaskInfo(
   const resp = await axios({
     method: "get",
     url,
+  });
+  return resp.data;
+}
+
+// The flag-gated enqueue capability (§5.10). Field names are a backend
+// contract (enqueue.go enqueueTaskRequest). Absent optional fields fall back
+// to asynq defaults server-side.
+export interface EnqueueTaskRequest {
+  type: string;
+  payload: string;
+  // When true, payload is base64-encoded binary.
+  payload_base64?: boolean;
+  max_retry?: number;
+  timeout_seconds?: number;
+  deadline?: string; // RFC3339
+  retention_seconds?: number;
+  unique_ttl_seconds?: number;
+  // Mutually exclusive scheduling knobs.
+  process_at?: string; // RFC3339
+  process_in_seconds?: number;
+  // Optional free text recorded on the audit entry.
+  reason?: string;
+}
+
+export async function enqueueTask(
+  qname: string,
+  body: EnqueueTaskRequest
+): Promise<TaskInfo> {
+  const resp = await axios({
+    method: "post",
+    url: `${getBaseUrl()}/queues/${qname}/tasks`,
+    data: body,
+  });
+  return resp.data;
+}
+
+// Capability discovery (GET /api/features): which gated features this
+// deployment has on. Deliberately independent of /api/fleet/overview, which
+// 503s while the stats engine is disabled or warming up.
+export interface FeaturesResponse {
+  features: {
+    enqueue: boolean;
+  };
+  // Configured payload keys the task drawer's Flow view recognizes as
+  // correlation ids (§3.5), in priority order. Absent on older backends —
+  // the client falls back to DEFAULT_CORRELATION_KEYS.
+  correlation_keys?: string[];
+}
+
+export async function getFeatures(): Promise<FeaturesResponse> {
+  const resp = await axios({
+    method: "get",
+    url: `${getBaseUrl()}/features`,
   });
   return resp.data;
 }
@@ -1209,6 +1306,180 @@ export async function getMetrics(
   const resp = await axios({
     method: "get",
     url: `${getBaseUrl()}/metrics?${queryString.stringify(params)}`,
+  });
+  return resp.data;
+}
+
+/**************************************************************
+    Bulk jobs + audit (Fleet Console phase 5 — §3.9, §4.3,
+    §5.4, §5.11). Wire shapes are frozen backend contracts
+    (jobs_handlers.go jobJSON / getJobResponse / AuditEntry).
+ **************************************************************/
+
+export type JobVerb = "run" | "archive" | "delete" | "cancel";
+
+export interface JobScope {
+  queue: string;
+  state: string;
+  q: string;
+  meta: string[]; // "key:value" pairs, same wire format as searchTasks
+  aql?: string; // AQL predicate (phase 6) — ANDed with the legacy fields
+}
+
+export interface JobCounts {
+  candidates: number;
+  acted: number;
+  skipped: number;
+  failed: number;
+}
+
+export interface JobInfo {
+  id: string;
+  verb: JobVerb;
+  scope: JobScope;
+  phase: "preview" | "execute";
+  state:
+    | "previewing"
+    | "preview_ready"
+    | "running"
+    | "paused"
+    | "canceled"
+    | "done"
+    | "failed";
+  throttle: number;
+  reason: string;
+  actor: string;
+  counts: JobCounts;
+  cost_class: "cheap" | "list_removal";
+  cost_list_len: number;
+  preview_complete: boolean;
+  proceed_on_partial: boolean;
+  created_at: string;
+  started_at: string;
+  finished_at: string;
+  fence: number;
+  error: string;
+  failures_overflow: number;
+  ctl_pending: string;
+}
+
+export interface JobSampleRow {
+  id: string;
+  queue: string;
+  type: string;
+  payload: string;
+}
+
+export interface JobItemFailure {
+  queue: string;
+  id: string;
+  error: string;
+}
+
+export interface JobDetail extends JobInfo {
+  sample: JobSampleRow[];
+  failures: JobItemFailure[];
+  failures_total: number;
+}
+
+export interface AuditEntry {
+  id: string;
+  event: string;
+  actor: string;
+  verb: string;
+  scope: JobScope;
+  reason: string;
+  job_id: string;
+  preview_count: number;
+  acted: number;
+  skipped: number;
+  failed: number;
+  at: string;
+}
+
+export async function createJob(body: {
+  verb: JobVerb;
+  scope: { queue?: string; state: string; q?: string; meta?: string[]; aql?: string };
+  reason: string;
+  throttle?: number;
+}): Promise<JobInfo> {
+  const resp = await axios({
+    method: "post",
+    url: `${getBaseUrl()}/jobs`,
+    data: body,
+  });
+  return resp.data;
+}
+
+export async function listJobs(limit?: number): Promise<{ jobs: JobInfo[] }> {
+  const usp = new URLSearchParams();
+  if (limit) usp.set("limit", String(limit));
+  const resp = await axios({
+    method: "get",
+    url: `${getBaseUrl()}/jobs?${usp.toString()}`,
+  });
+  return resp.data;
+}
+
+export async function getJob(
+  id: string,
+  failuresOffset?: number,
+  failuresLimit?: number
+): Promise<JobDetail> {
+  const usp = new URLSearchParams();
+  if (failuresOffset) usp.set("failures_offset", String(failuresOffset));
+  if (failuresLimit) usp.set("failures_limit", String(failuresLimit));
+  const resp = await axios({
+    method: "get",
+    url: `${getBaseUrl()}/jobs/${id}?${usp.toString()}`,
+  });
+  return resp.data;
+}
+
+export async function executeJob(
+  id: string,
+  body: { proceed_on_partial?: boolean; throttle?: number; reason?: string }
+): Promise<JobInfo> {
+  const resp = await axios({
+    method: "post",
+    url: `${getBaseUrl()}/jobs/${id}/execute`,
+    data: body,
+  });
+  return resp.data;
+}
+
+export async function cancelJob(id: string): Promise<JobInfo> {
+  const resp = await axios({
+    method: "post",
+    url: `${getBaseUrl()}/jobs/${id}/cancel`,
+  });
+  return resp.data;
+}
+
+export async function pauseJob(id: string): Promise<JobInfo> {
+  const resp = await axios({
+    method: "post",
+    url: `${getBaseUrl()}/jobs/${id}/pause`,
+  });
+  return resp.data;
+}
+
+export async function resumeJob(id: string): Promise<JobInfo> {
+  const resp = await axios({
+    method: "post",
+    url: `${getBaseUrl()}/jobs/${id}/resume`,
+  });
+  return resp.data;
+}
+
+export async function listAudit(
+  limit?: number
+): Promise<{ entries: AuditEntry[] }> {
+  const usp = new URLSearchParams();
+  if (limit) usp.set("limit", String(limit));
+  const resp = await axios({
+    method: "get",
+    url: `${getBaseUrl()}/audit?${usp.toString()}`,
   });
   return resp.data;
 }

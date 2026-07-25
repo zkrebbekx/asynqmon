@@ -3,6 +3,7 @@ import { Trash2, Play, Archive, X, ChevronLeft, ChevronRight, Filter } from "luc
 import { usePolling } from "../hooks";
 import { prettifyPayload } from "../utils";
 import { matchesQuery } from "../lib/filter";
+import { cn } from "../lib/utils";
 import { Input } from "./ui/input";
 import { TaskInfoExtended } from "../reducers/tasksReducer";
 import { TableColumn } from "../types/table";
@@ -48,6 +49,11 @@ interface Props {
   runAllTasks?: (qname: string) => Promise<void>;
   archiveAllTasks?: (qname: string) => Promise<void>;
   cancelAllTasks?: (qname: string) => Promise<void>;
+  // When set, whole-scope verbs route into the §4.3 bulk-job flow (preview →
+  // cost disclosure → throttle/reason → background job) instead of firing
+  // the legacy *_all endpoints directly. Which verbs render is still derived
+  // from the *AllTasks props above, so per-state capability stays intact.
+  onWholeScopeVerb?: (verb: "run" | "archive" | "delete" | "cancel") => void;
   taskRowsPerPageChange: (n: number) => void;
 
   renderRow: (rowProps: RowProps) => ReactElement;
@@ -184,8 +190,50 @@ export default function TasksTable(props: Props) {
         </div>
       )}
 
-      {/* All-tasks action bar */}
-      {props.totalTaskCount > 0 && selectedIds.length === 0 && !window.READ_ONLY && (
+      {/* All-tasks action bar. With onWholeScopeVerb set (Queue Workspace),
+          whole-scope verbs are visually distinct (§4.3: never adjacent to
+          selection verbs) and open the bulk-job modal pre-scoped. */}
+      {props.totalTaskCount > 0 &&
+        selectedIds.length === 0 &&
+        !window.READ_ONLY &&
+        props.onWholeScopeVerb && (
+          <div className="flex flex-wrap items-center gap-2 border-b border-dashed border-[var(--fc-warn)]/50 bg-[var(--fc-warn-bg)]/40 px-4 py-2">
+            <span className="text-xs text-[hsl(var(--muted-foreground))]">
+              Whole scope — all{" "}
+              <span className="font-semibold text-[hsl(var(--foreground))]">
+                {props.totalTaskCount.toLocaleString()}
+              </span>{" "}
+              {props.taskState}, as a background job:
+            </span>
+            {(
+              [
+                { present: !!props.runAllTasks, verb: "run" as const, label: "Run" },
+                { present: !!props.archiveAllTasks, verb: "archive" as const, label: "Archive" },
+                { present: !!props.cancelAllTasks, verb: "cancel" as const, label: "Cancel" },
+                { present: !!props.deleteAllTasks, verb: "delete" as const, label: "Delete" },
+              ] as const
+            )
+              .filter((v) => v.present)
+              .map((v) => (
+                <Button
+                  key={v.verb}
+                  size="sm"
+                  variant={v.verb === "delete" ? "outline" : "ghost"}
+                  className={cn(
+                    "h-7 text-xs",
+                    v.verb === "delete" && "text-red-500 hover:text-red-600"
+                  )}
+                  onClick={() => props.onWholeScopeVerb!(v.verb)}
+                >
+                  {v.label} all…
+                </Button>
+              ))}
+          </div>
+        )}
+      {props.totalTaskCount > 0 &&
+        selectedIds.length === 0 &&
+        !window.READ_ONLY &&
+        !props.onWholeScopeVerb && (
         <div className="flex items-center gap-2 px-4 py-2 border-b border-[hsl(var(--border))]">
           {props.deleteAllTasks && (
             <>

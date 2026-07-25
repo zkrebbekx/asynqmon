@@ -39,6 +39,23 @@ type Config struct {
 	MaxPayloadLength int
 	MaxResultLength  int
 
+	// Fleet stats sweeper configs
+	StatsInterval time.Duration
+	DisableStats  bool
+
+	// Identity & audit configs (Fleet Console §5.11)
+	AuthHeader      string
+	TrustedProxies  string
+	RequireIdentity bool
+
+	// Enqueue capability (Fleet Console §5.10). Default off; always
+	// excluded in read-only mode.
+	EnableEnqueue bool
+
+	// Comma-separated payload keys the task drawer's Flow view recognizes
+	// as correlation ids (Fleet Console §3.5), in priority order.
+	CorrelationKeys string
+
 	// Comma-separated list of origins allowed to make cross-origin requests.
 	// Empty (the default) means same-origin only.
 	CorsAllowedOrigins string
@@ -76,6 +93,13 @@ func parseFlags(progname string, args []string) (cfg *Config, output string, err
 	flags.BoolVar(&conf.EnableMetricsExporter, "enable-metrics-exporter", getEnvOrDefaultBool("ENABLE_METRICS_EXPORTER", false), "enable prometheus metrics exporter to expose queue metrics")
 	flags.StringVar(&conf.PrometheusServerAddr, "prometheus-addr", getEnvDefaultString("PROMETHEUS_ADDR", ""), "address of prometheus server to query time series")
 	flags.BoolVar(&conf.ReadOnly, "read-only", getEnvOrDefaultBool("READ_ONLY", false), "restrict to read-only mode")
+	flags.DurationVar(&conf.StatsInterval, "stats-interval", getEnvOrDefaultDuration("STATS_INTERVAL", 5*time.Second), "interval between fleet stats sweeps (e.g. 5s, 30s)")
+	flags.BoolVar(&conf.DisableStats, "disable-stats", getEnvOrDefaultBool("DISABLE_STATS", false), "disable the background fleet stats sweeper and /api/fleet endpoints")
+	flags.StringVar(&conf.AuthHeader, "auth-header", getEnvDefaultString("AUTH_HEADER", ""), "reverse-proxy header resolved as the acting user for the audit log (e.g. X-Auth-Request-User)")
+	flags.StringVar(&conf.TrustedProxies, "trusted-proxies", getEnvDefaultString("TRUSTED_PROXIES", ""), "comma separated CIDRs the auth header is trusted from (empty: trusted from any peer)")
+	flags.BoolVar(&conf.RequireIdentity, "require-identity", getEnvOrDefaultBool("REQUIRE_IDENTITY", false), "refuse mutating requests that carry no resolvable identity")
+	flags.BoolVar(&conf.EnableEnqueue, "enable-enqueue", getEnvOrDefaultBool("ENABLE_ENQUEUE", false), "enable creating tasks from the web ui (POST /api/queues/{qname}/tasks); always excluded in read-only mode")
+	flags.StringVar(&conf.CorrelationKeys, "correlation-keys", getEnvDefaultString("CORRELATION_KEYS", "trace_id,correlation_id,request_id"), "comma separated list of payload keys the task drawer's Flow view recognizes as correlation ids, in priority order")
 	flags.StringVar(&conf.CorsAllowedOrigins, "cors-allowed-origins", getEnvDefaultString("CORS_ALLOWED_ORIGINS", ""), "comma separated list of origins allowed to make cross-origin requests (default: same-origin only)")
 
 	err = flags.Parse(args)
@@ -152,12 +176,31 @@ func main() {
 		log.Fatal(err)
 	}
 
+	var trustedProxies []string
+	if cfg.TrustedProxies != "" {
+		trustedProxies = strings.Split(cfg.TrustedProxies, ",")
+	}
+
+	// Whitespace and empty entries are normalized (and an all-empty list
+	// falls back to the defaults) inside the asynqmon library.
+	var correlationKeys []string
+	if cfg.CorrelationKeys != "" {
+		correlationKeys = strings.Split(cfg.CorrelationKeys, ",")
+	}
+
 	h := asynqmon.New(asynqmon.Options{
 		RedisConnOpt:      redisConnOpt,
 		PayloadFormatter:  asynqmon.PayloadFormatterFunc(payloadFormatterFunc(cfg)),
 		ResultFormatter:   asynqmon.ResultFormatterFunc(resultFormatterFunc(cfg)),
 		PrometheusAddress: cfg.PrometheusServerAddr,
 		ReadOnly:          cfg.ReadOnly,
+		StatsInterval:     cfg.StatsInterval,
+		StatsDisabled:     cfg.DisableStats,
+		AuthHeader:        cfg.AuthHeader,
+		TrustedProxies:    trustedProxies,
+		RequireIdentity:   cfg.RequireIdentity,
+		EnableEnqueue:     cfg.EnableEnqueue,
+		CorrelationKeys:   correlationKeys,
 	})
 	defer h.Close()
 
@@ -252,6 +295,14 @@ func getEnvOrDefaultInt(key string, def int) int {
 
 func getEnvOrDefaultBool(key string, def bool) bool {
 	v, err := strconv.ParseBool(os.Getenv(key))
+	if err != nil {
+		return def
+	}
+	return v
+}
+
+func getEnvOrDefaultDuration(key string, def time.Duration) time.Duration {
+	v, err := time.ParseDuration(os.Getenv(key))
 	if err != nil {
 		return def
 	}
