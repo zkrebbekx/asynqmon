@@ -142,13 +142,41 @@ describe("formatFindingValue", () => {
 });
 
 describe("attentionTarget (suggested_query → URL wiring)", () => {
-  it("routes task-scoped queries to the Tasks console with the AQL passed through verbatim", () => {
+  it("routes single queue-state anomalies to the Queue Workspace pre-focused on the state (§3.3)", () => {
     const t = attentionTarget("queue=search:reindex state=pending");
+    expect(t.kind).toBe("workspace");
+    expect(t.queue).toBe("search:reindex");
+    expect(new URLSearchParams(t.search).get("focus")).toBe("pending");
+  });
+
+  it("routes detector queries with workspace-representable extras to the workspace", () => {
+    // PENDING_AGE: the age clause is what the Attention tab itself shows.
+    const age = attentionTarget("state=pending queue=media:transcode pending_age>5m");
+    expect(age.kind).toBe("workspace");
+    expect(age.queue).toBe("media:transcode");
+    expect(new URLSearchParams(age.search).get("focus")).toBe("pending");
+
+    // ORPHANS: the bare `orphaned` flag is covered by the active section.
+    const orphans = attentionTarget("state=active queue=media:transcode orphaned");
+    expect(orphans.kind).toBe("workspace");
+    expect(new URLSearchParams(orphans.search).get("focus")).toBe("active");
+
+    // RETRY_STORM: next_run< is the retry section's own sort.
+    const storm = attentionTarget("state=retry queue=media:transcode next_run<5m");
+    expect(storm.kind).toBe("workspace");
+    expect(new URLSearchParams(storm.search).get("focus")).toBe("retry");
+
+    // GROUP_STALL: group= names a section of the aggregating state.
+    const stall = attentionTarget("state=aggregating queue=media:transcode group=g1");
+    expect(stall.kind).toBe("workspace");
+    expect(new URLSearchParams(stall.search).get("focus")).toBe("aggregating");
+  });
+
+  it("keeps state-only (fleet-wide) queries on the Tasks console verbatim", () => {
+    const t = attentionTarget("state=pending pending_age>5m");
     expect(t.kind).toBe("tasks");
     const params = new URLSearchParams(t.search);
-    // Phase 6: the whole suggested query IS the console query — no clause
-    // mapping, no separate queue/state params.
-    expect(params.get("q")).toBe("queue=search:reindex state=pending");
+    expect(params.get("q")).toBe("state=pending pending_age>5m");
     expect(params.get("queue")).toBeNull();
     expect(params.get("state")).toBeNull();
   });

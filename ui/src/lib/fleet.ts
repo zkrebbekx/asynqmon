@@ -9,6 +9,7 @@ import {
   serializeDirectoryState,
   DEFAULT_DIRECTORY_STATE,
 } from "./urlstate";
+import { FOCUS_STATES } from "./workspace";
 
 /**************************************************************
                         Ages & staleness
@@ -108,13 +109,18 @@ export function formatErrorRate(rate: number | undefined | null): string {
 
 // A finding's suggested_query is a space-separated clause list written by the
 // attention engine, e.g. "queue=search:reindex state=pending" or
-// "consumers=0 pending>0". Since phase 6 the console speaks AQL, so:
+// "consumers=0 pending>1000". Since phase 6 the console speaks AQL, so:
 //
-//   - clauses with a `state=` (task-scoped) → the Tasks console with the
-//     query passed through VERBATIM as `q=` — the backend's suggested_query
-//     strings are AQL-shaped, and the console's parser owns validation (its
-//     rejection banner explains anything unanswerable). No clause is ever
-//     dropped;
+//   - queries that name a SINGLE queue-state anomaly (`queue=X state=Y`,
+//     optionally with the workspace-representable extras `pending_age>`,
+//     `next_run<`, `group=` and the bare flags) → the Queue Workspace
+//     (`/queues/X?focus=Y`) landing on the Attention tab pre-focused on the
+//     state the finding named (§3.3 "open in workspace pre-focused");
+//   - other clauses with a `state=` (task-scoped) → the Tasks console with
+//     the query passed through VERBATIM as `q=` — the console's parser owns
+//     validation (its rejection banner explains anything unanswerable). A
+//     query carrying clauses the workspace cannot represent (`error~`,
+//     `type=`, meta.*) always goes here so no clause is ever dropped;
 //   - everything else (queue-set predicates) → the Queues Directory with the
 //     query passed through verbatim as `f=` (the phase-2 endpoint owns it).
 //
@@ -122,8 +128,10 @@ export function formatErrorRate(rate: number | undefined | null): string {
 // window.ROOT_PATH via paths().
 
 export interface AttentionTarget {
-  kind: "tasks" | "queues" | "schedulers";
+  kind: "tasks" | "queues" | "schedulers" | "workspace";
   search: string; // "" or "?..." ready to append to the path
+  // The queue whose workspace to open (kind === "workspace" only).
+  queue?: string;
 }
 
 interface Clause {
@@ -165,6 +173,32 @@ export function attentionTarget(suggestedQuery: string): AttentionTarget {
 
   const clauses = parseClauses(raw);
   const stateClause = clauses.find((c) => c.key === "state" && c.op === "=");
+
+  // Queue-state anomaly → Queue Workspace pre-focused on the state (§3.3).
+  // Only when every clause is representable there: the queue, the state, and
+  // extras the Attention tab itself renders (ages, next-fire, group). Bare
+  // flags (`orphaned`, `past_due`) carry no key=value shape and are covered
+  // by the focused state's section. Anything else (error~, type=, meta.*)
+  // must keep the console's full query — no clause is ever dropped.
+  if (stateClause) {
+    const queueClauses = clauses.filter((c) => c.key === "queue" && c.op === "=");
+    const extras = clauses.filter((c) => c.key !== "queue" && c.key !== "state");
+    const representable = new Set(["pending_age", "next_run", "group"]);
+    if (
+      queueClauses.length === 1 &&
+      queueClauses[0].value !== "" &&
+      (FOCUS_STATES as readonly string[]).includes(stateClause.value) &&
+      extras.every((c) => representable.has(c.key))
+    ) {
+      const params = new URLSearchParams();
+      params.set("focus", stateClause.value);
+      return {
+        kind: "workspace",
+        queue: queueClauses[0].value,
+        search: `?${params.toString()}`,
+      };
+    }
+  }
 
   if (stateClause) {
     // Task-scoped: the whole AQL expression passes through verbatim as the

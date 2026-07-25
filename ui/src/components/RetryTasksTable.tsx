@@ -19,7 +19,12 @@ import SyntaxHighlighter from "./SyntaxHighlighter";
 import DeleteConfirmButton from "./DeleteConfirmButton";
 import { clickableRowClass, clickableRowProps } from "../lib/utils";
 
-interface Props { queue: string; totalTaskCount: number }
+interface Props {
+  queue: string;
+  totalTaskCount: number;
+  // Routes whole-scope verbs into the §4.3 bulk-job flow (Queue Workspace).
+  onWholeScopeVerb?: (verb: "run" | "archive" | "delete" | "cancel") => void;
+}
 
 const columns = [
   { key: "id", label: "ID", align: "left" as const },
@@ -77,7 +82,7 @@ function Row({ task, isSelected, onSelectChange }: RowProps) {
   );
 }
 
-export default function RetryTasksTable({ queue, totalTaskCount }: Props) {
+export default function RetryTasksTable({ queue, totalTaskCount, onWholeScopeVerb }: Props) {
   const dispatch = useAppDispatch();
   const { loading, error, data: tasks, batchActionPending, allActionPending } = useSelector((s: AppState) => s.tasks.retryTasks);
   const pollInterval = useSelector((s: AppState) => s.settings.pollInterval);
@@ -85,6 +90,7 @@ export default function RetryTasksTable({ queue, totalTaskCount }: Props) {
   return (
     <TasksTable
       queue={queue} totalTaskCount={totalTaskCount} taskState="retry"
+      onWholeScopeVerb={onWholeScopeVerb}
       loading={loading} error={error} tasks={tasks}
       batchActionPending={batchActionPending} allActionPending={allActionPending}
       pollInterval={pollInterval} pageSize={pageSize} columns={columns}

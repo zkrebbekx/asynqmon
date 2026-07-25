@@ -418,6 +418,31 @@ export async function listQueues(): Promise<ListQueuesResponse> {
   return resp.data;
 }
 
+// GET /api/queues/:qname — the legacy single-queue snapshot. GetQueueInfo
+// samples MEMORY USAGE server-side, so the Queue Workspace calls this
+// on-demand ("Sample now") rather than on a poll loop; `history` carries the
+// last 10 daily counters (archived-delta note, §3.3).
+export interface DailyStat {
+  queue: string;
+  processed: number;
+  succeeded: number;
+  failed: number;
+  date: string; // "2006-01-02" (UTC)
+}
+
+export interface GetQueueResponse {
+  current: Queue;
+  history: DailyStat[];
+}
+
+export async function getQueue(qname: string): Promise<GetQueueResponse> {
+  const resp = await axios({
+    method: "get",
+    url: `${getBaseUrl()}/queues/${qname}`,
+  });
+  return resp.data;
+}
+
 export async function deleteQueue(qname: string): Promise<void> {
   await axios({
     method: "delete",

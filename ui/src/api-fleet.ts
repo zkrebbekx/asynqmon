@@ -278,6 +278,68 @@ export async function getSchedulerOutcomes(
 }
 
 /**************************************************************
+        GET /api/queues/:qname/retry_histogram (§3.3(c))
+ **************************************************************/
+
+// Retry-ETA histogram — "when does the storm land". EXACT: pipelined ZCOUNT
+// windows over the retry zset's next_process_at scores, never a sample.
+export interface RetryHistogramResponse {
+  queue: string;
+  from: string; // RFC3339; bucket i covers [from + i*w, from + (i+1)*w)
+  bucket_seconds: number;
+  past_due: number; // next_process_at already behind now
+  buckets: number[];
+  beyond: number; // fires after the last bucket's end
+  total: number;
+  exact: boolean;
+}
+
+export async function getRetryHistogram(
+  qname: string,
+  opts?: { window?: number; buckets?: number }
+): Promise<RetryHistogramResponse> {
+  const usp = new URLSearchParams();
+  if (opts?.window) usp.set("window", String(opts.window));
+  if (opts?.buckets) usp.set("buckets", String(opts.buckets));
+  const qs = usp.toString();
+  const resp = await axios({
+    method: "get",
+    url: `${getBaseUrl()}/queues/${qname}/retry_histogram${qs ? `?${qs}` : ""}`,
+  });
+  return resp.data;
+}
+
+/**************************************************************
+      GET /api/queues/:qname/pending_wait_sample (§3.3(c))
+ **************************************************************/
+
+// Pending-wait sample — NOT uniform and labeled so: pending is a Redis LIST
+// (LINDEX is O(index) per probe), so probes come from the head/tail bands and
+// `method` carries the "sampled, head/tail-biased" caption verbatim.
+export interface PendingWaitSampleResponse {
+  queue: string;
+  list_len: number;
+  head_probes: number;
+  tail_probes: number;
+  sampled: number;
+  waits_ms: number[];
+  method: string; // "sampled, head/tail-biased" — render verbatim
+  sampled_at: string; // RFC3339
+}
+
+export async function getPendingWaitSample(
+  qname: string,
+  probes?: number
+): Promise<PendingWaitSampleResponse> {
+  const qs = probes ? `?probes=${probes}` : "";
+  const resp = await axios({
+    method: "get",
+    url: `${getBaseUrl()}/queues/${qname}/pending_wait_sample${qs}`,
+  });
+  return resp.data;
+}
+
+/**************************************************************
                     SSE GET /api/fleet/events
  **************************************************************/
 

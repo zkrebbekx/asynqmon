@@ -6,6 +6,7 @@ export const paths = () => ({
   SCHEDULERS: `${window.ROOT_PATH}/schedulers`,
   QUEUE_DETAILS: `${window.ROOT_PATH}/queues/:qname`,
   TASKS: `${window.ROOT_PATH}/tasks`,
+  ERRORS: `${window.ROOT_PATH}/errors`, // Errors — failure-signature explorer (§3.6)
   OPS: `${window.ROOT_PATH}/ops`, // Operations — bulk jobs + audit (§3.9)
   REDIS: `${window.ROOT_PATH}/redis`,
   TASK_DETAILS: `${window.ROOT_PATH}/queues/:qname/tasks/:taskId`,
@@ -37,6 +38,11 @@ import { attentionTarget } from "./lib/fleet";
 
 export function attentionFindingPath(suggestedQuery: string): string {
   const target = attentionTarget(suggestedQuery);
+  // Queue-state anomalies open the queue's workspace pre-focused on the
+  // anomalous state (§3.3): /queues/<qname>?focus=<state>.
+  if (target.kind === "workspace" && target.queue) {
+    return `${queueDetailsPath(target.queue)}${target.search}`;
+  }
   const base =
     target.kind === "tasks"
       ? paths().TASKS
