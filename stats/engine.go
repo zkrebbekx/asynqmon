@@ -313,6 +313,22 @@ func NewEngine(cfg Config) *Engine {
 	if logf == nil {
 		logf = log.Printf
 	}
+	// Auxiliary-spend caps for tiers 2-3, carved from the §5.1 auxiliary
+	// budget reserve (rotation.go). The series cap is in flush OPERATIONS
+	// (each ~2 SETRANGE commands), so aux/4 ops spends about half the
+	// reserve; the baseline cap is in commands, a quarter of the reserve per
+	// loader. The remainder absorbs the fixed per-sweep overhead and the
+	// bounded GROUP_STALL reads. Floors keep tiny test budgets functional;
+	// tier 1 ignores both caps.
+	_, auxBudget, _ := tickCommandBudgets(cfg.CommandBudget, cfg.Interval)
+	seriesFlushCap := auxBudget / 4
+	if seriesFlushCap < 8 {
+		seriesFlushCap = 8
+	}
+	baselineCmdCap := auxBudget / 4
+	if baselineCmdCap < 4*failBaselineDays {
+		baselineCmdCap = 4 * failBaselineDays
+	}
 	return &Engine{
 		cfg:  cfg,
 		rc:   cfg.RedisClient,
@@ -332,8 +348,8 @@ func NewEngine(cfg Config) *Engine {
 			depthAnomalyRatio:   cfg.DepthAnomalyRatio,
 			depthAnomalyMin:     cfg.DepthAnomalyMin,
 		}),
-		series: newSeriesSampler(cfg.RedisClient, cfg.SeriesQueueCeiling),
-		base:   newBaselineRefresher(cfg.RedisClient),
+		series: newSeriesSampler(cfg.RedisClient, cfg.SeriesQueueCeiling, seriesFlushCap),
+		base:   newBaselineRefresher(cfg.RedisClient, baselineCmdCap),
 		fence:  newSweeperFence(cfg.RedisClient),
 		subs:   make(map[chan struct{}]struct{}),
 	}
@@ -763,8 +779,9 @@ func (e *Engine) sweep(ctx context.Context) error {
 
 	// Phase-10 detector baselines (baseline.go): cadenced reads — 7-day
 	// fail counters daily, rollup depth rings hourly, consumer-window seed
-	// once per holder. Steady-state per-sweep cost is zero reads.
-	baseReads, err := e.base.refresh(ctx, now, merged)
+	// once per holder. Steady-state per-sweep cost is zero reads; tiers 2-3
+	// cap each sweep's baseline spend against the auxiliary budget reserve.
+	baseReads, err := e.base.refresh(ctx, now, merged, plan.tier)
 	reads += baseReads
 	if err != nil {
 		return fmt.Errorf("refreshing detector baselines: %w", err)

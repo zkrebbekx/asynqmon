@@ -61,7 +61,7 @@ func TestHotSetSelection(t *testing.T) {
 		}
 
 		Convey("When selecting with K=3", func() {
-			hot := hotSet(universe, prev, []string{"q07"}, []string{"q09"}, 3)
+			hot := hotSet(universe, prev, []string{"q07"}, []string{"q09"}, 3, 0)
 
 			Convey("Then it is attention ∪ viewed ∪ top-K by score, sorted", func() {
 				So(hot, ShouldResemble, []string{"q00", "q01", "q02", "q07", "q09"})
@@ -69,14 +69,14 @@ func TestHotSetSelection(t *testing.T) {
 		})
 
 		Convey("When attention/viewed name queues outside the universe", func() {
-			hot := hotSet(universe, prev, []string{"ghost"}, []string{"gone"}, 2)
+			hot := hotSet(universe, prev, []string{"ghost"}, []string{"gone"}, 2, 0)
 			Convey("Then they are ignored (never sweep deleted queues)", func() {
 				So(hot, ShouldResemble, []string{"q00", "q01"})
 			})
 		})
 
 		Convey("When K exceeds the observed population", func() {
-			hot := hotSet(universe, prev, nil, nil, 50)
+			hot := hotSet(universe, prev, nil, nil, 50, 0)
 			Convey("Then every observed queue is hot", func() {
 				So(hot, ShouldHaveLength, 10)
 			})
@@ -89,9 +89,29 @@ func TestHotSetSelection(t *testing.T) {
 				"c": {Queue: "c", Pending: 5},
 			}
 			uni := map[string]bool{"a": true, "b": true, "c": true}
-			hot := hotSet(uni, tied, nil, nil, 2)
+			hot := hotSet(uni, tied, nil, nil, 2, 0)
 			Convey("Then the tie-break is deterministic (name ascending)", func() {
 				So(hot, ShouldResemble, []string{"a", "b"})
+			})
+		})
+
+		Convey("When a mass incident flags more queues than the ceiling", func() {
+			// Every queue attention-flagged; ceiling 4 (docs/SCALE.md: a
+			// fleet-wide NO_CONSUMERS event must not starve the rotation).
+			attention := []string{"q05", "q06", "q07", "q08", "q09", "q00", "q01", "q02", "q03", "q04"}
+			hot := hotSet(universe, prev, attention, []string{"q09"}, 3, 4)
+
+			Convey("Then viewed joins first, attention fills in report order, scored gets the rest", func() {
+				So(hot, ShouldHaveLength, 4)
+				So(hot, ShouldResemble, []string{"q05", "q06", "q07", "q09"})
+			})
+		})
+
+		Convey("When the ceiling leaves room after viewed and attention", func() {
+			hot := hotSet(universe, prev, []string{"q07"}, []string{"q09"}, 3, 4)
+			Convey("Then the top-scored queues fill the remaining room", func() {
+				// viewed q09 + attention q07 + scored q00, q01 (room for 2 of K=3).
+				So(hot, ShouldResemble, []string{"q00", "q01", "q07", "q09"})
 			})
 		})
 	})
@@ -126,28 +146,30 @@ func TestPlanSweepTier1(t *testing.T) {
 func TestPlanSweepBudgetMath(t *testing.T) {
 	Convey("Given a tier-2 fleet of 100 queues under a tiny budget", t, func() {
 		names, prev := planQueues(100)
-		// Budget 64 cmds/sec × 5s = 320 cmds/tick. Hot set: K=4 → 4×16 = 64
-		// cmds, leaving 256/16 = 16 cold slots per tick.
+		// Budget 64 cmds/sec × 5s = 320 cmds/tick; the 25% auxiliary reserve
+		// leaves 240 for refreshes at the full 18-command tick cost (16-read
+		// hot read + 2-command cache publish). Hot set: K=4 → 4×18 = 72,
+		// leaving (240-72)/18 = 9 cold slots per tick.
 		interval := 5 * time.Second
 		plan := planSweep(2, names, prev, nil, nil, 0, 64, interval, 4)
 
-		Convey("Then the shard math spends at most budget×interval commands", func() {
+		Convey("Then the shard math spends at most the refresh budget", func() {
 			So(plan.full, ShouldBeFalse)
 			So(len(plan.hot), ShouldEqual, 4)
-			So(len(plan.cold), ShouldEqual, 16)
-			spend := (len(plan.hot) + len(plan.cold)) * perQueueSweepCost
-			So(spend, ShouldBeLessThanOrEqualTo, 64*5)
+			So(len(plan.cold), ShouldEqual, 9)
+			spend := (len(plan.hot) + len(plan.cold)) * perQueueTickCost
+			So(spend, ShouldBeLessThanOrEqualTo, 64*5*3/4)
 		})
 
 		Convey("Then the full-rotation estimate covers the cold set", func() {
-			// 96 cold queues at 16/tick = 6 ticks × 5s = 30s.
-			So(plan.fullRotationEstSec, ShouldEqual, 30)
+			// 96 cold queues at 9/tick = 11 ticks × 5s = 55s.
+			So(plan.fullRotationEstSec, ShouldEqual, 55)
 		})
 
 		Convey("When ticks advance the cursor", func() {
 			seen := map[string]int{}
 			cursor := 0
-			ticks := 6 // = ceil(96/16): one full rotation
+			ticks := 11 // = ceil(96/9): one full rotation
 			for i := 0; i < ticks; i++ {
 				p := planSweep(2, names, prev, nil, nil, cursor, 64, interval, 4)
 				cursor = p.cursor
@@ -198,8 +220,10 @@ func TestPlanSweepUnseenFirst(t *testing.T) {
 		for i := 45; i < 50; i++ {
 			delete(prev, fmt.Sprintf("q%03d", i))
 		}
-		// Budget for exactly 8 refreshes per tick, no hot set.
-		plan := planSweep(2, names, prev, nil, nil, 0, 8*perQueueSweepCost/5, 5*time.Second, 1)
+		// Budget 34 cmds/sec × 5s = 170/tick; aux reserve 42 leaves 128:
+		// 1 hot (K=1) + 6 cold slots at the 18-command tick cost — room for
+		// all 5 unseen queues plus one rotated seen queue.
+		plan := planSweep(2, names, prev, nil, nil, 0, 34, 5*time.Second, 1)
 
 		Convey("Then never-observed queues fill the shard first", func() {
 			So(len(plan.cold), ShouldBeGreaterThanOrEqualTo, 5)
@@ -210,6 +234,85 @@ func TestPlanSweepUnseenFirst(t *testing.T) {
 			for i := 45; i < 50; i++ {
 				So(coldSet[fmt.Sprintf("q%03d", i)], ShouldBeTrue)
 			}
+		})
+	})
+}
+
+func TestTickCommandBudgets(t *testing.T) {
+	Convey("Given the per-tick budget split", t, func() {
+		Convey("Then 25% is reserved for auxiliary spend", func() {
+			perTick, aux, refresh := tickCommandBudgets(2000, time.Second)
+			So(perTick, ShouldEqual, 2000)
+			So(aux, ShouldEqual, 500)
+			So(refresh, ShouldEqual, 1500)
+		})
+		Convey("Then the interval scales the tick allowance", func() {
+			perTick, aux, refresh := tickCommandBudgets(2000, 5*time.Second)
+			So(perTick, ShouldEqual, 10000)
+			So(aux, ShouldEqual, 2500)
+			So(refresh, ShouldEqual, 7500)
+		})
+		Convey("Then a non-positive budget falls back to the default", func() {
+			perTick, _, _ := tickCommandBudgets(0, time.Second)
+			So(perTick, ShouldEqual, DefaultCommandBudget)
+		})
+	})
+}
+
+// TestPlanSweepDefaultHotKBudgetClamp is the scale-validation regression
+// (docs/SCALE.md): with the tier default K=500 and a 2,000 cmd/s budget at a
+// 1s interval, the unclamped hot set alone would spend 500×16 = 8,000
+// commands per 2,000-command tick — 4× over budget, every tick. The DEFAULT
+// K must be clamped so the scored hot set fits in half the refresh budget;
+// an EXPLICIT operator K keeps the documented visible-overrun behavior.
+func TestPlanSweepDefaultHotKBudgetClamp(t *testing.T) {
+	Convey("Given a tier-2 fleet whose default hot set would out-spend the budget", t, func() {
+		names, prev := planQueues(600)
+		interval := time.Second
+
+		Convey("When planning with the DEFAULT hot-set K (HotSetK=0)", func() {
+			plan := planSweep(2, names, prev, nil, nil, 0, 2000, interval, 0)
+
+			Convey("Then the scored hot set is clamped to half the refresh budget", func() {
+				// budget 2000 × 1s = 2000/tick; refresh budget 1500; half of
+				// it at cost 18 = 41 queues — not the tier default of 500.
+				So(len(plan.hot), ShouldEqual, 41)
+				So(len(plan.hot), ShouldBeLessThan, defaultHotSetKTier2)
+			})
+			Convey("Then hot + cold spend stays inside the refresh budget", func() {
+				spend := (len(plan.hot) + len(plan.cold)) * perQueueTickCost
+				So(spend, ShouldBeLessThanOrEqualTo, 1500)
+				So(plan.full, ShouldBeFalse)
+			})
+		})
+
+		Convey("When planning with an EXPLICIT operator K larger than the budget", func() {
+			plan := planSweep(2, names, prev, nil, nil, 0, 2000, interval, 500)
+
+			Convey("Then the explicit K is honored verbatim — the documented visible overrun", func() {
+				So(len(plan.hot), ShouldEqual, 500)
+			})
+			Convey("And the cold rotation keeps its minimum quantum", func() {
+				So(len(plan.cold), ShouldEqual, 1)
+			})
+		})
+
+		Convey("When attention and viewed queues fall outside the clamped top-K", func() {
+			// All-zero scores tie-break by name: the clamped top-41 is
+			// q000..q040, so these can only be hot via attention/viewed.
+			attention := []string{"q500", "q555"}
+			viewed := []string{"q599"}
+			plan := planSweep(2, names, prev, attention, viewed, 0, 2000, interval, 0)
+
+			Convey("Then they still join the hot set on top of the clamped K", func() {
+				hotLookup := map[string]bool{}
+				for _, q := range plan.hot {
+					hotLookup[q] = true
+				}
+				for _, q := range append(attention, viewed...) {
+					So(hotLookup[q], ShouldBeTrue)
+				}
+			})
 		})
 	})
 }

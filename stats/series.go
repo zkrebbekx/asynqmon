@@ -74,11 +74,11 @@ const (
 
 	// seriesSentinel is the no-sample slot value (normative). Real values are
 	// clamped to [0, 0xFFFFFFFE] so a sample can never alias the sentinel.
-	seriesSentinel  = uint32(0xFFFFFFFF)
-	seriesMaxValue  = int64(0xFFFFFFFE)
-	seriesMagic0    = byte('A')
-	seriesMagic1    = byte('S')
-	seriesVersion   = byte(0x01)
+	seriesSentinel = uint32(0xFFFFFFFF)
+	seriesMaxValue = int64(0xFFFFFFFE)
+	seriesMagic0   = byte('A')
+	seriesMagic1   = byte('S')
+	seriesVersion  = byte(0x01)
 
 	// defaultSeriesQueueCeiling is the §5.8 HARD safety ceiling on per-queue
 	// series. Phase 12 removed the old 2,000-queue cliff: per-queue sampling
@@ -407,30 +407,43 @@ type seriesSample struct {
 
 // flushOp is one completed slot ready to be written.
 type flushOp struct {
-	key   string
-	spec  ringSpec
+	key    string
+	spec   ringSpec
 	period int64
-	value uint32
+	value  uint32
 }
 
 type seriesSampler struct {
 	rc           redis.UniversalClient
 	queueCeiling int
 
-	acc     map[string]*slotAcc     // redis key → accumulator
-	headers map[string]seriesHeader // redis key → last known persisted header
-	ttlAt   map[string]time.Time    // redis key → when TTL was last set
-	prev    map[string]counterPrev  // qname → previous daily counters
-	sinceSet bool                   // asynqmon:series:since SETNX done
+	// flushCap bounds how many flush OPERATIONS (each ~2 SETRANGE commands)
+	// one sample() call may issue in tiers 2-3 (derived from the §5.1
+	// auxiliary budget reserve by NewEngine; 0 = unlimited). Every hot-ring
+	// key crosses its 30s slot boundary on the same tick, so without the cap
+	// the flush load arrives as a single burst of ~2×keys commands — scale
+	// validation (docs/SCALE.md) measured boundary ticks at ~1.6× the
+	// command budget. Excess flushes queue in pending and drain over the
+	// following ticks. Tier 1 is uncapped (the budget does not govern
+	// tier 1).
+	flushCap int
+	pending  []flushOp // FIFO of completed slots awaiting their write turn
+
+	acc      map[string]*slotAcc     // redis key → accumulator
+	headers  map[string]seriesHeader // redis key → last known persisted header
+	ttlAt    map[string]time.Time    // redis key → when TTL was last set
+	prev     map[string]counterPrev  // qname → previous daily counters
+	sinceSet bool                    // asynqmon:series:since SETNX done
 }
 
-func newSeriesSampler(rc redis.UniversalClient, queueCeiling int) *seriesSampler {
+func newSeriesSampler(rc redis.UniversalClient, queueCeiling, flushCap int) *seriesSampler {
 	if queueCeiling <= 0 {
 		queueCeiling = defaultSeriesQueueCeiling
 	}
 	return &seriesSampler{
 		rc:           rc,
 		queueCeiling: queueCeiling,
+		flushCap:     flushCap,
 		acc:          make(map[string]*slotAcc),
 		headers:      make(map[string]seriesHeader),
 		ttlAt:        make(map[string]time.Time),
@@ -633,16 +646,52 @@ func (s *seriesSampler) sample(ctx context.Context, now time.Time, snaps map[str
 		flushes = append(flushes, flushOp{key: key, spec: a.spec, period: a.period, value: clampSeriesValue(a.value)})
 		delete(s.acc, key)
 	}
-	if len(flushes) == 0 {
+	sort.Slice(flushes, func(i, j int) bool { return flushes[i].key < flushes[j].key })
+	s.pending = append(s.pending, flushes...)
+	if len(s.pending) == 0 {
 		return reads, writes, nil
 	}
-	sort.Slice(flushes, func(i, j int) bool { return flushes[i].key < flushes[j].key })
+
+	// Drain the flush queue. Tiers 2-3 drain at a FLAT flushCap per tick
+	// (auxiliary budget reserve). The cap must be flat — not scaled to the
+	// backlog — because of the hourly cold-rollup hump measured by scale
+	// validation (docs/SCALE.md): at every UTC hour boundary every cold
+	// queue's rollup accumulator period advances, so each queue's next
+	// rotation visit flushes its previous-hour slots. At 5,000 queues that
+	// is a sustained ~250 flush-ops/tick inflow for one full rotation every
+	// hour; a backlog-proportional drain simply matched that inflow and
+	// spent ~1.4× the tick budget. Under the flat cap the backlog absorbs
+	// the hump (peak ≈ 7 × fleet ops) and clears long before the next hour
+	// (drain capacity per hour far exceeds total hourly inflow at any
+	// interval ≤ ~10s). A delayed flush only means a completed slot appears
+	// in Redis late; readers already treat unflushed slots as no-sample.
+	// Order is FIFO, so per-key period order is preserved and the
+	// regression guard below stays correct.
+	//
+	// Memory-relief valve: at pathological intervals (≳15s, where every
+	// tick crosses a hot-slot boundary) inflow can exceed the flat cap
+	// forever. Past a generous backlog ceiling the excess drains
+	// immediately — at those intervals the per-tick budget is huge, so the
+	// extra spend still fits the budget envelope.
+	drain := len(s.pending)
+	if tick.tier > 1 && s.flushCap > 0 && drain > s.flushCap {
+		drain = s.flushCap
+		valve := 8 * s.flushCap
+		if v := 8 * tick.fleetSize; v > valve {
+			valve = v
+		}
+		if excess := len(s.pending) - valve; excess > drain {
+			drain = excess
+		}
+	}
+	batch := s.pending[:drain]
+	s.pending = append(make([]flushOp, 0, len(s.pending)-drain), s.pending[drain:]...)
 
 	// Probe persisted headers for keys we have not seen this holder session:
 	// the init-vs-update decision and the FIRST period must reflect what a
 	// previous holder already wrote.
 	var probes []string
-	for _, f := range flushes {
+	for _, f := range batch {
 		if _, known := s.headers[f.key]; !known {
 			probes = append(probes, f.key)
 		}
@@ -664,7 +713,7 @@ func (s *seriesSampler) sample(ctx context.Context, now time.Time, snaps map[str
 	}
 
 	pipe := s.rc.Pipeline()
-	for _, f := range flushes {
+	for _, f := range batch {
 		h := s.headers[f.key]
 		switch {
 		case !h.ok:
@@ -698,7 +747,7 @@ func (s *seriesSampler) sample(ctx context.Context, now time.Time, snaps map[str
 	if _, err := pipe.Exec(ctx); err != nil {
 		// Forget assumed headers so the next sweep re-probes instead of
 		// trusting writes that may not have landed.
-		for _, f := range flushes {
+		for _, f := range batch {
 			delete(s.headers, f.key)
 		}
 		return reads, writes, fmt.Errorf("writing series flushes: %w", err)
