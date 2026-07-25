@@ -4,12 +4,14 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
 	"os"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -21,7 +23,11 @@ import (
 // ****************************************************************************
 // This file defines:
 //   - Engine: the leased background sweeper plus the snapshot read facade
-//   - the §5.1 per-queue hot read (pipelined, ~14-15 commands per queue)
+//   - the §5.1 per-queue hot read (pipelined, ~15-16 commands per queue —
+//     the base 14 plus the RETRY_STORM ZCOUNT added in phase 4, plus the
+//     conditional pending_since hop)
+//   - the phase-4 per-sweep extras: INFO memory (1 cmd) and the bounded
+//     GROUP_STALL group-head reads
 // ****************************************************************************
 
 // ErrNotReady is returned by Read when no sweep has ever published to the
@@ -41,6 +47,22 @@ const (
 	defaultLeaseTTL    = 15 * time.Second
 	defaultOrphanGrace = 30 * time.Second // one asynq worker lease interval
 	defaultBatchSize   = 200
+
+	// Attention-engine knob defaults (§3.1 detector table).
+	defaultPendingAgeSLO       = 5 * time.Minute
+	defaultRetryStormThreshold = 1000
+	defaultPausedLongAfter     = 7 * 24 * time.Hour
+	defaultGroupStallAfter     = 5 * time.Minute
+
+	// GROUP_STALL bound (§3.1: "only for queues with groups", costed): per
+	// sweep at most maxGroupStallQueues queues' groups are examined — a
+	// rotating cursor walks the grouped-queue set across sweeps so every
+	// grouped queue is eventually observed — and at most maxGroupsPerQueue
+	// groups per queue (name order). Worst-case added cost per sweep:
+	// 25 SMEMBERS + 25x20 ZRANGE = 525 commands, only when >25 queues use
+	// grouping heavily; the common case (few grouped queues) is a handful.
+	maxGroupStallQueues = 25
+	maxGroupsPerQueue   = 20
 )
 
 // Config configures an Engine. RedisClient and Inspector are required; every
@@ -75,6 +97,25 @@ type Config struct {
 	// "hostname:pid:<random>".
 	InstanceID string
 
+	// PendingAgeSLO is the PENDING_AGE detector threshold: a finding is
+	// raised when a queue's oldest pending task has waited longer than this.
+	// Default 5m.
+	PendingAgeSLO time.Duration
+
+	// RetryStormThreshold is the RETRY_STORM detector threshold: a finding
+	// is raised when at least this many retries fire within the next 5
+	// minutes. Default 1000.
+	RetryStormThreshold int64
+
+	// PausedLongAfter is the PAUSED_LONG detector threshold: a finding is
+	// raised when a queue has been paused longer than this. Default 7d.
+	PausedLongAfter time.Duration
+
+	// GroupStallAfter is the GROUP_STALL detector threshold: a finding is
+	// raised when the oldest member of any examined group has aggregated
+	// longer than this. Default 5m.
+	GroupStallAfter time.Duration
+
 	// Logf logs sweeper lifecycle events and errors. Default log.Printf.
 	Logf func(format string, args ...interface{})
 }
@@ -97,7 +138,20 @@ type Engine struct {
 	mem  *memoryStore
 	kick chan struct{} // signals the sweep loop right after lease acquisition
 
+	// attn evaluates the §3.1 instantaneous detectors per sweep. Its
+	// debounce/since state is in-process, holder-only (the published report
+	// is the shared truth); groupCursor rotates the bounded GROUP_STALL
+	// reads across sweeps. Both are only touched from the sweep goroutine.
+	attn        *attentionEvaluator
+	groupCursor int
+
 	holding int32 // atomic; 1 while this replica holds the sweeper lease
+
+	// subs are sweep-completion listeners (the SSE fan-out). Buffered size-1
+	// channels signaled non-blockingly: a slow listener coalesces signals
+	// instead of stalling the sweeper.
+	subMu sync.Mutex
+	subs  map[chan struct{}]struct{}
 
 	mu      sync.Mutex
 	cancel  context.CancelFunc
@@ -135,6 +189,18 @@ func NewEngine(cfg Config) *Engine {
 	if cfg.InstanceID == "" {
 		cfg.InstanceID = defaultInstanceID()
 	}
+	if cfg.PendingAgeSLO <= 0 {
+		cfg.PendingAgeSLO = defaultPendingAgeSLO
+	}
+	if cfg.RetryStormThreshold <= 0 {
+		cfg.RetryStormThreshold = defaultRetryStormThreshold
+	}
+	if cfg.PausedLongAfter <= 0 {
+		cfg.PausedLongAfter = defaultPausedLongAfter
+	}
+	if cfg.GroupStallAfter <= 0 {
+		cfg.GroupStallAfter = defaultGroupStallAfter
+	}
 	logf := cfg.Logf
 	if logf == nil {
 		logf = log.Printf
@@ -146,6 +212,14 @@ func NewEngine(cfg Config) *Engine {
 		logf: logf,
 		mem:  newMemoryStore(),
 		kick: make(chan struct{}, 1),
+		attn: newAttentionEvaluator(attentionConfig{
+			pendingAgeSLO:       cfg.PendingAgeSLO,
+			retryStormThreshold: cfg.RetryStormThreshold,
+			pausedLongAfter:     cfg.PausedLongAfter,
+			groupStallAfter:     cfg.GroupStallAfter,
+			orphanGrace:         cfg.OrphanGrace,
+		}),
+		subs: make(map[chan struct{}]struct{}),
 	}
 }
 
@@ -217,6 +291,40 @@ func (e *Engine) InstanceID() string { return e.cfg.InstanceID }
 // LastSweep returns the measured cost of the most recent local sweep
 // (zero-valued if this replica has never swept).
 func (e *Engine) LastSweep() SweepStats { return e.mem.sweepStats() }
+
+// Interval returns the configured sweep interval — the cadence standby
+// replicas (and the SSE broker) use to poll the shared cache.
+func (e *Engine) Interval() time.Duration { return e.cfg.Interval }
+
+// SubscribeSweeps registers a listener signaled after every completed local
+// sweep (lease holder only; standbys never sweep and therefore tick on
+// Interval instead). Returns the signal channel and a cancel func that MUST
+// be called to release the registration. Signals are coalesced: a listener
+// that is mid-handling misses no data because every signal means "re-read
+// current state", not "one event".
+func (e *Engine) SubscribeSweeps() (<-chan struct{}, func()) {
+	ch := make(chan struct{}, 1)
+	e.subMu.Lock()
+	e.subs[ch] = struct{}{}
+	e.subMu.Unlock()
+	return ch, func() {
+		e.subMu.Lock()
+		delete(e.subs, ch)
+		e.subMu.Unlock()
+	}
+}
+
+// notifySweeps signals all sweep listeners without ever blocking the sweep.
+func (e *Engine) notifySweeps() {
+	e.subMu.Lock()
+	defer e.subMu.Unlock()
+	for ch := range e.subs {
+		select {
+		case ch <- struct{}{}:
+		default:
+		}
+	}
+}
 
 // leaseLoop tries to hold the sweeper lease: acquire when free, renew at
 // ~1/3 TTL while held. On any renewal failure — lost or errored — it
@@ -351,7 +459,36 @@ func (e *Engine) sweep(ctx context.Context) error {
 		}
 	}
 
+	// INFO memory: one command per sweep for the Fleet landing's Redis tile
+	// (§3.1). A parse miss degrades to zeros (labeled unknown/no-limit), but
+	// a command failure aborts like any other read — Redis is down.
+	memUsed, memMax, err := readRedisMemory(ctx, e.rc)
+	reads++
+	if err != nil {
+		return fmt.Errorf("reading redis memory info: %w", err)
+	}
+
+	// Bounded GROUP_STALL group-head reads (see the const block for the
+	// exact bound and rotation semantics).
+	groupObs, n, err := e.readGroupStalls(ctx, snaps)
+	reads += n
+	if err != nil {
+		return fmt.Errorf("reading group heads: %w", err)
+	}
+
 	fleet := aggregateFleet(snaps, len(servers), workersTotal, workersBusy, now)
+	fleet.RedisMemoryUsed = memUsed
+	fleet.RedisMemoryMax = memMax
+
+	// Attention findings: pure evaluation over this sweep's snapshots plus
+	// the evaluator's holder-local debounce state (§5.2).
+	report := e.attn.evaluate(snaps, groupObs, now)
+	attentionJSON, err := json.Marshal(report)
+	if err != nil {
+		// Cannot happen for these types; guard so a future field never
+		// silently drops the attention publish.
+		return fmt.Errorf("encoding attention report: %w", err)
+	}
 
 	var removed []string
 	for _, name := range prevIndex {
@@ -360,20 +497,131 @@ func (e *Engine) sweep(ctx context.Context) error {
 		}
 	}
 
-	writes, werr := writeCache(ctx, e.rc, fleet, snaps, removed, e.cfg.CacheTTL)
+	writes, werr := writeCache(ctx, e.rc, fleet, snaps, removed, attentionJSON, e.cfg.CacheTTL)
 	// Publish to memory even if the cache write failed: local data is good,
 	// and this replica keeps serving it while Redis recovers.
-	e.mem.replace(fleet, snaps, SweepStats{
+	e.mem.replace(fleet, snaps, report, SweepStats{
 		At:        now,
 		Queues:    len(qnames),
 		ReadCmds:  reads,
 		WriteCmds: writes,
 		Duration:  time.Since(begin),
 	})
+	// Wake SSE listeners after the local publish so what they read is at
+	// least as fresh as the signal (cache-write failures still notify: the
+	// in-process copy is current and Read prefers it here).
+	e.notifySweeps()
 	if werr != nil {
 		return fmt.Errorf("writing cache: %w", werr)
 	}
 	return nil
+}
+
+// readRedisMemory issues INFO memory (1 command) and extracts used_memory
+// and maxmemory. Absent fields decode to 0: maxmemory 0 is Redis's own "no
+// limit", used 0 means unknown. On a Redis Cluster the reply describes the
+// single node go-redis routed to — an honest tier-1 approximation, labeled
+// in the FleetSnapshot field docs.
+func readRedisMemory(ctx context.Context, rc redis.UniversalClient) (used, max int64, err error) {
+	info, err := rc.Info(ctx, "memory").Result()
+	if err != nil {
+		return 0, 0, err
+	}
+	for _, line := range strings.Split(info, "\n") {
+		line = strings.TrimSpace(line)
+		if v, ok := strings.CutPrefix(line, "used_memory:"); ok {
+			used = decodeInt(v)
+		} else if v, ok := strings.CutPrefix(line, "maxmemory:"); ok {
+			max = decodeInt(v)
+		}
+	}
+	return used, max, nil
+}
+
+// readGroupStalls performs the bounded GROUP_STALL reads: for up to
+// maxGroupStallQueues queues with groups (rotating start across sweeps), the
+// group-name SET (1 SMEMBERS each) then the head of each group's ZSET
+// (ZRANGE 0 0 WITHSCORES each, capped at maxGroupsPerQueue). Queues present
+// in the returned map were examined this sweep — including "examined, no
+// members" zero observations, which is what lets findings auto-clear.
+// Returns the number of Redis commands issued.
+func (e *Engine) readGroupStalls(ctx context.Context, snaps map[string]*QueueSnapshot) (map[string]groupStallObs, int, error) {
+	var grouped []string
+	for q, s := range snaps {
+		if s.Groups > 0 {
+			grouped = append(grouped, q)
+		}
+	}
+	if len(grouped) == 0 {
+		return nil, 0, nil
+	}
+	sort.Strings(grouped)
+
+	count := len(grouped)
+	start := 0
+	if count > maxGroupStallQueues {
+		count = maxGroupStallQueues
+		start = e.groupCursor % len(grouped)
+		e.groupCursor = (start + count) % len(grouped)
+	}
+	picked := make([]string, 0, count)
+	for i := 0; i < count; i++ {
+		picked = append(picked, grouped[(start+i)%len(grouped)])
+	}
+
+	reads := 0
+	pipe := e.rc.Pipeline()
+	memberCmds := make([]*redis.StringSliceCmd, len(picked))
+	for i, q := range picked {
+		memberCmds[i] = pipe.SMembers(ctx, allGroupsKey(q))
+		reads++
+	}
+	if _, err := pipe.Exec(ctx); err != nil && err != redis.Nil {
+		return nil, reads, err
+	}
+
+	type headCmd struct {
+		q, g string
+		cmd  *redis.ZSliceCmd
+	}
+	pipe2 := e.rc.Pipeline()
+	var heads []headCmd
+	for i, q := range picked {
+		groups, err := memberCmds[i].Result()
+		if err != nil {
+			continue
+		}
+		sort.Strings(groups)
+		if len(groups) > maxGroupsPerQueue {
+			groups = groups[:maxGroupsPerQueue]
+		}
+		for _, g := range groups {
+			heads = append(heads, headCmd{q: q, g: g, cmd: pipe2.ZRangeWithScores(ctx, groupKey(q, g), 0, 0)})
+			reads++
+		}
+	}
+	if len(heads) > 0 {
+		if _, err := pipe2.Exec(ctx); err != nil && err != redis.Nil {
+			return nil, reads, err
+		}
+	}
+
+	obs := make(map[string]groupStallObs, len(picked))
+	for _, q := range picked {
+		obs[q] = groupStallObs{} // examined; zero observation unless a head is found
+	}
+	for _, h := range heads {
+		zs, err := h.cmd.Result()
+		if err != nil || len(zs) == 0 {
+			continue
+		}
+		// Group scores are entered-group Unix seconds (asynq AddToGroup).
+		at := time.Unix(int64(zs[0].Score), 0)
+		if cur := obs[h.q]; cur.oldestSince.IsZero() || at.Before(cur.oldestSince) {
+			obs[h.q] = groupStallObs{group: h.g, oldestSince: at}
+		}
+	}
+	return obs, reads, nil
 }
 
 // queueCmds holds the pipelined command handles of one queue's hot read, in
@@ -390,22 +638,24 @@ type queueCmds struct {
 	failed          *redis.StringCmd
 	orphans         *redis.IntCmd
 	nextRetry       *redis.ZSliceCmd
+	retrySoon       *redis.IntCmd
 	pastDue         *redis.IntCmd
 	oldestPendingID *redis.StringCmd
 	groups          *redis.IntCmd
 }
 
 // sweepBatch reads up to BatchSize queues in two pipelined hops and fills
-// out. Hop 1 is the fixed 14-command hot read per queue; hop 2 fetches
-// pending_since for each queue's oldest pending task (only for queues that
-// have one). Returns the number of Redis commands issued.
+// out. Hop 1 is the fixed 15-command hot read per queue (§5.1's 14 plus the
+// phase-4 RETRY_STORM ZCOUNT over the next 5 minutes of retry scores); hop 2
+// fetches pending_since for each queue's oldest pending task (only for
+// queues that have one). Returns the number of Redis commands issued.
 //
-// Per-queue cost: 14 commands, +1 when the queue has pending tasks —
-// matching the §5.1 costing of ~14-15 commands/queue.
+// Per-queue cost: 15 commands, +1 when the queue has pending tasks.
 func (e *Engine) sweepBatch(ctx context.Context, names []string, now time.Time, consumers map[string]int, out map[string]*QueueSnapshot) (int, error) {
 	// Lease scores and scheduled scores are Unix seconds (see keys.go).
 	orphanCutoff := "(" + strconv.FormatInt(now.Add(-e.cfg.OrphanGrace).Unix(), 10)
 	nowSec := strconv.FormatInt(now.Unix(), 10)
+	stormHorizon := strconv.FormatInt(now.Add(retryStormWindow).Unix(), 10)
 	reads := 0
 
 	pipe := e.rc.Pipeline()
@@ -423,12 +673,14 @@ func (e *Engine) sweepBatch(ctx context.Context, names []string, now time.Time, 
 		c.failed = pipe.Get(ctx, failedKey(q, now))
 		c.orphans = pipe.ZCount(ctx, leaseKey(q), "-inf", orphanCutoff)
 		c.nextRetry = pipe.ZRangeWithScores(ctx, retryKey(q), 0, 0)
+		// RETRY_STORM mass: retries firing in [now, now+5m] (§3.1).
+		c.retrySoon = pipe.ZCount(ctx, retryKey(q), nowSec, stormHorizon)
 		c.pastDue = pipe.ZCount(ctx, scheduledKey(q), "-inf", nowSec)
 		// pending is a LIST: LPUSH in, RPOPLPUSH out, so the oldest task is
 		// at index -1. Its age needs a second hop into the task hash.
 		c.oldestPendingID = pipe.LIndex(ctx, pendingKey(q), -1)
 		c.groups = pipe.SCard(ctx, allGroupsKey(q))
-		reads += 14
+		reads += 15
 	}
 	// redis.Nil is expected for missing GETs (unpaused queues, day-one
 	// counters) and missing LINDEX; per-command results are still populated,
@@ -487,6 +739,7 @@ func (e *Engine) sweepBatch(ctx context.Context, names []string, now time.Time, 
 		s.Completed, _ = c.completed.Result()
 		s.Groups, _ = c.groups.Result()
 		s.OrphanCandidates, _ = c.orphans.Result()
+		s.RetryDueSoon, _ = c.retrySoon.Result()
 		s.PastDueScheduled, _ = c.pastDue.Result()
 		if v, err := c.paused.Result(); err == nil {
 			// Existence == paused; the value (pause time, Unix seconds) is a
@@ -566,6 +819,19 @@ func (e *Engine) Read(ctx context.Context) (*ReadResult, error) {
 		return nil, err
 	}
 	return &ReadResult{Fleet: fleet, Queues: queues, Source: SourceCache}, nil
+}
+
+// ReadAttention returns the current attention report, mirroring Read's
+// source preference: the locally-swept copy while fresh (lease holder), the
+// shared cache otherwise. Standby replicas therefore serve findings
+// byte-identical to what the holder published. ErrNotReady before any sweep
+// has published one.
+func (e *Engine) ReadAttention(ctx context.Context) (*AttentionReport, error) {
+	if fleet, rep := e.mem.getAttention(); rep != nil && fleet != nil &&
+		time.Since(fleet.RefreshedAt) <= e.localStaleAfter() {
+		return rep, nil
+	}
+	return readAttentionCache(ctx, e.rc)
 }
 
 // localStaleAfter bounds how old the in-process copy may be before reads

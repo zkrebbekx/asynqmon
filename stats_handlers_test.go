@@ -106,6 +106,10 @@ func TestFleetOverviewHandler(t *testing.T) {
 				So(resp.Fleet.Servers, ShouldEqual, 0)
 				So(resp.Fleet.OrphanCandidates, ShouldEqual, 0)
 			})
+			Convey("Then it carries the Redis memory gauge for the Redis tile", func() {
+				So(resp.Fleet.RedisMemoryUsedBytes, ShouldBeGreaterThan, 0)
+				So(resp.Fleet.RedisMemoryMaxBytes, ShouldBeGreaterThanOrEqualTo, 0)
+			})
 			Convey("Then it carries the honest coverage stamp", func() {
 				So(resp.Coverage.Tier, ShouldEqual, 1)
 				So(resp.Coverage.QueuesTotal, ShouldEqual, 3)

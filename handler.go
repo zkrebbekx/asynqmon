@@ -57,6 +57,24 @@ type Options struct {
 	// /api/fleet endpoints then respond 503. Stats collection is read-only,
 	// so it stays enabled in ReadOnly mode unless disabled here explicitly.
 	StatsDisabled bool
+
+	// Attention-engine detector knobs (§3.1 detector table). All optional.
+
+	// AttentionPendingAgeSLO raises a PENDING_AGE finding when a queue's
+	// oldest pending task has waited longer than this. Default 5m.
+	AttentionPendingAgeSLO time.Duration
+
+	// AttentionRetryStormThreshold raises a RETRY_STORM finding when at
+	// least this many retries fire within the next 5 minutes. Default 1000.
+	AttentionRetryStormThreshold int
+
+	// AttentionPausedLongAfter raises a PAUSED_LONG finding when a queue has
+	// been paused longer than this. Default 7 days.
+	AttentionPausedLongAfter time.Duration
+
+	// AttentionGroupStallAfter raises a GROUP_STALL finding when the oldest
+	// member of an examined group has aggregated longer than this. Default 5m.
+	AttentionGroupStallAfter time.Duration
 }
 
 // HTTPHandler is a http.Handler for asynqmon application.
@@ -95,19 +113,32 @@ func New(opts Options) *HTTPHandler {
 	// from the shared cache, so starting it unconditionally is safe in
 	// multi-replica deployments (§5.13).
 	var statsEngine *stats.Engine
+	var eventsBroker *fleetEventsBroker
 	if !opts.StatsDisabled {
 		statsEngine = stats.NewEngine(stats.Config{
-			RedisClient: rc,
-			Inspector:   i,
-			Interval:    opts.StatsInterval,
+			RedisClient:         rc,
+			Inspector:           i,
+			Interval:            opts.StatsInterval,
+			PendingAgeSLO:       opts.AttentionPendingAgeSLO,
+			RetryStormThreshold: int64(opts.AttentionRetryStormThreshold),
+			PausedLongAfter:     opts.AttentionPausedLongAfter,
+			GroupStallAfter:     opts.AttentionGroupStallAfter,
 		})
 		statsEngine.Start(context.Background())
-		// Stop the engine before the redis clients it uses are closed.
-		closers = append([]func() error{func() error { statsEngine.Stop(); return nil }}, closers...)
+		// One broker per process fans the SSE payloads out to all
+		// /api/fleet/events subscribers (§4.4) — subscribers never multiply
+		// sweeps or cache reads.
+		eventsBroker = newFleetEventsBroker(statsEngine)
+		eventsBroker.start(context.Background())
+		// Stop broker then engine before the redis clients they use close.
+		closers = append([]func() error{
+			func() error { eventsBroker.stop(); return nil },
+			func() error { statsEngine.Stop(); return nil },
+		}, closers...)
 	}
 
 	return &HTTPHandler{
-		router:   muxRouter(opts, rc, i, statsEngine),
+		router:   muxRouter(opts, rc, i, statsEngine, eventsBroker),
 		closers:  closers,
 		rootPath: opts.RootPath,
 	}
@@ -132,7 +163,7 @@ func (h *HTTPHandler) RootPath() string {
 //go:embed ui/build/*
 var staticContents embed.FS
 
-func muxRouter(opts Options, rc redis.UniversalClient, inspector *asynq.Inspector, statsEngine *stats.Engine) *mux.Router {
+func muxRouter(opts Options, rc redis.UniversalClient, inspector *asynq.Inspector, statsEngine *stats.Engine, eventsBroker *fleetEventsBroker) *mux.Router {
 	router := mux.NewRouter().PathPrefix(opts.RootPath).Subrouter()
 
 	var payloadFmt PayloadFormatter = DefaultPayloadFormatter
@@ -153,6 +184,8 @@ func muxRouter(opts Options, rc redis.UniversalClient, inspector *asynq.Inspecto
 	// shipping dashboard; the new directory reads /api/fleet/queues.
 	api.HandleFunc("/fleet/overview", newFleetOverviewHandlerFunc(statsEngine)).Methods("GET")
 	api.HandleFunc("/fleet/queues", newFleetQueuesHandlerFunc(statsEngine)).Methods("GET")
+	api.HandleFunc("/fleet/attention", newFleetAttentionHandlerFunc(statsEngine)).Methods("GET")
+	api.HandleFunc("/fleet/events", newFleetEventsHandlerFunc(eventsBroker)).Methods("GET")
 
 	// Queue endpoints.
 	api.HandleFunc("/queues", newListQueuesHandlerFunc(inspector)).Methods("GET")

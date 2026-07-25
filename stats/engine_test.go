@@ -270,16 +270,27 @@ func TestSweepSeededFleet(t *testing.T) {
 			So(f.RefreshedAt.IsZero(), ShouldBeFalse)
 		})
 
-		Convey("Then the sweep cost matches the §5.1 budget: 14 commands per queue, +1 per queue with pending, +2 per sweep", func() {
+		Convey("Then the sweep cost matches the budget: 15 commands per queue, +1 per queue with pending, +3 per sweep, + bounded group reads", func() {
 			cost := engine.LastSweep()
 			So(cost.Queues, ShouldEqual, 2)
 			// 1 SMEMBERS asynq:queues + 1 SMEMBERS cache index
-			// + 2 queues x 14 hot-read commands
+			// + 2 queues x 15 hot-read commands (§5.1's 14 + the phase-4
+			//   RETRY_STORM ZCOUNT)
 			// + 2 pending_since hops (both queues have pending tasks)
-			So(cost.ReadCmds, ShouldEqual, 32)
-			// 2 queues x (HSET + PEXPIRE) + 1 SADD index + fleet HSET + PEXPIRE
-			So(cost.WriteCmds, ShouldEqual, 7)
+			// + 1 INFO memory
+			// + 2 GROUP_STALL reads (q2 has one group: SMEMBERS + ZRANGE)
+			So(cost.ReadCmds, ShouldEqual, 37)
+			// 2 queues x (HSET + PEXPIRE) + 1 SADD index + fleet HSET +
+			// PEXPIRE + 1 SET attention report
+			So(cost.WriteCmds, ShouldEqual, 8)
 			So(cost.Duration, ShouldBeGreaterThan, 0)
+		})
+
+		Convey("Then the fleet snapshot carries the Redis memory gauge from INFO", func() {
+			So(res.Fleet.RedisMemoryUsed, ShouldBeGreaterThan, 0)
+			// maxmemory is whatever the test Redis is configured with; the
+			// value only needs to decode, not be nonzero.
+			So(res.Fleet.RedisMemoryMax, ShouldBeGreaterThanOrEqualTo, 0)
 		})
 
 		Convey("Then a standby replica (no lease, empty memory) reads identical data from the shared cache", func() {
@@ -374,6 +385,9 @@ func TestSweepServerDerived(t *testing.T) {
 			So(q3.Completed, ShouldEqual, 1)
 			So(q3.Pending, ShouldEqual, 0)
 			So(q3.NextRetryAt.After(beforeSweep.Add(30*time.Minute)), ShouldBeTrue)
+			// The retry fires in ~1h, far outside the 5m storm window — the
+			// RETRY_STORM mass must NOT count it.
+			So(q3.RetryDueSoon, ShouldEqual, 0)
 		})
 
 		Convey("Then daily counters count both outcomes (processed includes failures)", func() {

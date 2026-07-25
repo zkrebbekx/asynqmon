@@ -52,6 +52,11 @@ type QueueSnapshot struct {
 	// empty).
 	NextRetryAt time.Time
 
+	// RetryDueSoon counts retry tasks whose next fire time falls within the
+	// RETRY_STORM window ([sweep time, +5m]) — the "storm mass" the attention
+	// engine compares against its threshold (§3.1 RETRY STORM).
+	RetryDueSoon int64
+
 	// PastDueScheduled counts scheduled tasks whose process-at time already
 	// passed — nonzero values mean asynq's forwarder is stalled or absent.
 	PastDueScheduled int64
@@ -118,6 +123,14 @@ type FleetSnapshot struct {
 	WorkersTotal int // sum of server concurrency
 	WorkersBusy  int // sum of active workers
 
+	// RedisMemoryUsed / RedisMemoryMax are INFO memory's used_memory and
+	// maxmemory, sampled once per sweep for the Fleet landing's Redis tile
+	// (§3.1). Max 0 means Redis has no configured maxmemory; Used 0 means
+	// the INFO read failed (unknown, not "empty"). On a Redis Cluster the
+	// INFO answer comes from a single node — a tier-1 approximation.
+	RedisMemoryUsed int64
+	RedisMemoryMax  int64
+
 	RefreshedAt time.Time
 }
 
@@ -183,6 +196,7 @@ func (s *QueueSnapshot) toHash() map[string]interface{} {
 		"failed_today":         s.FailedToday,
 		"orphan_candidates":    s.OrphanCandidates,
 		"next_retry_at":        encodeTime(s.NextRetryAt),
+		"retry_due_5m":         s.RetryDueSoon,
 		"past_due_scheduled":   s.PastDueScheduled,
 		"oldest_pending_since": encodeTime(s.OldestPendingSince),
 		"consumers":            s.Consumers,
@@ -206,6 +220,7 @@ func queueSnapshotFromHash(h map[string]string) *QueueSnapshot {
 		FailedToday:        decodeInt(h["failed_today"]),
 		OrphanCandidates:   decodeInt(h["orphan_candidates"]),
 		NextRetryAt:        decodeTime(h["next_retry_at"]),
+		RetryDueSoon:       decodeInt(h["retry_due_5m"]),
 		PastDueScheduled:   decodeInt(h["past_due_scheduled"]),
 		OldestPendingSince: decodeTime(h["oldest_pending_since"]),
 		Consumers:          int(decodeInt(h["consumers"])),
@@ -232,6 +247,8 @@ func (f *FleetSnapshot) toHash() map[string]interface{} {
 		"servers":              f.Servers,
 		"workers_total":        f.WorkersTotal,
 		"workers_busy":         f.WorkersBusy,
+		"redis_memory_used":    f.RedisMemoryUsed,
+		"redis_memory_max":     f.RedisMemoryMax,
 		"refreshed_at":         encodeTime(f.RefreshedAt),
 	}
 }
@@ -255,6 +272,8 @@ func fleetSnapshotFromHash(h map[string]string) *FleetSnapshot {
 		Servers:            int(decodeInt(h["servers"])),
 		WorkersTotal:       int(decodeInt(h["workers_total"])),
 		WorkersBusy:        int(decodeInt(h["workers_busy"])),
+		RedisMemoryUsed:    decodeInt(h["redis_memory_used"]),
+		RedisMemoryMax:     decodeInt(h["redis_memory_max"]),
 		RefreshedAt:        decodeTime(h["refreshed_at"]),
 	}
 }

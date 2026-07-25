@@ -97,6 +97,10 @@ func taskKey(qname, id string) string {
 // allGroupsKey returns the SET of group names used in the given queue.
 func allGroupsKey(qname string) string { return queueKeyPrefix(qname) + "groups" }
 
+// groupKey returns the key of one group's ZSET (scores = entered-group Unix
+// seconds; asynq's addToGroupCmd ZADDs clock.Now().Unix()).
+func groupKey(qname, gname string) string { return queueKeyPrefix(qname) + "g:" + gname }
+
 // ----------------------------------------------------------------------------
 // asynqmon-owned keys. All new state lives under the "asynqmon:" prefix (§5)
 // so it can never collide with — and is trivially distinguishable from —
@@ -121,6 +125,12 @@ const (
 	// (§5.13): SET NX PX by the winning replica, renewed at ~1/3 TTL. Loser
 	// replicas stand by and serve reads from the Redis cache.
 	sweeperLockKey = "asynqmon:lock:stats"
+
+	// attentionCacheKey is the STRING holding the JSON attention report
+	// (§5.2). Published by the sweep holder after every sweep so standby
+	// replicas serve byte-identical findings (debounce/since state lives
+	// in-process on the holder; the published report is the shared truth).
+	attentionCacheKey = "asynqmon:cache:attention"
 )
 
 // queueCacheKey returns the cache HASH key for the given queue.

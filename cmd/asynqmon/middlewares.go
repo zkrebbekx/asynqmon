@@ -37,6 +37,23 @@ func (w *responseRecorderWriter) Write(b []byte) (int, error) {
 	return n, err
 }
 
+// Unwrap exposes the wrapped ResponseWriter so http.ResponseController can
+// reach the optional interfaces this wrapper would otherwise hide — Flush
+// for the /api/fleet/events SSE stream, and per-request write-deadline
+// control (SSE clears the server's WriteTimeout for its own response).
+func (w *responseRecorderWriter) Unwrap() http.ResponseWriter {
+	return w.ResponseWriter
+}
+
+// Flush implements http.Flusher for callers that type-assert directly
+// instead of going through http.ResponseController. Delegates only when the
+// wrapped writer really supports flushing (net/http's writers always do).
+func (w *responseRecorderWriter) Flush() {
+	if f, ok := w.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
 // csrfProtection rejects cross-origin mutating requests. Browsers attach an
 // Origin header to every cross-origin request — including simple form POSTs
 // that never trigger a CORS preflight — so checking it here blocks CSRF

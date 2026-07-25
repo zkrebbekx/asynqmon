@@ -2,6 +2,8 @@ package stats
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"sort"
 	"sync"
 	"time"
@@ -23,6 +25,7 @@ type memoryStore struct {
 	mu        sync.RWMutex
 	fleet     *FleetSnapshot
 	queues    map[string]*QueueSnapshot
+	attention *AttentionReport
 	lastSweep SweepStats
 }
 
@@ -40,11 +43,12 @@ func newMemoryStore() *memoryStore {
 	return &memoryStore{}
 }
 
-func (m *memoryStore) replace(fleet *FleetSnapshot, queues map[string]*QueueSnapshot, stats SweepStats) {
+func (m *memoryStore) replace(fleet *FleetSnapshot, queues map[string]*QueueSnapshot, attention *AttentionReport, stats SweepStats) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.fleet = fleet
 	m.queues = queues
+	m.attention = attention
 	m.lastSweep = stats
 }
 
@@ -70,6 +74,15 @@ func (m *memoryStore) sweepStats() SweepStats {
 	return m.lastSweep
 }
 
+// getAttention returns the locally-swept attention report plus the fleet
+// snapshot it was computed from (whose RefreshedAt decides freshness).
+// (nil, nil) when this replica has never swept.
+func (m *memoryStore) getAttention() (*FleetSnapshot, *AttentionReport) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.fleet, m.attention
+}
+
 // writeCache publishes a sweep's results to the shared Redis cache so every
 // replica reads the same truth (§5.13). removed lists queues that were in the
 // cache index but no longer exist in asynq:queues; their cache entries are
@@ -78,8 +91,12 @@ func (m *memoryStore) sweepStats() SweepStats {
 // sweeper dies, its rows eventually expire rather than serving forever-stale
 // numbers with an honest-looking key.
 //
+// attentionJSON is the marshaled AttentionReport published alongside the
+// snapshots (one SET, same TTL) so standby replicas serve findings that are
+// byte-identical to the holder's.
+//
 // Returns the number of Redis commands issued (for SweepStats).
-func writeCache(ctx context.Context, rc redis.UniversalClient, fleet *FleetSnapshot, queues map[string]*QueueSnapshot, removed []string, ttl time.Duration) (int, error) {
+func writeCache(ctx context.Context, rc redis.UniversalClient, fleet *FleetSnapshot, queues map[string]*QueueSnapshot, removed []string, attentionJSON []byte, ttl time.Duration) (int, error) {
 	pipe := rc.Pipeline()
 	cmds := 0
 	names := make([]interface{}, 0, len(queues))
@@ -101,6 +118,10 @@ func writeCache(ctx context.Context, rc redis.UniversalClient, fleet *FleetSnaps
 	pipe.HSet(ctx, fleetCacheKey, fleet.toHash())
 	pipe.PExpire(ctx, fleetCacheKey, ttl)
 	cmds += 2
+	if len(attentionJSON) > 0 {
+		pipe.Set(ctx, attentionCacheKey, attentionJSON, ttl)
+		cmds++
+	}
 	_, err := pipe.Exec(ctx)
 	return cmds, err
 }
@@ -150,4 +171,25 @@ func readCache(ctx context.Context, rc redis.UniversalClient, batchSize int) (*F
 		}
 	}
 	return fleetSnapshotFromHash(fleetHash), queues, nil
+}
+
+// readAttentionCache loads the shared attention report — the read path for
+// replicas that do not hold the sweeper lease. ErrNotReady when no sweep has
+// ever published one (or it expired with a dead sweeper).
+func readAttentionCache(ctx context.Context, rc redis.UniversalClient) (*AttentionReport, error) {
+	data, err := rc.Get(ctx, attentionCacheKey).Bytes()
+	if err == redis.Nil {
+		return nil, ErrNotReady
+	}
+	if err != nil {
+		return nil, err
+	}
+	var rep AttentionReport
+	if err := json.Unmarshal(data, &rep); err != nil {
+		return nil, fmt.Errorf("decoding cached attention report: %w", err)
+	}
+	if rep.Findings == nil {
+		rep.Findings = make([]AttentionFinding, 0)
+	}
+	return &rep, nil
 }

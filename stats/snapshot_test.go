@@ -36,6 +36,7 @@ func TestSnapshotHashRoundTrip(t *testing.T) {
 			FailedToday:        7,
 			OrphanCandidates:   1,
 			NextRetryAt:        now.Add(time.Minute),
+			RetryDueSoon:       4,
 			PastDueScheduled:   2,
 			OldestPendingSince: now.Add(-30 * time.Minute),
 			Consumers:          3,
@@ -60,6 +61,7 @@ func TestSnapshotHashRoundTrip(t *testing.T) {
 				So(got.FailedToday, ShouldEqual, s.FailedToday)
 				So(got.OrphanCandidates, ShouldEqual, s.OrphanCandidates)
 				So(got.NextRetryAt.UnixNano(), ShouldEqual, s.NextRetryAt.UnixNano())
+				So(got.RetryDueSoon, ShouldEqual, s.RetryDueSoon)
 				So(got.PastDueScheduled, ShouldEqual, s.PastDueScheduled)
 				So(got.OldestPendingSince.UnixNano(), ShouldEqual, s.OldestPendingSince.UnixNano())
 				So(got.Consumers, ShouldEqual, s.Consumers)
@@ -100,6 +102,8 @@ func TestFleetSnapshotHashRoundTrip(t *testing.T) {
 			Servers:            3,
 			WorkersTotal:       30,
 			WorkersBusy:        12,
+			RedisMemoryUsed:    1 << 30,
+			RedisMemoryMax:     4 << 30,
 			RefreshedAt:        now,
 		}
 
@@ -123,6 +127,8 @@ func TestFleetSnapshotHashRoundTrip(t *testing.T) {
 				So(got.Servers, ShouldEqual, f.Servers)
 				So(got.WorkersTotal, ShouldEqual, f.WorkersTotal)
 				So(got.WorkersBusy, ShouldEqual, f.WorkersBusy)
+				So(got.RedisMemoryUsed, ShouldEqual, f.RedisMemoryUsed)
+				So(got.RedisMemoryMax, ShouldEqual, f.RedisMemoryMax)
 				So(got.RefreshedAt.UnixNano(), ShouldEqual, f.RefreshedAt.UnixNano())
 			})
 			Convey("Then the derived error rate is preserved through the trip", func() {

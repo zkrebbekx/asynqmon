@@ -11,9 +11,12 @@ import (
 
 // ****************************************************************************
 // This file defines:
-//   - http.Handler(s) for the Fleet Console stats endpoints (§5.1, phase 2):
-//       GET /api/fleet/overview — fleet aggregates + coverage stamp
-//       GET /api/fleet/queues   — sorted/filtered page over cached snapshots
+//   - http.Handler(s) for the Fleet Console stats endpoints (§5.1, §5.2):
+//       GET /api/fleet/overview  — fleet aggregates + coverage stamp
+//       GET /api/fleet/queues    — sorted/filtered page over cached snapshots
+//       GET /api/fleet/attention — ranked attention findings (phase 4)
+//   (GET /api/fleet/events, the SSE stream over the same payloads, lives in
+//   fleet_events_handlers.go.)
 //
 // Both endpoints serve exclusively from the stats cache (in-process on the
 // sweeping replica, shared Redis cache elsewhere) — never O(fleet) Redis
@@ -70,6 +73,13 @@ type fleetAggregates struct {
 	Servers      int `json:"servers"`
 	WorkersTotal int `json:"workers_total"`
 	WorkersBusy  int `json:"workers_busy"`
+
+	// Redis memory gauge for the Fleet landing's Redis tile (§3.1): INFO
+	// memory's used_memory / maxmemory, sampled once per sweep. Max 0 means
+	// Redis has no configured limit; Used 0 means the INFO read failed
+	// (unknown, not empty).
+	RedisMemoryUsedBytes int64 `json:"redis_memory_used_bytes"`
+	RedisMemoryMaxBytes  int64 `json:"redis_memory_max_bytes"`
 }
 
 type fleetOverviewResponse struct {
@@ -189,6 +199,38 @@ func readStats(w http.ResponseWriter, r *http.Request, engine *stats.Engine) (*s
 	return res, true
 }
 
+// buildFleetOverviewResponse converts a stats read into the overview
+// response body. Shared by the HTTP handler and the SSE broker so the
+// `overview` event payload is exactly the GET /api/fleet/overview JSON.
+func buildFleetOverviewResponse(res *stats.ReadResult, now time.Time) fleetOverviewResponse {
+	f := res.Fleet
+	return fleetOverviewResponse{
+		Fleet: fleetAggregates{
+			QueuesTotal:          f.QueuesTotal,
+			PausedQueues:         f.PausedQueues,
+			ZeroConsumerQueues:   f.ZeroConsumerQueues,
+			Pending:              f.Pending,
+			Active:               f.Active,
+			Scheduled:            f.Scheduled,
+			Retry:                f.Retry,
+			Archived:             f.Archived,
+			Completed:            f.Completed,
+			Groups:               f.Groups,
+			OrphanCandidates:     f.OrphanCandidates,
+			PastDueScheduled:     f.PastDueScheduled,
+			ProcessedToday:       f.ProcessedToday,
+			FailedToday:          f.FailedToday,
+			ErrorRate:            f.ErrorRate(),
+			Servers:              f.Servers,
+			WorkersTotal:         f.WorkersTotal,
+			WorkersBusy:          f.WorkersBusy,
+			RedisMemoryUsedBytes: f.RedisMemoryUsed,
+			RedisMemoryMaxBytes:  f.RedisMemoryMax,
+		},
+		Coverage: buildCoverage(res, now),
+	}
+}
+
 // newFleetOverviewHandlerFunc serves GET /api/fleet/overview: fleet-wide
 // aggregates plus the coverage stamp, entirely from the stats cache.
 func newFleetOverviewHandlerFunc(engine *stats.Engine) http.HandlerFunc {
@@ -197,30 +239,32 @@ func newFleetOverviewHandlerFunc(engine *stats.Engine) http.HandlerFunc {
 		if !ok {
 			return
 		}
-		f := res.Fleet
-		writeResponseJSON(w, fleetOverviewResponse{
-			Fleet: fleetAggregates{
-				QueuesTotal:        f.QueuesTotal,
-				PausedQueues:       f.PausedQueues,
-				ZeroConsumerQueues: f.ZeroConsumerQueues,
-				Pending:            f.Pending,
-				Active:             f.Active,
-				Scheduled:          f.Scheduled,
-				Retry:              f.Retry,
-				Archived:           f.Archived,
-				Completed:          f.Completed,
-				Groups:             f.Groups,
-				OrphanCandidates:   f.OrphanCandidates,
-				PastDueScheduled:   f.PastDueScheduled,
-				ProcessedToday:     f.ProcessedToday,
-				FailedToday:        f.FailedToday,
-				ErrorRate:          f.ErrorRate(),
-				Servers:            f.Servers,
-				WorkersTotal:       f.WorkersTotal,
-				WorkersBusy:        f.WorkersBusy,
-			},
-			Coverage: buildCoverage(res, time.Now()),
-		})
+		writeResponseJSON(w, buildFleetOverviewResponse(res, time.Now()))
+	}
+}
+
+// newFleetAttentionHandlerFunc serves GET /api/fleet/attention (§5.2): the
+// ranked instantaneous findings the sweep holder computed and published to
+// the shared cache — every replica serves the identical report. The response
+// body is the stats.AttentionReport JSON verbatim (frozen frontend
+// contract); the SSE `attention` event carries the same bytes.
+func newFleetAttentionHandlerFunc(engine *stats.Engine) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if engine == nil {
+			writeErrorMsg(w, http.StatusServiceUnavailable, "stats engine is disabled")
+			return
+		}
+		rep, err := engine.ReadAttention(r.Context())
+		if err != nil {
+			if errors.Is(err, stats.ErrNotReady) {
+				writeErrorMsg(w, http.StatusServiceUnavailable,
+					"fleet attention not available yet: the stats sweeper has not completed a sweep (it may be starting up, or no replica holds the sweeper lease)")
+				return
+			}
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+		writeResponseJSON(w, rep)
 	}
 }
 
