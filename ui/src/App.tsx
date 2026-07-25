@@ -4,6 +4,7 @@ import { BrowserRouter, Routes, Route, NavLink } from "react-router-dom";
 import { Toaster, toast } from "sonner";
 import {
   Activity,
+  AlertTriangle,
   Layers,
   ListChecks,
   Play,
@@ -29,6 +30,7 @@ const FleetView = lazy(() => import("./views/FleetView"));
 const QueuesDirectoryView = lazy(() => import("./views/QueuesDirectoryView"));
 const TasksView = lazy(() => import("./views/TasksView"));
 const TasksGlobalView = lazy(() => import("./views/TasksGlobalView"));
+const ErrorsView = lazy(() => import("./views/ErrorsView"));
 const TaskDetailsView = lazy(() => import("./views/TaskDetailsView"));
 const SchedulersView = lazy(() => import("./views/SchedulersView"));
 const ServersView = lazy(() => import("./views/ServersView"));
@@ -110,14 +112,15 @@ function AppContent() {
     >
       <HeaderBar />
 
-      {/* Grouped nav (build contract §2 IA). Errors / Operations / Hygiene
-          arrive with phases 5/9/15 — no dead links until then. */}
+      {/* Grouped nav (build contract §2 IA). Hygiene arrives with phase 15 —
+          no dead links until then. */}
       <aside className="flex flex-col overflow-y-auto border-r border-[var(--fc-line)] bg-[var(--fc-panel)] px-2 py-2">
         <nav className="flex flex-1 flex-col gap-px">
           <NavGroupLabel label="Monitor" collapsed={collapsed} />
           <NavItem to={appPaths.HOME} end icon={<Activity size={15} />} label="Fleet" collapsed={collapsed} />
           <NavItem to={appPaths.QUEUES} icon={<Layers size={15} />} label="Queues" collapsed={collapsed} />
           <NavItem to={appPaths.TASKS} icon={<ListChecks size={15} />} label="Tasks" collapsed={collapsed} />
+          <NavItem to={appPaths.ERRORS} icon={<AlertTriangle size={15} />} label="Errors" collapsed={collapsed} />
           {window.PROMETHEUS_SERVER_ADDRESS && (
             <NavItem to={appPaths.QUEUE_METRICS} icon={<TrendingUp size={15} />} label="Metrics" collapsed={collapsed} />
           )}
@@ -153,6 +156,7 @@ function AppContent() {
           <Routes>
             <Route path={appPaths.TASK_DETAILS} element={<TaskDetailsView />} />
             <Route path={appPaths.TASKS} element={<TasksGlobalView />} />
+            <Route path={appPaths.ERRORS} element={<ErrorsView />} />
             <Route path={appPaths.QUEUE_DETAILS} element={<TasksView />} />
             <Route path={appPaths.QUEUES} element={<QueuesDirectoryView />} />
             <Route path={appPaths.SCHEDULERS} element={<SchedulersView />} />

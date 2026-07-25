@@ -5,16 +5,19 @@
 // Deliberately absent until their phases land (no dead placeholders):
 //   - deltas / sparklines / retry-ETA mass (ring buffers, phase 10)
 //   - operations-in-flight + audit rail (job runner, phase 5)
-//   - failure pulse strip (error-signature index, phase 9)
+//   - the failure pulse's 24h bar chart + deploy markers (ring buffers,
+//     phase 10) — the top-signatures strip below is the phase-9 lite cut
 
-import { ReactNode, useEffect, useState } from "react";
+import { ReactNode, useCallback, useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import prettyBytes from "pretty-bytes";
 import { useFleetEvents } from "../hooks/useFleetEvents";
 import { FleetStats, AttentionFinding } from "../api-fleet";
+import { ErrorSignatureRow, listErrorSignatures } from "../api-errors";
 import { paths, attentionFindingPath } from "../paths";
 import { timeAgo } from "../utils";
 import { formatErrorRate, formatFindingValue, severityTone } from "../lib/fleet";
+import { formatSigCount, trendTone } from "../lib/errsig";
 import { FcChip, MicroLabel, SEV_STRIPE } from "../components/FleetBits";
 import { cn } from "../lib/utils";
 
@@ -114,6 +117,72 @@ function FindingRow({ finding }: { finding: AttentionFinding }) {
           Open →
         </Link>
       </div>
+    </div>
+  );
+}
+
+/**************************************************************
+            Region D lite — failure pulse (top signatures)
+ **************************************************************/
+
+// Top-5 error signatures from the phase-9 index (§3.1 Region D, lite cut:
+// the 24h bar chart + deploy markers need ring buffers, phase 10). Each row
+// clicks through to /errors pre-selected. Renders nothing while the index
+// is empty or the endpoint is absent — no dead panel on healthy fleets.
+function FailurePulse() {
+  const [sigs, setSigs] = useState<ErrorSignatureRow[] | null>(null);
+  const [trimmedCount, setTrimmedCount] = useState(0);
+
+  const fetchSigs = useCallback(async () => {
+    try {
+      const r = await listErrorSignatures({ limit: 5, sort: "count" });
+      setSigs(r.signatures);
+      setTrimmedCount(r.honesty.trimmed_queues.length);
+    } catch {
+      setSigs(null); // endpoint absent/unhealthy: render nothing, not zeros
+    }
+  }, []);
+
+  useEffect(() => {
+    fetchSigs();
+    const id = setInterval(fetchSigs, 30_000);
+    return () => clearInterval(id);
+  }, [fetchSigs]);
+
+  if (!sigs || sigs.length === 0) return null;
+
+  return (
+    <div className="mt-3 rounded-lg border border-[var(--fc-line)] bg-[var(--fc-panel)]">
+      <div className="flex items-center gap-2 border-b border-[var(--fc-line2)] px-3 py-2 text-xs font-semibold text-[var(--fc-ink)]">
+        Failure pulse — top signatures
+        <span className="font-normal text-[var(--fc-ink3)]">
+          archived tail exact · retry sampled · 24h chart arrives with ring buffers
+        </span>
+        <span className="flex-1" />
+        {trimmedCount > 0 && (
+          <FcChip tone="warn">
+            lower bounds — {trimmedCount} queue{trimmedCount > 1 ? "s" : ""} at archive cap
+          </FcChip>
+        )}
+        <Link to={paths().ERRORS} className="text-[11px] font-normal text-[var(--fc-acc)] no-underline hover:underline">
+          all signatures →
+        </Link>
+      </div>
+      {sigs.map((s) => (
+        <Link
+          key={s.sig}
+          to={`${paths().ERRORS}?sig=${encodeURIComponent(s.sig)}`}
+          className="flex items-center gap-2.5 border-b border-[var(--fc-line2)] px-3 py-1.5 no-underline last:border-b-0 hover:bg-[var(--fc-raise)]"
+        >
+          <FcChip tone={trendTone(s.trend)}>{s.trend}</FcChip>
+          <code className="min-w-0 flex-1 overflow-hidden text-ellipsis whitespace-nowrap font-mono text-[11.5px] text-[var(--fc-ink)]">
+            {s.template}
+          </code>
+          <b className="font-mono text-xs tabular-nums text-[var(--fc-ink)]">
+            {formatSigCount(s.count, s.count_is_lower_bound)}
+          </b>
+        </Link>
+      ))}
     </div>
   );
 }
@@ -300,6 +369,9 @@ export default function FleetView() {
           ))
         )}
       </div>
+
+      {/* Region D lite — failure pulse (phase 9; chart lands in phase 10) */}
+      <FailurePulse />
     </div>
   );
 }

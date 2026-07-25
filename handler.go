@@ -12,6 +12,7 @@ import (
 	"github.com/hibiken/asynq"
 	"github.com/redis/go-redis/v9"
 
+	"github.com/hibiken/asynqmon/errsig"
 	"github.com/hibiken/asynqmon/jobs"
 	"github.com/hibiken/asynqmon/stats"
 )
@@ -104,6 +105,18 @@ type Options struct {
 	// endpoints still work — another replica's runner claims the jobs. The
 	// runner never starts in ReadOnly mode regardless.
 	JobsDisabled bool
+
+	// ------------------------------------------------------------------
+	// Fleet Console phase 9 — error-signature index (§3.6/§5.7) options.
+	// ------------------------------------------------------------------
+
+	// ErrorIndexDisabled turns off this replica's error-signature indexer.
+	// The /api/errors endpoints still serve the shared store (another
+	// replica's indexer feeds it). Like stats collection, indexing writes
+	// only asynqmon-owned keys, so it stays enabled in ReadOnly mode unless
+	// disabled here explicitly.
+	ErrorIndexDisabled bool
+	// --------------------------- end phase 9 ---------------------------
 }
 
 // HTTPHandler is a http.Handler for asynqmon application.
@@ -186,6 +199,26 @@ func New(opts Options) *HTTPHandler {
 		}, closers...)
 	}
 
+	// ------------------------------------------------------------------
+	// Fleet Console phase 9 — error-signature indexer lifecycle (§5.7,
+	// §5.13). Same pattern as the stats engine: only the replica holding
+	// the errsig lease feeds the index; every replica serves the
+	// /api/errors endpoints from the shared store, so starting it
+	// unconditionally is safe. It runs in ReadOnly mode too — it writes
+	// only asynqmon-owned index keys, never asynq's.
+	// ------------------------------------------------------------------
+	if !opts.ErrorIndexDisabled {
+		errIndexer := errsig.NewIndexer(errsig.Config{
+			RedisClient: rc,
+			Inspector:   i,
+		})
+		errIndexer.Start(context.Background())
+		closers = append([]func() error{
+			func() error { errIndexer.Stop(); return nil },
+		}, closers...)
+	}
+	// --------------------------- end phase 9 ---------------------------
+
 	return &HTTPHandler{
 		router:   muxRouter(opts, rc, i, statsEngine, eventsBroker),
 		closers:  closers,
@@ -242,6 +275,14 @@ func muxRouter(opts Options, rc redis.UniversalClient, inspector *asynq.Inspecto
 	api.HandleFunc("/queues/{qname}", newDeleteQueueHandlerFunc(inspector)).Methods("DELETE")
 	api.HandleFunc("/queues/{qname}:pause", newPauseQueueHandlerFunc(inspector)).Methods("POST")
 	api.HandleFunc("/queues/{qname}:resume", newResumeQueueHandlerFunc(inspector)).Methods("POST")
+
+	// ── Queue Workspace routes (Fleet Console §3.3) — registration only ──
+	// Right-rail histograms: retry-ETA (exact pipelined ZCOUNT buckets on the
+	// retry zset) and pending-wait (head/tail LINDEX sampling, labeled
+	// "sampled, head/tail-biased"). Handlers live in queue_workspace_handlers.go.
+	api.HandleFunc("/queues/{qname}/retry_histogram", newRetryHistogramHandlerFunc(rc)).Methods("GET")
+	api.HandleFunc("/queues/{qname}/pending_wait_sample", newPendingWaitSampleHandlerFunc(rc)).Methods("GET")
+	// ── end Queue Workspace routes ──
 
 	// Queue Historical Stats endpoint.
 	api.HandleFunc("/queue_stats", newListQueueStatsHandlerFunc(inspector)).Methods("GET")
@@ -348,6 +389,14 @@ func muxRouter(opts Options, rc redis.UniversalClient, inspector *asynq.Inspecto
 	api.HandleFunc("/schedulers", newListSchedulersHandlerFunc(inspector, rc, payloadFmt, stats.DefaultSchedulerGoneAfter)).Methods("GET")
 	api.HandleFunc("/schedulers/{stable_key}/outcomes", newSchedulerOutcomesHandlerFunc(inspector, rc)).Methods("GET")
 	// ── end Schedulers screen routes ──
+
+	// ── Errors screen routes (Fleet Console §3.6/§5.7, phase 9) ──
+	// Failure-signature explorer, served from the shared errsig store (any
+	// replica; the leased indexer started in New feeds it). Handlers live in
+	// errsig_handlers.go; the index substrate is the errsig package.
+	api.HandleFunc("/errors/signatures", newListErrorSignaturesHandlerFunc(rc)).Methods("GET")
+	api.HandleFunc("/errors/signatures/{sig}", newGetErrorSignatureHandlerFunc(rc)).Methods("GET")
+	// ── end Errors screen routes ──
 
 	// Redis info endpoint.
 	switch c := rc.(type) {
