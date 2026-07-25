@@ -150,6 +150,61 @@ export async function getFleetAttention(): Promise<FleetAttentionResponse> {
 }
 
 /**************************************************************
+                      GET /api/coverage
+ **************************************************************/
+
+// Workers screen (§3.7): the queues × consuming-servers join (§5.5).
+export type CoverageStatus = "ok" | "uncovered" | "starved";
+
+export interface CoverageConsumer {
+  server_id: string;
+  host: string;
+  pid: number;
+  weight: number;
+  strict_priority: boolean;
+}
+
+export interface CoverageRow {
+  queue: string;
+  // Pending depth from the stats cache; absent when the cache is
+  // unavailable — absent data is not zero.
+  pending?: number;
+  consumers: CoverageConsumer[];
+  // Upper bound of worker slots that could serve this queue (each server's
+  // slots are shared across its whole queue map).
+  total_concurrency: number;
+  status: CoverageStatus;
+}
+
+export interface CoverageResponse {
+  rows: CoverageRow[];
+  updated_at: string; // RFC3339
+}
+
+export async function getCoverage(): Promise<CoverageResponse> {
+  const resp = await axios({ method: "get", url: `${getBaseUrl()}/coverage` });
+  return resp.data;
+}
+
+/**************************************************************
+                  GET /api/cancel-listeners
+ **************************************************************/
+
+// Cancel deliverability (§5.14): PUBSUB NUMSUB on asynq's cancelation
+// channel ("asynq:cancel", asynq internal/base). approximate=true on Redis
+// Cluster where the count is summed across reachable nodes.
+export interface CancelListenersResponse {
+  listeners: number;
+  approximate: boolean;
+  nodes: number;
+}
+
+export async function getCancelListeners(): Promise<CancelListenersResponse> {
+  const resp = await axios({ method: "get", url: `${getBaseUrl()}/cancel-listeners` });
+  return resp.data;
+}
+
+/**************************************************************
                     SSE GET /api/fleet/events
  **************************************************************/
 
