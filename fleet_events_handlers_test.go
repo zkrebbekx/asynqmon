@@ -51,8 +51,8 @@ func TestFleetAttentionHandler(t *testing.T) {
 				So(rep.Findings[2].Queue, ShouldEqual, "alpha")
 			})
 			Convey("Then the report footer states the detector census", func() {
-				So(rep.DetectorsLive, ShouldEqual, 9)
-				So(rep.DetectorsLearning, ShouldEqual, 0)
+				So(rep.DetectorsLive, ShouldEqual, 10) // phase 10: 12 detectors, 2 learning on a fresh substrate
+				So(rep.DetectorsLearning, ShouldEqual, 2)
 				So(rep.UpdatedAt, ShouldNotBeEmpty)
 			})
 		})
@@ -257,7 +257,7 @@ func TestFleetEventsHandler(t *testing.T) {
 			So(c1InitAttention.data, ShouldNotBeEmpty)
 			var rep stats.AttentionReport
 			So(json.Unmarshal([]byte(c1InitAttention.data), &rep), ShouldBeNil)
-			So(rep.DetectorsLive, ShouldEqual, 9)
+			So(rep.DetectorsLive, ShouldEqual, 10) // phase 10: 12 detectors, 2 learning on a fresh substrate
 			// One sweep so far: NO_CONSUMERS is still debouncing.
 			So(rep.Findings, ShouldBeEmpty)
 		})

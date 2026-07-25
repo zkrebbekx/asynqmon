@@ -8,6 +8,7 @@ export const paths = () => ({
   TASKS: `${window.ROOT_PATH}/tasks`,
   ERRORS: `${window.ROOT_PATH}/errors`, // Errors — failure-signature explorer (§3.6)
   OPS: `${window.ROOT_PATH}/ops`, // Operations — bulk jobs + audit (§3.9)
+  HYGIENE: `${window.ROOT_PATH}/hygiene`, // Hygiene — scheduled rot reports (§3.10)
   REDIS: `${window.ROOT_PATH}/redis`,
   TASK_DETAILS: `${window.ROOT_PATH}/queues/:qname/tasks/:taskId`,
   QUEUE_METRICS: `${window.ROOT_PATH}/q/metrics`,

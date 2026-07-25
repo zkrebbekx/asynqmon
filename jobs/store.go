@@ -650,6 +650,12 @@ const (
 	AuditJobCreated   = "job_created"
 	AuditJobFinished  = "job_finished" // done, failed, or canceled — final counts attached
 	AuditTaskEnqueued = "task_enqueued" // §5.10 single-task enqueue; TaskID set, Acted = 1
+
+	// Hygiene events (§3.10). Verb carries the report kind. Run triggers are
+	// logged even in read-only mode (report generation is a read of asynq
+	// state); config changes are read-only-blocked upstream.
+	AuditHygieneRun    = "hygiene_report_run"
+	AuditHygieneConfig = "hygiene_config_changed"
 )
 
 // AppendAudit writes one audit entry (XADD, MAXLEN ~10000).

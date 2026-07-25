@@ -1,4 +1,4 @@
-import { useEffect, lazy, Suspense } from "react";
+import { useEffect, useState, lazy, Suspense } from "react";
 import { useSelector, useDispatch } from "react-redux";
 import { BrowserRouter, Routes, Route, NavLink } from "react-router-dom";
 import { Toaster, toast } from "sonner";
@@ -11,6 +11,7 @@ import {
   Server,
   Clock,
   Database,
+  Sparkles,
   TrendingUp,
   Settings,
   ChevronLeft,
@@ -21,8 +22,12 @@ import { paths } from "./paths";
 import { toggleDrawer } from "./actions/settingsActions";
 import { closeSnackbar } from "./actions/snackbarActions";
 import { useIsDark } from "./hooks";
+import { useKeymap } from "./hooks/useKeymap";
+import { OVERLAY_ATTR } from "./lib/keymap";
 import { cn } from "./lib/utils";
 import HeaderBar from "./components/HeaderBar";
+import CommandPalette from "./components/CommandPalette";
+import KeyboardCheatsheet from "./components/KeyboardCheatsheet";
 
 // Route-level code splitting: each view (and its heavy deps like recharts)
 // loads on demand instead of in the initial bundle.
@@ -35,6 +40,7 @@ const TaskDetailsView = lazy(() => import("./views/TaskDetailsView"));
 const SchedulersView = lazy(() => import("./views/SchedulersView"));
 const ServersView = lazy(() => import("./views/ServersView"));
 const OpsView = lazy(() => import("./views/OpsView"));
+const HygieneView = lazy(() => import("./views/HygieneView"));
 const RedisInfoView = lazy(() => import("./views/RedisInfoView"));
 const MetricsView = lazy(() => import("./views/MetricsView"));
 const SettingsView = lazy(() => import("./views/SettingsView"));
@@ -88,6 +94,30 @@ function AppContent() {
   const isDark = useIsDark();
   const appPaths = paths();
 
+  // Global keyboard model (§4.5): ⌘K palette, "?" cheat-sheet, "/" focuses
+  // the active page's query/filter bar (inputs opt in via data-fc-querybar).
+  const [paletteOpen, setPaletteOpen] = useState(false);
+  const [cheatOpen, setCheatOpen] = useState(false);
+  useKeymap({
+    "mod+k": {
+      onTrigger: () => setPaletteOpen((o) => !o),
+      allowInInput: true,
+      allowInOverlay: true,
+    },
+    "?": { onTrigger: () => setCheatOpen((o) => !o), allowInOverlay: true },
+    "/": () => {
+      document.querySelector<HTMLElement>("[data-fc-querybar]")?.focus();
+    },
+  });
+
+  // While an overlay is open, page-level bindings (j/k/x…) go quiet — the
+  // body attribute is the guard lib/keymap's dispatcher checks.
+  useEffect(() => {
+    const open = paletteOpen || cheatOpen;
+    document.body.toggleAttribute(OVERLAY_ATTR, open);
+    return () => document.body.removeAttribute(OVERLAY_ATTR);
+  }, [paletteOpen, cheatOpen]);
+
   // Apply dark class to root
   useEffect(() => {
     document.documentElement.classList.toggle("dark", isDark);
@@ -110,10 +140,9 @@ function AppContent() {
         collapsed ? "grid-cols-[56px_1fr]" : "grid-cols-[200px_1fr]"
       )}
     >
-      <HeaderBar />
+      <HeaderBar onOpenPalette={() => setPaletteOpen(true)} />
 
-      {/* Grouped nav (build contract §2 IA). Hygiene arrives with phase 15 —
-          no dead links until then. */}
+      {/* Grouped nav (build contract §2 IA). */}
       <aside className="flex flex-col overflow-y-auto border-r border-[var(--fc-line)] bg-[var(--fc-panel)] px-2 py-2">
         <nav className="flex flex-1 flex-col gap-px">
           <NavGroupLabel label="Monitor" collapsed={collapsed} />
@@ -128,6 +157,7 @@ function AppContent() {
           <NavItem to={appPaths.SERVERS} icon={<Server size={15} />} label="Workers" collapsed={collapsed} />
           <NavItem to={appPaths.SCHEDULERS} icon={<Clock size={15} />} label="Schedulers" collapsed={collapsed} />
           <NavItem to={appPaths.OPS} icon={<Play size={15} />} label="Operations" collapsed={collapsed} />
+          <NavItem to={appPaths.HYGIENE} icon={<Sparkles size={15} />} label="Hygiene" collapsed={collapsed} />
           <NavGroupLabel label="System" collapsed={collapsed} />
           <NavItem to={appPaths.REDIS} icon={<Database size={15} />} label="Redis" collapsed={collapsed} />
           <NavItem to={appPaths.SETTINGS} icon={<Settings size={15} />} label="Settings" collapsed={collapsed} />
@@ -162,6 +192,7 @@ function AppContent() {
             <Route path={appPaths.SCHEDULERS} element={<SchedulersView />} />
             <Route path={appPaths.SERVERS} element={<ServersView />} />
             <Route path={appPaths.OPS} element={<OpsView />} />
+            <Route path={appPaths.HYGIENE} element={<HygieneView />} />
             <Route path={appPaths.REDIS} element={<RedisInfoView />} />
             <Route path={appPaths.SETTINGS} element={<SettingsView />} />
             <Route path={appPaths.QUEUE_METRICS} element={<MetricsView />} />
@@ -170,6 +201,10 @@ function AppContent() {
           </Routes>
         </Suspense>
       </main>
+
+      {/* §4.1 command palette + §4.5 cheat-sheet overlays */}
+      <CommandPalette open={paletteOpen} onClose={() => setPaletteOpen(false)} />
+      <KeyboardCheatsheet open={cheatOpen} onClose={() => setCheatOpen(false)} />
 
       <Toaster position="bottom-left" />
     </div>

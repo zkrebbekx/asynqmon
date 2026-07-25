@@ -13,6 +13,7 @@ import (
 	"github.com/redis/go-redis/v9"
 
 	"github.com/hibiken/asynqmon/errsig"
+	"github.com/hibiken/asynqmon/hygiene"
 	"github.com/hibiken/asynqmon/jobs"
 	"github.com/hibiken/asynqmon/stats"
 )
@@ -133,6 +134,30 @@ type Options struct {
 	// tests that build the router directly may inject their own.
 	enqueueClient *asynq.Client
 	// --------------------------- end §5.10 -----------------------------
+
+	// ------------------------------------------------------------------
+	// Fleet Console phase 15 — hygiene reports (§3.10) options.
+	// ------------------------------------------------------------------
+
+	// HygieneWebhookURL, if set, receives a POST of the full report JSON
+	// every time a hygiene report is generated (scheduled or Run-now).
+	// Delivery is best-effort: one attempt with a 10s timeout and NO
+	// retries (v1) — a missed delivery is recoverable in-UI, where the
+	// persisted report stays readable.
+	HygieneWebhookURL string
+
+	// HygieneDisabled turns off this replica's leased hygiene scheduler.
+	// The /api/hygiene endpoints still serve persisted reports and Run-now
+	// still generates on this replica. Like stats collection, hygiene
+	// writes only asynqmon-owned keys, so it stays enabled in ReadOnly
+	// mode unless disabled here explicitly.
+	HygieneDisabled bool
+
+	// hygieneEngine backs the hygiene routes. Set by New (and stopped via
+	// HTTPHandler.Close); muxRouter builds an unstarted engine itself when
+	// absent (direct-router tests).
+	hygieneEngine *hygiene.Engine
+	// --------------------------- end phase 15 --------------------------
 }
 
 // HTTPHandler is a http.Handler for asynqmon application.
@@ -246,6 +271,34 @@ func New(opts Options) *HTTPHandler {
 		closers = append(closers, ec.Close)
 	}
 	// --------------------------- end §5.10 -----------------------------
+
+	// ------------------------------------------------------------------
+	// Fleet Console phase 15 — hygiene report engine lifecycle (§3.10,
+	// §5.13). Same pattern as the stats engine: the engine is constructed
+	// on every replica (it backs the Run-now endpoint and store reads);
+	// its leased interval scheduler starts unless disabled, and only the
+	// asynqmon:lock:hygiene holder generates scheduled reports. Runs in
+	// ReadOnly mode too — generation reads asynq state and writes only
+	// asynqmon-owned report keys.
+	// ------------------------------------------------------------------
+	var snapshotsFn func(ctx context.Context) (*stats.ReadResult, error)
+	if statsEngine != nil {
+		snapshotsFn = statsEngine.Read
+	}
+	hygieneEngine := hygiene.NewEngine(hygiene.Config{
+		RedisClient: rc,
+		Inspector:   i,
+		Snapshots:   snapshotsFn,
+		WebhookURL:  opts.HygieneWebhookURL,
+	})
+	opts.hygieneEngine = hygieneEngine
+	if !opts.HygieneDisabled {
+		hygieneEngine.Start(context.Background())
+		closers = append([]func() error{
+			func() error { hygieneEngine.Stop(); return nil },
+		}, closers...)
+	}
+	// --------------------------- end phase 15 --------------------------
 
 	return &HTTPHandler{
 		router:   muxRouter(opts, rc, i, statsEngine, eventsBroker),
@@ -475,6 +528,58 @@ func muxRouter(opts Options, rc redis.UniversalClient, inspector *asynq.Inspecto
 	api.HandleFunc("/markers", newCreateMarkerHandlerFunc(markerSt, jobsStore)).Methods("POST")
 	api.HandleFunc("/markers", newListMarkersHandlerFunc(markerSt)).Methods("GET")
 	// --------------------------- end phase 10 --------------------------
+
+	// ------------------------------------------------------------------
+	// Fleet Console phase 11 — §4.2 saved views (views.go /
+	// views_handlers.go). Server-side team assets in shared Redis (§5.13:
+	// plain shared structures, any replica serves/writes). System views
+	// are seeded idempotently at boot — best-effort, since a transient
+	// Redis error at boot must not take the whole handler down; the next
+	// boot self-heals. They are undeletable/unmodifiable (400 + reason).
+	// Mutations are actor-attributed (§5.11) and audit-logged via the
+	// phase-5 store; the read-only method filter below blocks them. State
+	// JSON is stored and served VERBATIM — relative→absolute time
+	// conversion at share time is a frontend concern (§4.2).
+	// ------------------------------------------------------------------
+	viewSt := newRedisViewStore(rc)
+	_ = seedSystemViews(context.Background(), viewSt)
+	api.HandleFunc("/views", newListViewsHandlerFunc(viewSt)).Methods("GET")
+	api.HandleFunc("/views", newCreateViewHandlerFunc(viewSt, jobsStore)).Methods("POST")
+	api.HandleFunc("/views/{view_id}", newUpdateViewHandlerFunc(viewSt, jobsStore)).Methods("PUT")
+	api.HandleFunc("/views/{view_id}", newDeleteViewHandlerFunc(viewSt, jobsStore)).Methods("DELETE")
+	// --------------------------- end phase 11 --------------------------
+
+	// ------------------------------------------------------------------
+	// Fleet Console phase 15 — hygiene reports (§3.10; hygiene_handlers.go,
+	// hygiene package). GETs serve the persisted store (any replica); the
+	// PUT config route is read-only-blocked by the method filter below and
+	// audit-logged. POST …/run is registered on the PARENT router so it
+	// stays available in read-only mode — report generation only reads
+	// asynq state and writes asynqmon-owned report keys — with the §5.11
+	// actor middleware applied explicitly and the trigger audit-logged.
+	// ------------------------------------------------------------------
+	hygieneEng := opts.hygieneEngine
+	if hygieneEng == nil {
+		// muxRouter built directly (tests). In production New owns the
+		// started, closer-managed engine and sets it before building the
+		// router. NewEngine touches no Redis until Run/Start.
+		var hygieneSnapshots func(ctx context.Context) (*stats.ReadResult, error)
+		if statsEngine != nil {
+			hygieneSnapshots = statsEngine.Read
+		}
+		hygieneEng = hygiene.NewEngine(hygiene.Config{
+			RedisClient: rc,
+			Inspector:   inspector,
+			Snapshots:   hygieneSnapshots,
+			WebhookURL:  opts.HygieneWebhookURL,
+		})
+	}
+	api.HandleFunc("/hygiene", newListHygieneHandlerFunc(rc)).Methods("GET")
+	api.HandleFunc("/hygiene/{kind}", newGetHygieneReportHandlerFunc(rc)).Methods("GET")
+	api.HandleFunc("/hygiene/{kind}/config", newPutHygieneConfigHandlerFunc(rc, jobsStore)).Methods("PUT")
+	router.Handle("/api/hygiene/{kind}/run",
+		newActorMiddleware(opts)(newRunHygieneHandlerFunc(hygieneEng, jobsStore))).Methods("POST")
+	// --------------------------- end phase 15 --------------------------
 
 	// ------------------------------------------------------------------
 	// Fleet Console — enqueue route + capability discovery (§5.10;
