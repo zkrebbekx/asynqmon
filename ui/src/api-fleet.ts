@@ -8,7 +8,7 @@
 import axios from "axios";
 import queryString from "query-string";
 
-import type { SchedulerEntry } from "./api";
+import type { SchedulerEntry, TaskInfo } from "./api";
 
 // Same base-URL convention as api.ts: production serves the API on the same
 // origin; development proxies /api via vite.
@@ -290,6 +290,37 @@ export async function getSchedulerOutcomes(
   const resp = await axios({
     method: "get",
     url: `${getBaseUrl()}/schedulers/${stableKey}/outcomes`,
+  });
+  return resp.data;
+}
+
+/**************************************************************
+        POST /api/schedulers/:stable_key/run (upstream #337)
+ **************************************************************/
+
+// Run a scheduler entry's task NOW through the flag-gated enqueue client
+// (upstream hibiken/asynqmon#337). NOT a scheduler tick: a fresh task is
+// enqueued with the entry's type/payload; the entry's own schedule and
+// history are untouched. Works for live AND gone entries (the snapshot is
+// enough). Field names are a backend contract (scheduler_run_handlers.go).
+export interface RunSchedulerEntryResponse {
+  // The created task, in the task-detail shape.
+  task: TaskInfo;
+  // Entry options honored on this enqueue, in asynq's option rendering.
+  applied_options: string[];
+  // Entry options NOT applied, each suffixed with the reason (schedule
+  // options are always skipped — the task is due immediately).
+  skipped_options: string[];
+}
+
+export async function runSchedulerEntry(
+  stableKey: string,
+  reason?: string
+): Promise<RunSchedulerEntryResponse> {
+  const resp = await axios({
+    method: "post",
+    url: `${getBaseUrl()}/schedulers/${stableKey}/run`,
+    data: reason ? { reason } : {},
   });
   return resp.data;
 }

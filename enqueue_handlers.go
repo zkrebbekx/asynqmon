@@ -121,6 +121,11 @@ type featuresResponse struct {
 	// Older frontends ignore it; older backends omit it and the frontend
 	// falls back to its built-in default list.
 	CorrelationKeys []string `json:"correlation_keys"`
+	// PayloadDetailLimit is the character cap the task DETAIL endpoint's
+	// formatters apply (--max-detail-payload-length, upstream
+	// hibiken/asynqmon#301); 0 = unlimited/unknown. The drawer uses it to
+	// render an honest "truncated at N chars" note on capped payloads.
+	PayloadDetailLimit int `json:"payload_detail_limit"`
 }
 
 // defaultCorrelationKeys is the Flow view's correlation-key list when
@@ -155,11 +160,12 @@ func normalizeCorrelationKeys(keys []string) []string {
 // Deliberately not part of /api/fleet/overview — that endpoint 503s whenever
 // the stats engine is disabled or has not swept yet, and capability
 // discovery must not depend on it.
-func newFeaturesHandlerFunc(enqueueEnabled bool, correlationKeys []string) http.HandlerFunc {
+func newFeaturesHandlerFunc(enqueueEnabled bool, correlationKeys []string, payloadDetailLimit int) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var resp featuresResponse
 		resp.Features.Enqueue = enqueueEnabled
 		resp.CorrelationKeys = correlationKeys
+		resp.PayloadDetailLimit = payloadDetailLimit
 		writeResponseJSON(w, resp)
 	}
 }

@@ -14,7 +14,9 @@ import {
   cancelActiveTaskAsync,
 } from "../actions/tasksActions";
 import { usePolling } from "../hooks";
-import { useCorrelationKeys, useEnqueueEnabled } from "../hooks/useFeatures";
+import {
+  useCorrelationKeys, useEnqueueEnabled, usePayloadDetailLimit,
+} from "../hooks/useFeatures";
 import {
   durationBefore, durationFromSeconds, durationSince, formatTimestamp,
   prettifyPayload, stringifyDuration, stringifyDurationMs, timeAgo, toErrorString,
@@ -168,6 +170,7 @@ export default function TaskDrawer({ peek, resultList, onClose, onPeek, onPivot 
   const [taskInfo, setTaskInfo] = useState<TaskInfo | null>(null);
   const [fetchErr, setFetchErr] = useState("");
   const [copied, setCopied] = useState(false);
+  const [payloadCopied, setPayloadCopied] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [cloneOpen, setCloneOpen] = useState(false);
   const [tab, setTab] = useState<"detail" | "flow">("detail");
@@ -219,6 +222,7 @@ export default function TaskDrawer({ peek, resultList, onClose, onPeek, onPivot 
     setObserved(null);
     setConfirmDelete(false);
     setCloneOpen(false);
+    setPayloadCopied(false);
   }, [peekKey]);
 
   // Route-match guard (kept from the details view): the state may still hold
@@ -344,6 +348,22 @@ export default function TaskDrawer({ peek, resultList, onClose, onPeek, onPivot 
     setCopied(true);
     setTimeout(() => setCopied(false), 1500);
   };
+  const copyPayload = () => {
+    if (!task?.payload) return;
+    navigator.clipboard?.writeText(task.payload);
+    setPayloadCopied(true);
+    setTimeout(() => setPayloadCopied(false), 1500);
+  };
+
+  // Server-side detail truncation note (upstream hibiken/asynqmon#301): the
+  // backend's truncate yields exactly cap+1 code points ending in "…", so a
+  // payload longer than the advertised cap was capped by the server.
+  const payloadDetailLimit = usePayloadDetailLimit();
+  const payloadCodePoints = useMemo(
+    () => (task?.payload ? [...task.payload].length : 0),
+    [task]
+  );
+  const payloadTruncated = payloadDetailLimit > 0 && payloadCodePoints > payloadDetailLimit;
 
   const state = task?.state ?? "";
   const canRun = !window.READ_ONLY && !!task && !!runThunks[state];
@@ -772,6 +792,20 @@ export default function TaskDrawer({ peek, resultList, onClose, onPeek, onPivot 
               <section className="mb-5">
                 <SectionTitle>
                   Payload{task.payload ? ` · ${payloadBytes} B` : ""}
+                  {task.payload && (
+                    <button
+                      onClick={copyPayload}
+                      aria-label="Copy payload"
+                      title="Copy payload"
+                      className="ml-2 align-middle text-[var(--fc-ink3)] transition-colors hover:text-[var(--fc-ink)]"
+                    >
+                      {payloadCopied ? (
+                        <Check size={12} className="text-[var(--fc-good)]" />
+                      ) : (
+                        <Copy size={12} />
+                      )}
+                    </button>
+                  )}
                   {corr && (
                     <button
                       onClick={() => setTab("flow")}
@@ -782,9 +816,18 @@ export default function TaskDrawer({ peek, resultList, onClose, onPeek, onPivot 
                   )}
                 </SectionTitle>
                 {task.payload ? (
-                  <div className="overflow-x-auto rounded-md border border-[var(--fc-line)] bg-[var(--fc-bg)] p-2 text-xs">
-                    <SyntaxHighlighter>{prettifyPayload(task.payload)}</SyntaxHighlighter>
-                  </div>
+                  <>
+                    <div className="overflow-x-auto rounded-md border border-[var(--fc-line)] bg-[var(--fc-bg)] p-2 text-xs">
+                      <SyntaxHighlighter>{prettifyPayload(task.payload)}</SyntaxHighlighter>
+                    </div>
+                    {/* Honest server-cap note (upstream hibiken/asynqmon#301) */}
+                    {payloadTruncated && (
+                      <Stamp className="mt-1 block">
+                        payload truncated at {payloadDetailLimit.toLocaleString("en-US")} chars
+                        by the server (--max-detail-payload-length)
+                      </Stamp>
+                    )}
+                  </>
                 ) : (
                   <Stamp>No payload</Stamp>
                 )}

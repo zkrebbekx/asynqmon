@@ -39,6 +39,33 @@ export function useEnqueueEnabled(): boolean {
   return enabled;
 }
 
+// usePayloadDetailLimit returns the character cap the backend's task DETAIL
+// endpoint applies to formatted payloads/results (--max-detail-payload-length,
+// upstream hibiken/asynqmon#301), or 0 when unlimited/unknown (older
+// backends, probe failure). Probes in read-only mode too — reading a payload
+// is a read-only feature.
+export function usePayloadDetailLimit(): number {
+  const [limit, setLimit] = useState(0);
+  useEffect(() => {
+    let alive = true;
+    if (!cached) cached = api.getFeatures();
+    cached
+      .then((f) => {
+        if (alive && typeof f.payload_detail_limit === "number" && f.payload_detail_limit > 0) {
+          setLimit(f.payload_detail_limit);
+        }
+      })
+      .catch(() => {
+        // Older backends without /api/features: no cap knowledge — no note.
+        cached = null;
+      });
+    return () => {
+      alive = false;
+    };
+  }, []);
+  return limit;
+}
+
 // useCorrelationKeys returns the payload keys this deployment's Flow view
 // recognizes as correlation ids (--correlation-keys, §3.5), in priority
 // order. Defaults apply while loading, on probe failure, and against older
