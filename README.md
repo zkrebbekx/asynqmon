@@ -127,6 +127,7 @@ _Note_: Use `--redis-url` to specify address, db-number, and password with one f
 | `--prometheus-addr`(string)       | `PROMETHEUS_ADDR`         | address of prometheus server to query time series                                                                            | ""               |
 | `--read-only`(bool)               | `READ_ONLY`               | use web UI in read-only mode                                                                                                 | false            |
 | `--enable-enqueue`(bool)          | `ENABLE_ENQUEUE`          | enable creating tasks from the web UI (`POST /api/queues/{qname}/tasks`, powers clone-and-edit); always excluded in read-only mode | false            |
+| `--correlation-keys`(string)      | `CORRELATION_KEYS`        | comma separated list of payload keys the task drawer's Flow view recognizes as correlation ids, in priority order ([details](#flow-view--correlation-keys)) | "trace_id,correlation_id,request_id" |
 | `--cors-allowed-origins`(string)  | `CORS_ALLOWED_ORIGINS`    | comma separated list of origins allowed to make cross-origin requests (empty = same-origin only; cross-origin mutations are rejected) | ""               |
 
 ### Connecting to Redis
@@ -208,6 +209,51 @@ click the dynamically-generated metadata chips (parsed from each task's JSON
 payload) to drill down with `key=value` filters.
 
 ![Web UI global Tasks view](./docs/screenshots/tasks-global.png)
+
+### Flow view & correlation keys
+
+When a task's JSON payload carries a recognized correlation id, the task
+drawer grows a **Flow** tab showing every task that shares the same id across
+all queues and states, time-ordered into a de-facto chain. Each entry pivots
+to its own drawer, and a count line summarizes the chain ("N tasks share
+`trace_id=...` across M queues").
+
+**How producers opt in.** This is purely a payload convention — no asynq
+changes and no extra infrastructure. Put one of the recognized keys in your
+task payloads at enqueue time:
+
+```json
+{"user_id": 42, "trace_id": "tr-7f3e9a"}
+```
+
+Every task enqueued with the same `trace_id` value then shows up in each
+other's Flow tab.
+
+**Configuring the recognized keys.** By default the drawer recognizes
+`trace_id`, `correlation_id`, and `request_id` (first present wins). Override
+the list with the `--correlation-keys` flag or the `CORRELATION_KEYS` env
+var:
+
+```bash
+./asynqmon --correlation-keys=order_ref,trace_id
+```
+
+The configured list is served to the UI via `GET /api/features`
+(`"correlation_keys"`); older UIs ignore it and older backends fall back to
+the default list. Keys are matched against **top-level** payload fields; a
+key nested exactly one object deep (e.g. `{"meta": {"trace_id": ...}}`) is
+also recognized, but is then matched by searching for the value rather than
+the `key=value` pair, so keep correlation values reasonably unique
+(UUID-like) if you nest them.
+
+**Honesty caveats.** asynq stores no parent/child or causal links between
+tasks, so the Flow view is a reconstruction, not a trace: ordering is
+inferred from the timestamps asynq happens to store (completion and
+last-failure times — tasks without one sort last), the chain is bounded by
+the search caps (a "may be incomplete" note appears when they are hit), and
+tasks that were deleted or never enqueued simply don't appear. The view
+labels this honestly in the UI; treat it as a strong hint about related
+work, not a distributed trace.
 
 **Settings and adaptive dark mode**
 

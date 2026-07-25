@@ -633,6 +633,10 @@ export interface FeaturesResponse {
   features: {
     enqueue: boolean;
   };
+  // Configured payload keys the task drawer's Flow view recognizes as
+  // correlation ids (§3.5), in priority order. Absent on older backends —
+  // the client falls back to DEFAULT_CORRELATION_KEYS.
+  correlation_keys?: string[];
 }
 
 export async function getFeatures(): Promise<FeaturesResponse> {

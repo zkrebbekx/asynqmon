@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -242,6 +243,55 @@ func TestEnqueueGating(t *testing.T) {
 				So(fDisabled.Features.Enqueue, ShouldBeFalse)
 				So(fROCode, ShouldEqual, http.StatusOK)
 				So(fRO.Features.Enqueue, ShouldBeFalse)
+			})
+		})
+	})
+}
+
+// ----------------------------------------------------------------------------
+// Features shape: GET /api/features carries the Flow view's correlation-key
+// list (§3.5) next to the capability flags. Exercised on the handler func
+// directly — the wire shape needs no Redis.
+// ----------------------------------------------------------------------------
+
+func TestFeaturesCorrelationKeys(t *testing.T) {
+	probe := func(keys []string) featuresResponse {
+		w := httptest.NewRecorder()
+		r := httptest.NewRequest("GET", "/api/features", nil)
+		newFeaturesHandlerFunc(false, normalizeCorrelationKeys(keys))(w, r)
+		var f featuresResponse
+		if err := json.Unmarshal(w.Body.Bytes(), &f); err != nil {
+			t.Fatalf("decoding features response: %v", err)
+		}
+		return f
+	}
+
+	defResp := probe(nil)
+	customResp := probe([]string{"order_ref", "trace_id"})
+	messyResp := probe([]string{" order_ref ", "", "trace_id", "order_ref", "  "})
+	emptyResp := probe([]string{"", "  "})
+
+	Convey("Given the GET /api/features handler", t, func() {
+		Convey("When no correlation keys are configured", func() {
+			Convey("Then correlation_keys carries the default list in priority order", func() {
+				So(defResp.CorrelationKeys, ShouldResemble,
+					[]string{"trace_id", "correlation_id", "request_id"})
+			})
+		})
+		Convey("When a custom list is configured", func() {
+			Convey("Then correlation_keys mirrors it verbatim", func() {
+				So(customResp.CorrelationKeys, ShouldResemble, []string{"order_ref", "trace_id"})
+			})
+		})
+		Convey("When the list carries whitespace, empties, and duplicates", func() {
+			Convey("Then entries are trimmed, empties dropped, and dupes keep first slot", func() {
+				So(messyResp.CorrelationKeys, ShouldResemble, []string{"order_ref", "trace_id"})
+			})
+		})
+		Convey("When every configured entry is blank", func() {
+			Convey("Then the default list applies — a stray flag can't disable the Flow view", func() {
+				So(emptyResp.CorrelationKeys, ShouldResemble,
+					[]string{"trace_id", "correlation_id", "request_id"})
 			})
 		})
 	})

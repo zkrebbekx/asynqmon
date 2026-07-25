@@ -9,6 +9,7 @@ import (
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
 	"github.com/hibiken/asynq"
+	. "github.com/smartystreets/goconvey/convey"
 )
 
 func TestParseFlags(t *testing.T) {
@@ -36,6 +37,7 @@ func TestParseFlags(t *testing.T) {
 				ReadOnly:              false,
 				StatsInterval:         5 * time.Second,
 				DisableStats:          false,
+				CorrelationKeys:       "trace_id,correlation_id,request_id",
 
 				Args: []string{},
 			},
@@ -57,6 +59,53 @@ func TestParseFlags(t *testing.T) {
 		})
 	}
 
+}
+
+// Flow-view correlation keys (Fleet Console §3.5): --correlation-keys /
+// CORRELATION_KEYS, comma-separated, flag wins over env. Parsing runs
+// imperatively before the Convey tree (the repo's goconvey discipline);
+// the tree only reads captured results.
+func TestCorrelationKeysFlagParsing(t *testing.T) {
+	defCfg, defOut, defErr := parseFlags("asynqmon", []string{})
+
+	flagCfg, flagOut, flagErr := parseFlags("asynqmon",
+		[]string{"--correlation-keys", "order_ref,trace_id"})
+
+	t.Setenv("CORRELATION_KEYS", "batch_id,run_id")
+	envCfg, envOut, envErr := parseFlags("asynqmon", []string{})
+	bothCfg, bothOut, bothErr := parseFlags("asynqmon",
+		[]string{"--correlation-keys", "order_ref"})
+
+	Convey("Given the asynqmon command-line flag set", t, func() {
+		Convey("When no correlation flag or env is provided", func() {
+			Convey("Then the default recognized keys apply", func() {
+				So(defErr, ShouldBeNil)
+				So(defOut, ShouldBeEmpty)
+				So(defCfg.CorrelationKeys, ShouldEqual, "trace_id,correlation_id,request_id")
+			})
+		})
+		Convey("When --correlation-keys is passed", func() {
+			Convey("Then the comma-separated list replaces the default", func() {
+				So(flagErr, ShouldBeNil)
+				So(flagOut, ShouldBeEmpty)
+				So(flagCfg.CorrelationKeys, ShouldEqual, "order_ref,trace_id")
+			})
+		})
+		Convey("When only the CORRELATION_KEYS env var is set", func() {
+			Convey("Then the env value applies", func() {
+				So(envErr, ShouldBeNil)
+				So(envOut, ShouldBeEmpty)
+				So(envCfg.CorrelationKeys, ShouldEqual, "batch_id,run_id")
+			})
+		})
+		Convey("When both the flag and the env var are set", func() {
+			Convey("Then the flag wins", func() {
+				So(bothErr, ShouldBeNil)
+				So(bothOut, ShouldBeEmpty)
+				So(bothCfg.CorrelationKeys, ShouldEqual, "order_ref")
+			})
+		})
+	})
 }
 
 func TestMakeRedisConnOpt(t *testing.T) {

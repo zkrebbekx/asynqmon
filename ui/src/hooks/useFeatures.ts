@@ -4,6 +4,7 @@
 
 import { useEffect, useState } from "react";
 import * as api from "../api";
+import { DEFAULT_CORRELATION_KEYS } from "../lib/correlation";
 
 let cached: Promise<api.FeaturesResponse> | null = null;
 
@@ -36,4 +37,31 @@ export function useEnqueueEnabled(): boolean {
     };
   }, []);
   return enabled;
+}
+
+// useCorrelationKeys returns the payload keys this deployment's Flow view
+// recognizes as correlation ids (--correlation-keys, §3.5), in priority
+// order. Defaults apply while loading, on probe failure, and against older
+// backends whose /api/features omits the field. Unlike useEnqueueEnabled it
+// probes in read-only mode too — the Flow view is a read-only feature.
+export function useCorrelationKeys(): readonly string[] {
+  const [keys, setKeys] = useState<readonly string[]>(DEFAULT_CORRELATION_KEYS);
+  useEffect(() => {
+    let alive = true;
+    if (!cached) cached = api.getFeatures();
+    cached
+      .then((f) => {
+        if (alive && Array.isArray(f.correlation_keys) && f.correlation_keys.length > 0) {
+          setKeys(f.correlation_keys);
+        }
+      })
+      .catch(() => {
+        // Older backends without /api/features: keep the defaults.
+        cached = null;
+      });
+    return () => {
+      alive = false;
+    };
+  }, []);
+  return keys;
 }

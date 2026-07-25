@@ -78,7 +78,10 @@ describe("TaskDrawer clone-and-edit gating (§5.10)", () => {
     expect(screen.queryByText(/Clone & edit/)).not.toBeInTheDocument();
   });
 
-  it("hides the action in a read-only build without probing the backend", async () => {
+  it("hides the action in a read-only build even when the backend reports enqueue on", async () => {
+    // The features endpoint IS still probed in read-only builds — the Flow
+    // view's correlation-key list rides on it (useCorrelationKeys) — but its
+    // enqueue capability bit must never surface the clone action.
     mockApi(true);
     window.READ_ONLY = true;
     renderDrawer();
@@ -86,7 +89,6 @@ describe("TaskDrawer clone-and-edit gating (§5.10)", () => {
     // (the type renders as both the header chip and the pivot link).
     expect((await screen.findAllByText("email:send")).length).toBeGreaterThan(0);
     expect(screen.queryByText(/Clone & edit/)).not.toBeInTheDocument();
-    expect(api.getFeatures).not.toHaveBeenCalled();
   });
 });
 

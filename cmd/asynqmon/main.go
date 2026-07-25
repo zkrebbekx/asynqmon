@@ -52,6 +52,10 @@ type Config struct {
 	// excluded in read-only mode.
 	EnableEnqueue bool
 
+	// Comma-separated payload keys the task drawer's Flow view recognizes
+	// as correlation ids (Fleet Console §3.5), in priority order.
+	CorrelationKeys string
+
 	// Comma-separated list of origins allowed to make cross-origin requests.
 	// Empty (the default) means same-origin only.
 	CorsAllowedOrigins string
@@ -95,6 +99,7 @@ func parseFlags(progname string, args []string) (cfg *Config, output string, err
 	flags.StringVar(&conf.TrustedProxies, "trusted-proxies", getEnvDefaultString("TRUSTED_PROXIES", ""), "comma separated CIDRs the auth header is trusted from (empty: trusted from any peer)")
 	flags.BoolVar(&conf.RequireIdentity, "require-identity", getEnvOrDefaultBool("REQUIRE_IDENTITY", false), "refuse mutating requests that carry no resolvable identity")
 	flags.BoolVar(&conf.EnableEnqueue, "enable-enqueue", getEnvOrDefaultBool("ENABLE_ENQUEUE", false), "enable creating tasks from the web ui (POST /api/queues/{qname}/tasks); always excluded in read-only mode")
+	flags.StringVar(&conf.CorrelationKeys, "correlation-keys", getEnvDefaultString("CORRELATION_KEYS", "trace_id,correlation_id,request_id"), "comma separated list of payload keys the task drawer's Flow view recognizes as correlation ids, in priority order")
 	flags.StringVar(&conf.CorsAllowedOrigins, "cors-allowed-origins", getEnvDefaultString("CORS_ALLOWED_ORIGINS", ""), "comma separated list of origins allowed to make cross-origin requests (default: same-origin only)")
 
 	err = flags.Parse(args)
@@ -176,6 +181,13 @@ func main() {
 		trustedProxies = strings.Split(cfg.TrustedProxies, ",")
 	}
 
+	// Whitespace and empty entries are normalized (and an all-empty list
+	// falls back to the defaults) inside the asynqmon library.
+	var correlationKeys []string
+	if cfg.CorrelationKeys != "" {
+		correlationKeys = strings.Split(cfg.CorrelationKeys, ",")
+	}
+
 	h := asynqmon.New(asynqmon.Options{
 		RedisConnOpt:      redisConnOpt,
 		PayloadFormatter:  asynqmon.PayloadFormatterFunc(payloadFormatterFunc(cfg)),
@@ -188,6 +200,7 @@ func main() {
 		TrustedProxies:    trustedProxies,
 		RequireIdentity:   cfg.RequireIdentity,
 		EnableEnqueue:     cfg.EnableEnqueue,
+		CorrelationKeys:   correlationKeys,
 	})
 	defer h.Close()
 

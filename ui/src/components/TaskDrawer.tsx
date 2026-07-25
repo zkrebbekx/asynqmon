@@ -14,13 +14,15 @@ import {
   cancelActiveTaskAsync,
 } from "../actions/tasksActions";
 import { usePolling } from "../hooks";
-import { useEnqueueEnabled } from "../hooks/useFeatures";
+import { useCorrelationKeys, useEnqueueEnabled } from "../hooks/useFeatures";
 import {
   durationBefore, durationFromSeconds, durationSince, formatTimestamp,
   prettifyPayload, stringifyDuration, timeAgo, toErrorString,
 } from "../utils";
 import { MetaPair, metaId, parseMetadata } from "../lib/metadata";
-import { extractCorrelation } from "../lib/correlation";
+import {
+  distinctQueues, extractCorrelation, mergeFlowTasks, observedAt,
+} from "../lib/correlation";
 import { STATE_TONE, JourneyState } from "../lib/journey";
 import { PeekTarget } from "../lib/urlstate";
 import { cn } from "../lib/utils";
@@ -148,22 +150,10 @@ interface LifecycleEvent {
   node: React.ReactNode;
 }
 
-// Timestamps the flow can order by: asynq only stores completed_at and
-// last_failed_at as observed events on search results. States without one
-// sort last — the caption says ordering is inferred, not causal.
-function observedAt(t: TaskInfo): string {
-  const s = t.completed_at || t.last_failed_at || "";
-  return s.startsWith("0001-") ? "" : s;
-}
-function observedAtMs(t: TaskInfo): number {
-  const s = observedAt(t);
-  const ms = s ? Date.parse(s) : NaN;
-  return Number.isNaN(ms) ? Number.MAX_SAFE_INTEGER : ms;
-}
-
 interface FlowResult {
   tasks: TaskInfo[];
   total: number;
+  queues: number; // distinct queues across the full merged (uncapped) chain
   truncated: boolean;
 }
 
@@ -225,7 +215,11 @@ export default function TaskDrawer({ peek, resultList, onClose, onPeek, onPivot 
   const task =
     taskInfo && taskInfo.id === peek.id && taskInfo.queue === peek.queue ? taskInfo : null;
 
-  const corr = useMemo(() => (task ? extractCorrelation(task.payload) : null), [task]);
+  const correlationKeys = useCorrelationKeys();
+  const corr = useMemo(
+    () => (task ? extractCorrelation(task.payload, correlationKeys) : null),
+    [task, correlationKeys]
+  );
   const metaPairs = useMemo(() => (task ? parseMetadata(task.payload) : []), [task]);
 
   // Prev/next through the current result list, in visible order.
@@ -294,7 +288,10 @@ export default function TaskDrawer({ peek, resultList, onClose, onPeek, onPivot 
   };
 
   // Lazy-load the Flow tab: 7 per-state searches on the correlation key,
-  // merged, time-ordered, capped at FLOW_CAP nodes.
+  // merged (deduped by id — a task can change state between the searches),
+  // time-ordered, capped at FLOW_CAP nodes. A nested correlation id can't be
+  // matched by the meta filter (client and server match top-level scalar
+  // keys only), so those fall back to a free-text search on the value.
   useEffect(() => {
     if (tab !== "flow" || !corr || flow !== null || flowLoading) return;
     let cancelled = false;
@@ -303,15 +300,19 @@ export default function TaskDrawer({ peek, resultList, onClose, onPeek, onPivot 
       try {
         const resps = await Promise.all(
           FLOW_STATES.map((st) =>
-            api.searchTasks({ state: st, meta: [`${corr.key}:${corr.value}`], size: FLOW_CAP })
+            api.searchTasks({
+              state: st,
+              ...(corr.nested ? { q: corr.value } : { meta: [`${corr.key}:${corr.value}`] }),
+              size: FLOW_CAP,
+            })
           )
         );
         if (cancelled) return;
-        const merged = resps.flatMap((r) => r.tasks ?? []);
-        merged.sort((a, b) => observedAtMs(a) - observedAtMs(b));
+        const merged = mergeFlowTasks(resps.map((r) => r.tasks ?? []));
         setFlow({
           tasks: merged.slice(0, FLOW_CAP),
           total: merged.length,
+          queues: distinctQueues(merged),
           truncated: resps.some((r) => r.truncated),
         });
         setFlowErr("");
@@ -846,8 +847,16 @@ export default function TaskDrawer({ peek, resultList, onClose, onPeek, onPivot 
                       </div>
                     );
                   })}
+                  <Stamp className="mt-1 block">
+                    {flow.total} task{flow.total === 1 ? "" : "s"} share
+                    {flow.total === 1 ? "s" : ""}{" "}
+                    <span className="font-mono">
+                      {corr?.key}={corr?.value}
+                    </span>{" "}
+                    across {flow.queues} queue{flow.queues === 1 ? "" : "s"}
+                  </Stamp>
                   {(flow.total > flow.tasks.length || flow.truncated) && (
-                    <Stamp className="mt-1">
+                    <Stamp className="block">
                       showing {flow.tasks.length}
                       {flow.total > flow.tasks.length ? ` of ${flow.total}` : ""} · search caps
                       reached — the chain may be incomplete

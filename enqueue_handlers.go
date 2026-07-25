@@ -116,17 +116,50 @@ type featuresResponse struct {
 	Features struct {
 		Enqueue bool `json:"enqueue"`
 	} `json:"features"`
+	// CorrelationKeys is the configured payload-key list the task drawer's
+	// Flow view recognizes as correlation ids (§3.5), in priority order.
+	// Older frontends ignore it; older backends omit it and the frontend
+	// falls back to its built-in default list.
+	CorrelationKeys []string `json:"correlation_keys"`
+}
+
+// defaultCorrelationKeys is the Flow view's correlation-key list when
+// Options.CorrelationKeys is unset (--correlation-keys default). Mirrored by
+// the frontend fallback (ui/src/lib/correlation.ts DEFAULT_CORRELATION_KEYS).
+var defaultCorrelationKeys = []string{"trace_id", "correlation_id", "request_id"}
+
+// normalizeCorrelationKeys trims entries, drops empties, and removes
+// duplicates (first occurrence keeps its priority slot). An empty result
+// falls back to defaultCorrelationKeys, so a stray "--correlation-keys ,,"
+// can never turn the Flow view off by accident.
+func normalizeCorrelationKeys(keys []string) []string {
+	out := make([]string, 0, len(keys))
+	seen := make(map[string]bool, len(keys))
+	for _, k := range keys {
+		k = strings.TrimSpace(k)
+		if k == "" || seen[k] {
+			continue
+		}
+		seen[k] = true
+		out = append(out, k)
+	}
+	if len(out) == 0 {
+		return defaultCorrelationKeys
+	}
+	return out
 }
 
 // newFeaturesHandlerFunc serves GET /api/features: the capability flags the
 // frontend gates UI on (the clone-and-edit action hides entirely when
-// enqueue is off). Deliberately not part of /api/fleet/overview — that
-// endpoint 503s whenever the stats engine is disabled or has not swept yet,
-// and capability discovery must not depend on it.
-func newFeaturesHandlerFunc(enqueueEnabled bool) http.HandlerFunc {
+// enqueue is off) plus the correlation-key list the Flow view honors.
+// Deliberately not part of /api/fleet/overview — that endpoint 503s whenever
+// the stats engine is disabled or has not swept yet, and capability
+// discovery must not depend on it.
+func newFeaturesHandlerFunc(enqueueEnabled bool, correlationKeys []string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var resp featuresResponse
 		resp.Features.Enqueue = enqueueEnabled
+		resp.CorrelationKeys = correlationKeys
 		writeResponseJSON(w, resp)
 	}
 }
