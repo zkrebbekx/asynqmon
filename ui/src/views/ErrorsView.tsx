@@ -199,7 +199,7 @@ function SignatureDetail({
               </span>
             </div>
             <div className="flex items-baseline gap-2">
-              <span className="w-56 text-[var(--fc-ink3)]">failed today, whole fleet</span>
+              <span className="w-56 text-[var(--fc-ink3)]">failed today, all queues</span>
               <b className="font-mono tabular-nums">{fmt(detail.counter_failed_today)}</b>
               <span className="text-[10.5px] text-[var(--fc-ink3)]">counters are never trimmed</span>
             </div>

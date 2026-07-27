@@ -1413,6 +1413,10 @@ export interface JobInfo {
   created_at: string;
   started_at: string;
   finished_at: string;
+  // When enumeration finished ("" until then) — the scan-results banner's
+  // "as of" stamp (finished_at only marks terminal states, and a completed
+  // scan-to-completion preview parks in preview_ready). Additive field.
+  preview_completed_at: string;
   fence: number;
   error: string;
   failures_overflow: number;
@@ -1488,6 +1492,32 @@ export async function getJob(
   const resp = await axios({
     method: "get",
     url: `${getBaseUrl()}/jobs/${id}?${usp.toString()}`,
+  });
+  return resp.data;
+}
+
+// One page of a completed scan job's own enumerated result set — rows are
+// TaskInfo-shaped exactly like /api/tasks rows, so the console's results
+// table renders them unchanged. `vanished` counts refs on THIS page whose
+// task no longer exists (deleted since the scan) — skipped, stated.
+export interface JobResultsResponse {
+  tasks: TaskInfo[];
+  total_candidates: number;
+  offset: number;
+  vanished: number;
+}
+
+export async function getJobResults(
+  id: string,
+  offset?: number,
+  limit?: number
+): Promise<JobResultsResponse> {
+  const usp = new URLSearchParams();
+  if (offset) usp.set("offset", String(offset));
+  if (limit) usp.set("limit", String(limit));
+  const resp = await axios({
+    method: "get",
+    url: `${getBaseUrl()}/jobs/${id}/results?${usp.toString()}`,
   });
   return resp.data;
 }

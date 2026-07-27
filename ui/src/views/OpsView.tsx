@@ -137,7 +137,7 @@ function VerifyBurnDown({ job }: { job: JobInfo }) {
   return (
     <div className="mt-2" data-testid="verify-burndown">
       <div className="mb-1 flex items-baseline gap-2 text-[10px] uppercase tracking-[0.1em] text-[var(--fc-ink3)]">
-        {scope === "fleet" ? "fleet" : job.scope.queue} · {metric} · last 30m
+        {scope === "fleet" ? "all queues" : job.scope.queue} · {metric} · last 30m
         <span
           className={cn(
             "normal-case tracking-normal",

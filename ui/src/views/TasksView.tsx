@@ -244,12 +244,12 @@ export default function TasksView() {
 
   return (
     <PageShell className="space-y-3">
-      {/* §3.3 error state: queue not in the fleet cache and empty everywhere. */}
+      {/* §3.3 error state: queue not in the stats cache and empty everywhere. */}
       {notFound && (
         <div className="flex items-start gap-2 rounded-lg border border-[var(--fc-warn)]/40 bg-[var(--fc-warn-bg)] px-3 py-2.5 text-xs text-[var(--fc-ink2)]">
           <AlertTriangle size={14} className="mt-0.5 shrink-0 text-[var(--fc-warn)]" />
           <span>
-            Queue <b className="font-mono">{queue}</b> is not in the fleet cache — it may
+            Queue <b className="font-mono">{queue}</b> is not in the stats cache — it may
             have been removed.{" "}
             <button
               onClick={() => navigate(paths().QUEUES)}

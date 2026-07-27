@@ -55,6 +55,14 @@ import UpdatesPausedPill from "../components/UpdatesPausedPill";
 
 type ActionFn = (qname: string, taskId: string) => Promise<unknown>;
 
+// formatAsOf renders the scan job's completion stamp as a local absolute
+// time (honest-numbers rule: absent data reads as unknown, never as "now").
+function formatAsOf(iso: string): string {
+  if (!iso) return "an unknown time";
+  const d = new Date(iso);
+  return Number.isNaN(d.getTime()) ? "an unknown time" : d.toLocaleString();
+}
+
 type State = (typeof CONSOLE_STATES)[number];
 
 // Per-row actions. Aggregating tasks have none here: acting on one requires
@@ -243,6 +251,84 @@ export default function TasksGlobalView() {
     [setSearchParams]
   );
 
+  // Live scan-job tracker. Settlement = enumeration finished (the
+  // preview_ready park) or a terminal state. A completion observed live is
+  // announced with the exact count; in BOTH the live and the re-attach case
+  // the results table then switches to job-results mode below. (This used to
+  // re-run the query as a FRESH budgeted scan — which starts from scratch
+  // and drops every match beyond the first budget window, throwing away the
+  // exact result set the job just enumerated.)
+  const scanSettled = useCallback(
+    (j: api.JobInfo) => j.preview_complete || isTerminalJobState(j.state),
+    []
+  );
+  const onScanSettled = useCallback((j: api.JobInfo) => {
+    if (j.preview_complete && !isTerminalJobState(j.state)) {
+      toast.success(
+        `Scan complete — ${j.counts.candidates.toLocaleString()} matches (exact)`,
+        { description: "Showing the job's own result set below." }
+      );
+      // The continuation window belonged to the live scan; drop it.
+      setExtraTasks([]);
+      setExtraScanned(0);
+      setExtraMatches(0);
+      setContCursor(null);
+    } else if (j.state === "failed") {
+      toast.error(`Scan job failed${j.error ? ` — ${j.error}` : ""}`);
+    }
+  }, []);
+  const { job: scanJob, source: scanJobSource } = useJobProgress(scanJobId, {
+    settled: scanSettled,
+    onSettled: onScanSettled,
+  });
+  const cancelScanJob = useCallback(() => {
+    if (scanJobId) api.cancelJob(scanJobId).catch((e) => setError(toErrorString(e)));
+  }, [scanJobId]);
+  const dismissScanJob = useCallback(() => {
+    // Best-effort cleanup of a job that never settled (same courtesy the
+    // bulk modal extends to orphan previews), then drop the param.
+    if (scanJobId && scanJob && !scanSettled(scanJob)) {
+      api.cancelJob(scanJobId).catch(() => {});
+    }
+    setScanJobParam(null);
+  }, [scanJobId, scanJob, scanSettled, setScanJobParam]);
+
+  // Job-results mode: once the scan job's enumeration is complete, its
+  // persisted candidate list IS the exact result set — the table pages
+  // through GET /api/jobs/:id/results instead of re-running the live
+  // budgeted scan. Entered on a completion observed live and on re-attach
+  // to an already-completed job; exited by Back-to-live / dismissing the
+  // meter / any filter change (all drop the scanjob param).
+  const jobResultsMode =
+    scanJobId !== null && scanJob !== null && scanJob.preview_complete;
+  const [jobTasks, setJobTasks] = useState<TaskInfo[]>([]);
+  const [jobTotal, setJobTotal] = useState(0);
+  const [jobVanished, setJobVanished] = useState(0);
+  const [jobPage, setJobPage] = useState(0);
+  useEffect(() => {
+    setJobTasks([]);
+    setJobTotal(0);
+    setJobVanished(0);
+    setJobPage(0);
+  }, [scanJobId]);
+  const fetchJobResults = useCallback(async () => {
+    if (!jobResultsMode || !scanJobId) return;
+    setLoading(true);
+    try {
+      const resp = await api.getJobResults(scanJobId, jobPage * view.size, view.size);
+      setJobTasks(resp.tasks ?? []);
+      setJobTotal(resp.total_candidates);
+      setJobVanished(resp.vanished);
+      setError("");
+    } catch (e) {
+      setError(toErrorString(e));
+    }
+    setLoading(false);
+  }, [jobResultsMode, scanJobId, jobPage, view.size]);
+  useEffect(() => {
+    fetchJobResults();
+  }, [fetchJobResults]);
+
   // After a drawer pivot, close the drawer if the peeked task fell out of
   // the visible results (kept open when it survived the new filter).
   const pivotPending = useRef(false);
@@ -256,6 +342,9 @@ export default function TasksGlobalView() {
   const filterKey = `${view.q}|${view.state}|${view.queue}|${view.size}`;
 
   const fetchTasks = useCallback(async () => {
+    // Job-results mode serves the completed job's own enumerated list —
+    // never re-run the live budgeted scan under it.
+    if (jobResultsMode) return;
     try {
       const resp = await api.searchTasks({
         queue: view.queue,
@@ -297,11 +386,12 @@ export default function TasksGlobalView() {
     }
     setLoading(false);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [view.queue, view.state, view.q, view.page, view.size, currentCursor]);
+  }, [view.queue, view.state, view.q, view.page, view.size, currentCursor, jobResultsMode]);
 
   // usePolling gives pause-on-hidden-tab and the shared "Updated Ns ago"
-  // indicator for free; the fetch key refetches immediately on filter change.
-  usePolling(fetchTasks, pollInterval, [view.queue, view.state, view.q, view.page, view.size, currentCursor]);
+  // indicator for free; the fetch key refetches immediately on filter change
+  // (and immediately resumes the live search on leaving job-results mode).
+  usePolling(fetchTasks, pollInterval, [view.queue, view.state, view.q, view.page, view.size, currentCursor, jobResultsMode]);
 
   // All-seven state pill counts: one pipelined pass server-side, polled.
   const fetchCounts = useCallback(async () => {
@@ -395,12 +485,13 @@ export default function TasksGlobalView() {
   const isCursorMode = meta.mode === "cursor";
 
   // Clamp the page when the filtered total shrinks (bulk actions, drains) so
-  // the user is never stranded on an empty out-of-range page.
+  // the user is never stranded on an empty out-of-range page. Inert in
+  // job-results mode (its pagination is jobPage over the job's own list).
   useEffect(() => {
-    if (!loading && !isCursorMode && view.page > totalPages - 1) {
+    if (!loading && !isCursorMode && !jobResultsMode && view.page > totalPages - 1) {
       updateView({ page: totalPages - 1 }, { replace: true });
     }
-  }, [loading, isCursorMode, view.page, totalPages, updateView]);
+  }, [loading, isCursorMode, jobResultsMode, view.page, totalPages, updateView]);
 
   // ---- All console mutations edit the QUERY STRING (single source of truth).
   const setStateClause = (st: State) =>
@@ -431,6 +522,7 @@ export default function TasksGlobalView() {
     // active freeze once. Assigned later (hoisted via ref-style flag).
     applyNextChangeRef.current?.();
     fetchTasks();
+    fetchJobResults(); // job-results mode: acted-on rows show as vanished
   };
   // applyNextChange comes from useFrozenData below; runAction is declared
   // first, so it reaches it through a ref.
@@ -495,53 +587,6 @@ export default function TasksGlobalView() {
     }
   };
 
-  // Live scan-job tracker. Settlement = enumeration finished (the
-  // preview_ready park) or a terminal state. On a completion observed live:
-  // announce the exact count and re-run the current query ONCE — fresh
-  // results now that the full scan bound is known — with the continuation
-  // state reset so the page/cursor semantics start clean.
-  const scanSettled = useCallback(
-    (j: api.JobInfo) => j.preview_complete || isTerminalJobState(j.state),
-    []
-  );
-  const onScanSettled = useCallback(
-    (j: api.JobInfo) => {
-      if (j.preview_complete && !isTerminalJobState(j.state)) {
-        toast.success(
-          `Scan complete — ${j.counts.candidates.toLocaleString()} matches (exact)`,
-          { description: "Results below were re-run against the fully scanned scope." }
-        );
-        setExtraTasks([]);
-        setExtraScanned(0);
-        setExtraMatches(0);
-        setContCursor(null);
-        if (view.page !== 0) {
-          updateView({ page: 0 }, { replace: true }); // refetches via the poll key
-        } else {
-          fetchTasks();
-        }
-      } else if (j.state === "failed") {
-        toast.error(`Scan job failed${j.error ? ` — ${j.error}` : ""}`);
-      }
-    },
-    [view.page, updateView, fetchTasks]
-  );
-  const { job: scanJob, source: scanJobSource } = useJobProgress(scanJobId, {
-    settled: scanSettled,
-    onSettled: onScanSettled,
-  });
-  const cancelScanJob = useCallback(() => {
-    if (scanJobId) api.cancelJob(scanJobId).catch((e) => setError(toErrorString(e)));
-  }, [scanJobId]);
-  const dismissScanJob = useCallback(() => {
-    // Best-effort cleanup of a job that never settled (same courtesy the
-    // bulk modal extends to orphan previews), then drop the param.
-    if (scanJobId && scanJob && !scanSettled(scanJob)) {
-      api.cancelJob(scanJobId).catch(() => {});
-    }
-    setScanJobParam(null);
-  }, [scanJobId, scanJob, scanSettled, setScanJobParam]);
-
   // Which bulk actions are valid for the current state.
   const bulkActions = bulkCaps[view.state].map((action) => ({
     action,
@@ -550,10 +595,11 @@ export default function TasksGlobalView() {
 
   const groupRows = view.mode === "group:error" ? errorGroups : typeGroups;
   const visibleTasks = useMemo(() => {
+    if (jobResultsMode) return jobTasks; // the job's own exact result set
     if (extraTasks.length === 0) return tasks;
     const seen = new Set(tasks.map((t) => `${t.queue}:${t.id}`));
     return [...tasks, ...extraTasks.filter((t) => !seen.has(`${t.queue}:${t.id}`))];
-  }, [tasks, extraTasks]);
+  }, [tasks, extraTasks, jobResultsMode, jobTasks]);
 
   // §4.4 freeze-on-interaction: hovering the table, holding a selection, or
   // having the drawer open suspends ROW rendering — data is still fetched
@@ -679,6 +725,7 @@ export default function TasksGlobalView() {
     clearSelection();
     applyNextChange(); // mutations invalidate immediately (§4.4)
     fetchTasks();
+    fetchJobResults(); // job-results mode: acted-on rows show as vanished
   };
 
   // The urlstate-owned params of the current console view, page stripped —
@@ -974,12 +1021,18 @@ export default function TasksGlobalView() {
           async preview, cost disclosure, throttle, mandatory reason, gated
           execute — and runs as a background job on the Operations screen.
           Visually distinct from row actions and red-guarded for delete. */}
-      {!window.READ_ONLY && total > 0 && bulkActions.length > 0 && (
+      {!window.READ_ONLY && (jobResultsMode ? jobTotal : total) > 0 && bulkActions.length > 0 && (
         <div className="flex flex-wrap items-center gap-2 rounded-lg border border-dashed border-[var(--fc-warn)]/50 bg-[var(--fc-warn-bg)]/40 px-4 py-2">
           <span className="text-xs text-[var(--fc-ink2)]">
             Whole scope — all{" "}
             <span className="font-semibold text-[var(--fc-ink)]">
-              {isCursorMode ? total.toLocaleString() : truncated ? `${total}+` : total}
+              {jobResultsMode
+                ? jobTotal.toLocaleString() // the completed scan's exact count
+                : isCursorMode
+                  ? total.toLocaleString()
+                  : truncated
+                    ? `${total}+`
+                    : total}
             </span>{" "}
             matching, as a background job:
           </span>
@@ -1095,6 +1148,37 @@ export default function TasksGlobalView() {
         onConfirm={runSelectionVerb}
         onClose={() => setSelectionVerb(null)}
       />
+
+      {/* Job-results banner: the table below is the completed scan job's own
+          enumerated result set — exact, frozen at enumeration time. */}
+      {jobResultsMode && scanJob && !isGroupMode && (
+        <div
+          data-testid="job-results-banner"
+          className="flex flex-wrap items-center gap-x-2 gap-y-1 rounded-lg border border-[var(--fc-good)]/40 bg-[var(--fc-good-bg)]/50 px-4 py-2 text-xs"
+        >
+          <span>
+            Showing scan results —{" "}
+            <span className="font-mono font-semibold tabular-nums">
+              {(jobTotal || scanJob.counts.candidates).toLocaleString()}
+            </span>{" "}
+            matches, exact, as of{" "}
+            {formatAsOf(scanJob.preview_completed_at || scanJob.finished_at)}{" "}
+            <span className="text-[var(--fc-ink3)]">(live set may have changed)</span>
+          </span>
+          <span className="text-[var(--fc-ink3)]">·</span>
+          <button
+            onClick={() => setScanJobParam(null)}
+            className="font-medium text-[var(--fc-acc)] hover:underline"
+          >
+            Back to live search
+          </button>
+          {jobVanished > 0 && (
+            <span className="basis-full text-[var(--fc-warn)]">
+              {jobVanished} task{jobVanished === 1 ? " no longer exists" : "s no longer exist"} since the scan
+            </span>
+          )}
+        </div>
+      )}
 
       {isGroupMode ? (
         /* Group-by result mode: the aggregate IS the result set. */
@@ -1271,9 +1355,41 @@ export default function TasksGlobalView() {
             onClose={() => setConfirmDelete(null)}
           />
 
-          {/* Pagination: cursor-based for exact zset listings, page/size
+          {/* Pagination: job-results mode pages the completed scan's own
+              list by offset; cursor-based for exact zset listings; page/size
               otherwise. */}
-          {isCursorMode ? (
+          {jobResultsMode ? (
+            jobTotal > 0 && (
+              <div className="flex items-center justify-between px-4 py-3 border-t border-[var(--fc-line2)]">
+                <span className="text-xs text-[var(--fc-ink3)]">
+                  {jobPage * view.size + 1}–{Math.min((jobPage + 1) * view.size, jobTotal)} of{" "}
+                  <span className="font-mono tabular-nums">{jobTotal.toLocaleString()}</span> · exact
+                </span>
+                <div className="flex items-center gap-1">
+                  <Button
+                    size="icon"
+                    variant="ghost"
+                    className="h-7 w-7"
+                    aria-label="Previous page"
+                    disabled={jobPage === 0}
+                    onClick={() => setJobPage((p) => Math.max(0, p - 1))}
+                  >
+                    <ChevronLeft size={14} />
+                  </Button>
+                  <Button
+                    size="icon"
+                    variant="ghost"
+                    className="h-7 w-7"
+                    aria-label="Next page"
+                    disabled={(jobPage + 1) * view.size >= jobTotal}
+                    onClick={() => setJobPage((p) => p + 1)}
+                  >
+                    <ChevronRight size={14} />
+                  </Button>
+                </div>
+              </div>
+            )
+          ) : isCursorMode ? (
             <div className="flex items-center justify-between px-4 py-3 border-t border-[var(--fc-line2)]">
               <span className="text-xs text-[var(--fc-ink3)]">
                 {rows.length} rows · <span className="font-mono tabular-nums">{total.toLocaleString()}</span> total · exact

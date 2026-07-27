@@ -602,7 +602,7 @@ func newStateCountsHandlerFunc(inspector *asynq.Inspector, rc redis.UniversalCli
 		}
 		if len(queues) > stateCountsFleetMaxQueues {
 			writeErrorMsg(w, http.StatusServiceUnavailable,
-				fmt.Sprintf("fleet-wide counts need the stats engine above %d queues", stateCountsFleetMaxQueues))
+				fmt.Sprintf("counts across all queues need the stats engine above %d queues", stateCountsFleetMaxQueues))
 			return
 		}
 		sort.Strings(queues)

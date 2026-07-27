@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/gorilla/mux"
+	"github.com/hibiken/asynq"
 
 	"github.com/hibiken/asynqmon/jobs"
 )
@@ -19,6 +20,7 @@ import (
 //   POST /api/jobs                  create a job (always phase=preview)
 //   GET  /api/jobs?limit=           list jobs, newest first
 //   GET  /api/jobs/{id}             full job incl. sample + failure page
+//   GET  /api/jobs/{id}/results     page of the job's own enumerated matches
 //   POST /api/jobs/{id}/execute     {proceed_on_partial} — gated execute
 //   POST /api/jobs/{id}/cancel
 //   POST /api/jobs/{id}/pause
@@ -203,6 +205,78 @@ func newGetJobHandlerFunc(store *jobs.Store) http.HandlerFunc {
 			Sample:        sample,
 			Failures:      failures,
 			FailuresTotal: failuresTotal,
+		})
+	}
+}
+
+// jobResultsResponse is one page of a job's own enumerated result set.
+// Rows are searchTask-shaped — the same shape /api/tasks serves — so the
+// console's results table renders them unchanged.
+type jobResultsResponse struct {
+	Tasks           []*searchTask `json:"tasks"`
+	TotalCandidates int64         `json:"total_candidates"`
+	Offset          int64         `json:"offset"`
+	// Vanished counts refs on THIS page whose task no longer exists
+	// (deleted/moved since the scan) — skipped and stated, never an error.
+	Vanished int `json:"vanished"`
+}
+
+const (
+	defaultJobResultsLimit = 50
+	maxJobResultsLimit     = 200
+)
+
+// newJobResultsHandlerFunc serves pages of a job's persisted candidate list,
+// hydrated to live task rows. This is the console's source of truth after a
+// scan-to-completion job finishes: the job already enumerated the EXACT
+// result set — re-running the query as a fresh budgeted scan would drop
+// matches beyond the first budget window. Candidate refs are not capped in
+// the store (only the 10-row sample and the 10k failure report are), so
+// total_candidates is the job's full match count. Read-only; any replica.
+func newJobResultsHandlerFunc(store *jobs.Store, insp *asynq.Inspector, pf PayloadFormatter) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		id := mux.Vars(r)["job_id"]
+		if _, err := store.Get(r.Context(), id); err != nil {
+			writeJobError(w, err) // 404 for unknown jobs
+			return
+		}
+		q := r.URL.Query()
+		offset := int64(atoiDefault(q.Get("offset"), 0))
+		if offset < 0 {
+			offset = 0
+		}
+		limit := int64(atoiDefault(q.Get("limit"), defaultJobResultsLimit))
+		if limit < 1 || limit > maxJobResultsLimit {
+			limit = defaultJobResultsLimit
+		}
+		total, err := store.CandidateCount(r.Context(), id)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+		refs, err := store.Candidates(r.Context(), id, offset, limit)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+		// Hydrate the page with the same bounded-concurrency, order-preserving
+		// fan-out the cursor listing uses (aql_exec.go). A nil slot means the
+		// task vanished since enumeration — skipped, honestly counted.
+		infos := fetchTaskInfos(insp, refs)
+		tasks := make([]*searchTask, 0, len(infos))
+		vanished := 0
+		for _, ti := range infos {
+			if ti == nil {
+				vanished++
+				continue
+			}
+			tasks = append(tasks, toSearchTask(ti, pf))
+		}
+		writeResponseJSON(w, jobResultsResponse{
+			Tasks:           tasks,
+			TotalCandidates: total,
+			Offset:          offset,
+			Vanished:        vanished,
 		})
 	}
 }

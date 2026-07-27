@@ -34,6 +34,7 @@ function makeJob(over: Partial<JobInfo> = {}): JobInfo {
     created_at: "2026-07-27T00:00:00Z",
     started_at: "",
     finished_at: "",
+    preview_completed_at: "",
     fence: 1,
     error: "",
     failures_overflow: 0,

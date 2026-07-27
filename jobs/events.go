@@ -61,6 +61,9 @@ type WireJob struct {
 	CreatedAt  string `json:"created_at"`
 	StartedAt  string `json:"started_at"`
 	FinishedAt string `json:"finished_at"`
+	// PreviewCompletedAt is when enumeration finished ("" until then) —
+	// additive field, the scan-results banner's "as of" stamp.
+	PreviewCompletedAt string `json:"preview_completed_at"`
 
 	Fence            int64  `json:"fence"`
 	Error            string `json:"error"`
@@ -84,26 +87,27 @@ func WireOf(j *Job) WireJob {
 		scope.Meta = []string{}
 	}
 	return WireJob{
-		ID:               j.ID,
-		Verb:             string(j.Verb),
-		Scope:            scope,
-		Phase:            string(j.Phase),
-		State:            string(j.State),
-		Throttle:         j.Throttle,
-		Reason:           j.Reason,
-		Actor:            j.Actor,
-		Counts:           j.Counts,
-		CostClass:        string(j.CostClass),
-		CostListLen:      j.CostListLen,
-		PreviewComplete:  j.PreviewComplete,
-		ProceedOnPartial: j.ProceedOnPartial,
-		CreatedAt:        fmtRFC3339(j.CreatedAt),
-		StartedAt:        fmtRFC3339(j.StartedAt),
-		FinishedAt:       fmtRFC3339(j.FinishedAt),
-		Fence:            j.Fence,
-		Error:            j.Error,
-		FailuresOverflow: j.FailuresOverflow,
-		CtlPending:       j.Ctl,
+		ID:                 j.ID,
+		Verb:               string(j.Verb),
+		Scope:              scope,
+		Phase:              string(j.Phase),
+		State:              string(j.State),
+		Throttle:           j.Throttle,
+		Reason:             j.Reason,
+		Actor:              j.Actor,
+		Counts:             j.Counts,
+		CostClass:          string(j.CostClass),
+		CostListLen:        j.CostListLen,
+		PreviewComplete:    j.PreviewComplete,
+		ProceedOnPartial:   j.ProceedOnPartial,
+		CreatedAt:          fmtRFC3339(j.CreatedAt),
+		StartedAt:          fmtRFC3339(j.StartedAt),
+		FinishedAt:         fmtRFC3339(j.FinishedAt),
+		PreviewCompletedAt: fmtRFC3339(j.PreviewCompletedAt),
+		Fence:              j.Fence,
+		Error:              j.Error,
+		FailuresOverflow:   j.FailuresOverflow,
+		CtlPending:         j.Ctl,
 	}
 }
 
