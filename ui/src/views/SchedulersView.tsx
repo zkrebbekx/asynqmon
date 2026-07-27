@@ -45,12 +45,10 @@ import { paths, taskDetailsPath } from "../paths";
 import { serializePeek } from "../lib/urlstate";
 import { timeAgo, durationBefore, uuidPrefix, toErrorString } from "../utils";
 import { FcChip, MicroLabel } from "../components/FleetBits";
+import PageShell, { panelClass, theadClass } from "../components/PageShell";
 import SyntaxHighlighter from "../components/SyntaxHighlighter";
 import { clickableRowClass, clickableRowProps, cn } from "../lib/utils";
 
-const panelClass = "rounded-lg border border-[var(--fc-line)] bg-[var(--fc-panel)]";
-const theadClass =
-  "whitespace-nowrap border-b border-[var(--fc-line)] px-2.5 py-[7px] text-left text-[10.5px] font-semibold uppercase tracking-[0.07em] text-[var(--fc-ink3)]";
 const cellClass = "border-b border-[var(--fc-line2)] px-2.5 py-2 align-middle";
 
 /**************************************************************
@@ -219,7 +217,7 @@ function RunNowButton({ row }: { row: SchedulerRow }) {
           <button
             onClick={fire}
             disabled={busy}
-            className="inline-flex items-center gap-1 rounded-md border border-[var(--fc-acc)] bg-[var(--fc-acc)] px-2 py-0.5 text-[11px] font-semibold text-white disabled:opacity-50"
+            className="inline-flex items-center gap-1 rounded-md border border-[var(--fc-acc)] bg-[var(--fc-acc)] px-2 py-0.5 text-[11px] font-semibold text-[var(--fc-acc-fg)] disabled:opacity-50"
           >
             {busy ? <Loader2 size={11} className="animate-spin" /> : <Play size={11} />}
             {busy ? "Enqueuing…" : "Confirm run"}
@@ -400,7 +398,7 @@ export default function SchedulersView() {
   const goneCount = (rows ?? []).filter(isGone).length;
 
   return (
-    <div className="mx-auto max-w-7xl px-4 py-8">
+    <PageShell>
       {error !== "" && (
         <div
           role="alert"
@@ -469,6 +467,6 @@ export default function SchedulersView() {
           </table>
         )}
       </div>
-    </div>
+    </PageShell>
   );
 }

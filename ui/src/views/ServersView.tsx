@@ -43,6 +43,7 @@ import {
   activeTaskDrawerSearch,
 } from "../lib/workers";
 import { FcChip, MicroLabel } from "../components/FleetBits";
+import PageShell, { panelClass, theadClass } from "../components/PageShell";
 import { cn } from "../lib/utils";
 
 const fmt = (n: number | undefined | null) =>
@@ -54,9 +55,6 @@ const shortId = (id: string) => (id.length > 10 ? `${id.slice(0, 8)}…` : id);
                         Shared bits
  **************************************************************/
 
-const panelClass = "rounded-lg border border-[var(--fc-line)] bg-[var(--fc-panel)]";
-const theadClass =
-  "whitespace-nowrap border-b border-[var(--fc-line)] px-2.5 py-[7px] text-left text-[10.5px] font-semibold uppercase tracking-[0.07em] text-[var(--fc-ink3)]";
 
 // BudgetBar renders %-of-budget as width + tone; callers pair it with text
 // (severity is never color alone).
@@ -564,7 +562,7 @@ export default function ServersView() {
   const noServers = !serversLoading && !serversError && servers.length === 0;
 
   return (
-    <div className="px-4 py-4">
+    <PageShell>
       {/* §3.7 empty state: this IS the answer, not an error. */}
       {noServers && (
         <div className="mb-2.5 rounded-lg border border-[var(--fc-crit)]/50 bg-[var(--fc-crit-bg)] px-4 py-4">
@@ -643,6 +641,6 @@ export default function ServersView() {
           </div>
         </div>
       )}
-    </div>
+    </PageShell>
   );
 }

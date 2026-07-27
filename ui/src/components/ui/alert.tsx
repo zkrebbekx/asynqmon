@@ -6,8 +6,8 @@ const alertVariants = cva(
   {
     variants: {
       variant: {
-        default: "bg-[hsl(var(--background))] text-[hsl(var(--foreground))]",
-        destructive: "border-[hsl(var(--destructive))]/50 text-[hsl(var(--destructive))] dark:border-[hsl(var(--destructive))] [&>svg]:text-[hsl(var(--destructive))]",
+        default: "border-[hsl(var(--border))] bg-[hsl(var(--card))] text-[hsl(var(--foreground))]",
+        destructive: "border-[var(--fc-crit)]/40 bg-[var(--fc-crit-bg)] text-[var(--fc-crit)] [&>svg]:text-[var(--fc-crit)]",
       },
     },
     defaultVariants: { variant: "default" },

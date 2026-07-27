@@ -248,3 +248,17 @@ export function parsePeek(raw: string | null): PeekTarget | null {
 export function serializePeek(target: PeekTarget): string {
   return `${target.queue}/${target.id}`;
 }
+
+// taskDrawerSearch builds the /tasks search string that opens the console
+// filtered to the task's queue with the task peeked in the drawer. This is
+// the canonical task deep link — the old /queues/:qname/tasks/:taskId route
+// redirects here (the drawer supersedes the details page and resolves the
+// peek by queue/id independently of the visible result list).
+export function taskDrawerSearch(queue: string, taskId: string): string {
+  const params = serializeConsoleState({
+    ...DEFAULT_CONSOLE_STATE,
+    q: aqlFromLegacy({ queue }),
+  });
+  params.set("peek", serializePeek({ queue, id: taskId }));
+  return `?${params.toString()}`;
+}

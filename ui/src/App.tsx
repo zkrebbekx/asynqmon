@@ -36,7 +36,8 @@ const QueuesDirectoryView = lazy(() => import("./views/QueuesDirectoryView"));
 const TasksView = lazy(() => import("./views/TasksView"));
 const TasksGlobalView = lazy(() => import("./views/TasksGlobalView"));
 const ErrorsView = lazy(() => import("./views/ErrorsView"));
-const TaskDetailsView = lazy(() => import("./views/TaskDetailsView"));
+// Legacy task-details deep links redirect into the Tasks console drawer.
+const TaskDetailsRedirect = lazy(() => import("./views/TaskDetailsRedirect"));
 const SchedulersView = lazy(() => import("./views/SchedulersView"));
 const ServersView = lazy(() => import("./views/ServersView"));
 const OpsView = lazy(() => import("./views/OpsView"));
@@ -184,7 +185,7 @@ function AppContent() {
           }
         >
           <Routes>
-            <Route path={appPaths.TASK_DETAILS} element={<TaskDetailsView />} />
+            <Route path={appPaths.TASK_DETAILS} element={<TaskDetailsRedirect />} />
             <Route path={appPaths.TASKS} element={<TasksGlobalView />} />
             <Route path={appPaths.ERRORS} element={<ErrorsView />} />
             <Route path={appPaths.QUEUE_DETAILS} element={<TasksView />} />
@@ -206,7 +207,18 @@ function AppContent() {
       <CommandPalette open={paletteOpen} onClose={() => setPaletteOpen(false)} />
       <KeyboardCheatsheet open={cheatOpen} onClose={() => setCheatOpen(false)} />
 
-      <Toaster position="bottom-left" />
+      {/* Toasts wear the fc surface tokens in both themes. */}
+      <Toaster
+        position="bottom-left"
+        theme={isDark ? "dark" : "light"}
+        toastOptions={{
+          style: {
+            background: "var(--fc-panel)",
+            borderColor: "var(--fc-line)",
+            color: "var(--fc-ink)",
+          },
+        }}
+      />
     </div>
   );
 }

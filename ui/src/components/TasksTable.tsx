@@ -135,7 +135,7 @@ export default function TasksTable(props: Props) {
             <Button
               size="sm"
               variant="ghost"
-              className="h-7 text-red-500 hover:text-red-600"
+              className="h-7 text-[var(--fc-crit)] hover:opacity-80"
               disabled={props.batchActionPending}
               onClick={async () => {
                 await props.batchDeleteTasks!(queue, selectedIds);
@@ -221,7 +221,7 @@ export default function TasksTable(props: Props) {
                   variant={v.verb === "delete" ? "outline" : "ghost"}
                   className={cn(
                     "h-7 text-xs",
-                    v.verb === "delete" && "text-red-500 hover:text-red-600"
+                    v.verb === "delete" && "text-[var(--fc-crit)] hover:opacity-80"
                   )}
                   onClick={() => props.onWholeScopeVerb!(v.verb)}
                 >
@@ -240,7 +240,7 @@ export default function TasksTable(props: Props) {
               <Button
                 size="sm"
                 variant="ghost"
-                className="h-7 text-red-500 hover:text-red-600 text-xs"
+                className="h-7 text-[var(--fc-crit)] hover:opacity-80 text-xs"
                 disabled={props.allActionPending}
                 onClick={() => setConfirmDeleteAll(true)}
               >

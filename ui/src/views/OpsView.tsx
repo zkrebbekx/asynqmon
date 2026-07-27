@@ -23,6 +23,7 @@ import { burnDownProjection, projectionSentence, sliceLastSeconds } from "../lib
 import { toErrorString, uuidPrefix } from "../utils";
 import { cn } from "../lib/utils";
 import { BurnDown } from "../components/charts";
+import PageShell from "../components/PageShell";
 import { Button } from "../components/ui/button";
 import { Alert, AlertDescription, AlertTitle } from "../components/ui/alert";
 import {
@@ -250,14 +251,11 @@ export default function OpsView() {
   };
 
   return (
-    <div className="mx-auto max-w-[1400px] space-y-4 px-4 py-6">
-      <div className="flex items-baseline gap-3">
-        <h1 className="text-2xl font-semibold">Operations</h1>
-        <span className="text-xs text-[var(--fc-ink3)]">
-          every bulk verb is a reviewable, query-scoped background job — §4.3
-        </span>
-      </div>
-
+    <PageShell
+      className="space-y-4"
+      title="Operations"
+      sub="every bulk verb is a reviewable, query-scoped background job — §4.3"
+    >
       {error && (
         <Alert variant="destructive">
           <AlertCircle className="h-4 w-4" />
@@ -584,6 +582,6 @@ export default function OpsView() {
           )}
         </div>
       </div>
-    </div>
+    </PageShell>
   );
 }

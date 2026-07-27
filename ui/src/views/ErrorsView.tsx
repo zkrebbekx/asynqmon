@@ -42,6 +42,7 @@ import {
 import { cn, clickableRowClass, clickableRowProps } from "../lib/utils";
 import { FcChip, MicroLabel } from "../components/FleetBits";
 import BulkJobModal, { BulkJobScope } from "../components/BulkJobModal";
+import PageShell from "../components/PageShell";
 
 const fmt = (n: number | undefined | null) =>
   n === undefined || n === null || !Number.isFinite(n) ? "—" : n.toLocaleString("en-US");
@@ -412,7 +413,7 @@ export default function ErrorsView() {
   const neverIndexed = resp !== null && resp.tail_indexed_at === "" && resp.retry_sampled_at === "";
 
   return (
-    <div className="mx-auto max-w-[1560px] px-4 py-4">
+    <PageShell>
       {/* §3.6 data-honesty ribbon, verbatim */}
       <div className="mb-2.5 flex items-start gap-2 rounded-md border border-[var(--fc-line)] bg-[var(--fc-panel)] px-3 py-2 text-xs text-[var(--fc-ink2)]">
         <Info size={14} className="mt-0.5 shrink-0 text-[var(--fc-acc)]" />
@@ -510,6 +511,6 @@ export default function ErrorsView() {
           onClose={() => setJob(null)}
         />
       )}
-    </div>
+    </PageShell>
   );
 }

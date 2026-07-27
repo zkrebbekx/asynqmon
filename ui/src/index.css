@@ -1,59 +1,67 @@
 @import "tailwindcss";
 
+/* Legacy shadcn token names, RE-POINTED at the Fleet Console palette.
+   The component library (ui/*) keeps consuming hsl(var(--border)) etc., but
+   every value below is the HSL form of an --fc-* color, so any surface still
+   painted with these tokens renders in the fc system. Do NOT introduce new
+   colors here — pick from the fc palette in the block after this one.
+   (Mapping: background→fc-bg, card/popover→fc-panel, muted/secondary/accent→
+   fc-raise, border/input→fc-line, foreground→fc-ink, muted-foreground→fc-ink2,
+   primary/ring→fc-acc, destructive→fc-crit.) */
 @layer base {
   :root {
-    --background: 0 0% 100%;
-    --foreground: 222.2 84% 4.9%;
-    --card: 0 0% 100%;
-    --card-foreground: 222.2 84% 4.9%;
+    --background: 216 23.8% 95.9%; /* fc-bg #F2F4F7 */
+    --foreground: 217.9 24.7% 15.1%; /* fc-ink #1D2430 */
+    --card: 0 0% 100%; /* fc-panel #FFFFFF */
+    --card-foreground: 217.9 24.7% 15.1%;
     --popover: 0 0% 100%;
-    --popover-foreground: 222.2 84% 4.9%;
-    --primary: 221.2 83.2% 53.3%;
-    --primary-foreground: 210 40% 98%;
-    --secondary: 210 40% 96.1%;
-    --secondary-foreground: 222.2 47.4% 11.2%;
-    --muted: 210 40% 96.1%;
-    --muted-foreground: 215.4 16.3% 46.9%;
-    --accent: 210 40% 96.1%;
-    --accent-foreground: 222.2 47.4% 11.2%;
-    --destructive: 0 84.2% 60.2%;
-    --destructive-foreground: 210 40% 98%;
-    --border: 214.3 31.8% 91.4%;
-    --input: 214.3 31.8% 91.4%;
-    --ring: 221.2 83.2% 53.3%;
+    --popover-foreground: 217.9 24.7% 15.1%;
+    --primary: 203.8 85% 36.7%; /* fc-acc #0E6EAD */
+    --primary-foreground: 0 0% 100%;
+    --secondary: 213.3 25.7% 93.1%; /* fc-raise #E9EDF2 */
+    --secondary-foreground: 217.9 24.7% 15.1%;
+    --muted: 213.3 25.7% 93.1%; /* fc-raise */
+    --muted-foreground: 217.8 13.6% 39%; /* fc-ink2 #566071 */
+    --accent: 213.3 25.7% 93.1%; /* fc-raise */
+    --accent-foreground: 217.9 24.7% 15.1%;
+    --destructive: 351 61% 47.3%; /* fc-crit #C22F45 */
+    --destructive-foreground: 0 0% 100%;
+    --border: 216 21.7% 86.5%; /* fc-line #D5DBE4 */
+    --input: 216 21.7% 86.5%;
+    --ring: 203.8 85% 36.7%; /* fc-acc */
     --radius: 0.5rem;
   }
 
   .dark {
-    --background: 222.2 84% 4.9%;
-    --foreground: 210 40% 98%;
-    --card: 222.2 47.4% 11.2%;
-    --card-foreground: 210 40% 98%;
-    --popover: 222.2 47.4% 11.2%;
-    --popover-foreground: 210 40% 98%;
-    --primary: 217.2 91.2% 59.8%;
-    --primary-foreground: 222.2 47.4% 11.2%;
-    --secondary: 217.2 32.6% 17.5%;
-    --secondary-foreground: 210 40% 98%;
-    --muted: 217.2 32.6% 17.5%;
-    --muted-foreground: 215 20.2% 65.1%;
-    --accent: 217.2 32.6% 17.5%;
-    --accent-foreground: 210 40% 98%;
-    --destructive: 0 62.8% 30.6%;
-    --destructive-foreground: 210 40% 98%;
-    --border: 217.2 32.6% 17.5%;
-    --input: 217.2 32.6% 17.5%;
-    --ring: 224.3 76.3% 48%;
+    --background: 220 20% 8.8%; /* fc-bg #12151B */
+    --foreground: 216 28.3% 89.6%; /* fc-ink #DDE3EC */
+    --card: 220 19.4% 12.2%; /* fc-panel #191D25 */
+    --card-foreground: 216 28.3% 89.6%;
+    --popover: 220 19.4% 12.2%;
+    --popover-foreground: 216 28.3% 89.6%;
+    --primary: 202.9 60.6% 59.2%; /* fc-acc #58A6D6 */
+    --primary-foreground: 211.4 48.8% 8.4%; /* #0B1520, per fc accent buttons */
+    --secondary: 220 19% 15.5%; /* fc-raise #20252F */
+    --secondary-foreground: 216 28.3% 89.6%;
+    --muted: 220 19% 15.5%; /* fc-raise */
+    --muted-foreground: 218.6 13.7% 60%; /* fc-ink2 #8B95A7 */
+    --accent: 220 19% 15.5%; /* fc-raise */
+    --accent-foreground: 216 28.3% 89.6%;
+    --destructive: 7.5 72.4% 58.8%; /* fc-crit #E25D4A */
+    --destructive-foreground: 211.4 48.8% 8.4%;
+    --border: 217.9 18.1% 20.6%; /* fc-line #2B323E */
+    --input: 217.9 18.1% 20.6%;
+    --ring: 202.9 60.6% 59.2%; /* fc-acc */
   }
 }
 
 /* ── Fleet Console design tokens ─────────────────────────────────────────
-   Palette from the approved fleet-console mockup, namespaced --fc-* so they
-   coexist with the shadcn tokens above. Raw color values (not HSL triplets):
-   new Fleet Console surfaces consume them directly via var(--fc-*).
-   Light theme is re-picked, not inverted. The steel-cyan accent is reserved
-   for interaction; status colors are always paired with a form cue.
-   New components use these — existing screens keep the shadcn tokens. */
+   Palette from the approved fleet-console mockup, namespaced --fc-*. Raw
+   color values (not HSL triplets): all surfaces consume them directly via
+   var(--fc-*). The legacy shadcn names above are aliases into THIS palette,
+   kept only for the ui/* component library. Light theme is re-picked, not
+   inverted. The steel-cyan accent is reserved for interaction; status colors
+   are always paired with a form cue. See ui/src/DESIGN.md. */
 @layer base {
   :root {
     --fc-bg: #F2F4F7;
@@ -65,6 +73,7 @@
     --fc-ink2: #566071;
     --fc-ink3: #8B95A7;
     --fc-acc: #0E6EAD;
+    --fc-acc-fg: #FFFFFF;
     --fc-acc-dim: #7FB3D4;
     --fc-acc-bg: rgba(14, 110, 173, 0.1);
     --fc-good: #1F8A4C;
@@ -86,6 +95,7 @@
     --fc-ink2: #8B95A7;
     --fc-ink3: #5C6575;
     --fc-acc: #58A6D6;
+    --fc-acc-fg: #0B1520;
     --fc-acc-dim: #2C5A75;
     --fc-acc-bg: rgba(88, 166, 214, 0.12);
     --fc-good: #4CBB78;

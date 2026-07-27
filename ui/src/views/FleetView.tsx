@@ -28,6 +28,7 @@ import { formatErrorRate, formatFindingValue, severityTone } from "../lib/fleet"
 import { formatRate, learningRemaining, ratePerMinute } from "../lib/series";
 import { formatSigCount, trendTone } from "../lib/errsig";
 import { FcChip, MicroLabel, SEV_STRIPE } from "../components/FleetBits";
+import PageShell from "../components/PageShell";
 import { RingBars, Sparkline } from "../components/charts";
 import { cn } from "../lib/utils";
 
@@ -222,7 +223,7 @@ function FindingRow({
         <Link
           to={attentionFindingPath(finding.suggested_query)}
           title={`Opens with the system-written query: ${finding.suggested_query}`}
-          className="rounded-md border border-[var(--fc-acc)] bg-[var(--fc-acc)] px-2 py-0.5 text-[11px] font-semibold text-[#0B1520] no-underline hover:opacity-90"
+          className="rounded-md border border-[var(--fc-acc)] bg-[var(--fc-acc)] px-2 py-0.5 text-[11px] font-semibold text-[var(--fc-acc-fg)] no-underline hover:opacity-90"
         >
           Open →
         </Link>
@@ -319,7 +320,7 @@ function AddMarkerButton({ onCreated }: { onCreated: () => void }) {
       <button
         onClick={submit}
         disabled={busy || label.trim() === ""}
-        className="rounded border border-[var(--fc-acc)] bg-[var(--fc-acc)] px-1.5 py-0.5 text-[10.5px] font-semibold text-[#0B1520] disabled:opacity-50"
+        className="rounded border border-[var(--fc-acc)] bg-[var(--fc-acc)] px-1.5 py-0.5 text-[10.5px] font-semibold text-[var(--fc-acc-fg)] disabled:opacity-50"
       >
         mark
       </button>
@@ -474,7 +475,7 @@ export default function FleetView() {
   // the honest empty state — no numbers are better than invented ones (§2).
   if (!overview) {
     return (
-      <div className="mx-auto max-w-[1560px] px-4 py-4">
+      <PageShell>
         <div className="rounded-lg border border-[var(--fc-line)] bg-[var(--fc-panel)] p-8 text-center">
           {error ? (
             <>
@@ -491,7 +492,7 @@ export default function FleetView() {
             <div className="text-sm text-[var(--fc-ink3)]">Waiting for fleet data…</div>
           )}
         </div>
-      </div>
+      </PageShell>
     );
   }
 
@@ -503,7 +504,7 @@ export default function FleetView() {
   const memUsed = F.redis_memory_used_bytes;
 
   return (
-    <div className="mx-auto max-w-[1560px] px-4 py-4">
+    <PageShell>
       {/* Stale-data banner (§3.1 error state) */}
       {stale && (
         <div className="mb-3 flex items-center gap-2 rounded-md border border-[var(--fc-warn)]/45 bg-[var(--fc-warn-bg)] px-3 py-2 text-xs text-[var(--fc-warn)]">
@@ -667,6 +668,6 @@ export default function FleetView() {
         markers={markers}
         onMarkerCreated={refreshMarkers}
       />
-    </div>
+    </PageShell>
   );
 }

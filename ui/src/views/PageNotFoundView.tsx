@@ -1,8 +1,15 @@
+import { MicroLabel } from "../components/FleetBits";
+
 export default function PageNotFoundView() {
   return (
-    <div className="flex flex-col items-center justify-center h-full min-h-[400px] text-[hsl(var(--muted-foreground))]">
-      <h1 className="text-6xl font-bold mb-4">404</h1>
-      <p className="text-xl">Page not found</p>
+    <div className="flex h-full min-h-[400px] flex-col items-center justify-center">
+      <MicroLabel>page not found</MicroLabel>
+      <div className="mt-1 font-mono text-5xl font-semibold tabular-nums text-[var(--fc-ink)]">
+        404
+      </div>
+      <p className="mt-2 text-sm text-[var(--fc-ink2)]">
+        Nothing lives at this address — check the URL or use the nav.
+      </p>
     </div>
   );
 }

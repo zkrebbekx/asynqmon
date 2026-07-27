@@ -23,7 +23,7 @@ export default function DeleteConfirmButton({ description, onDelete, disabled, c
           <Button
             size="icon"
             variant="ghost"
-            className={cn("h-7 w-7 text-red-500", className)}
+            className={cn("h-7 w-7 text-[var(--fc-crit)]", className)}
             disabled={disabled}
             onClick={() => setOpen(true)}
           >

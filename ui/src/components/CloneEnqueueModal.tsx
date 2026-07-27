@@ -244,7 +244,7 @@ export default function CloneEnqueueModal({ open, sourceTask, onClose, onEnqueue
               size="sm"
               onClick={submit}
               disabled={busy || Object.keys(errs).length > 0}
-              className="bg-[var(--fc-acc)] text-white hover:bg-[var(--fc-acc)]/90"
+              className="bg-[var(--fc-acc)] text-[var(--fc-acc-fg)] hover:bg-[var(--fc-acc)]/90"
             >
               {busy ? "Enqueuing…" : "Enqueue task"}
             </Button>
