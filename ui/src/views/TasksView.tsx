@@ -44,6 +44,7 @@ import {
   upcomingRetries,
 } from "../lib/workspace";
 import WorkspaceHealthStrip from "../components/workspace/WorkspaceHealthStrip";
+import PageShell from "../components/PageShell";
 import WorkspaceAttentionTab from "../components/workspace/WorkspaceAttentionTab";
 import WorkspaceRail from "../components/workspace/WorkspaceRail";
 import BulkJobModal from "../components/BulkJobModal";
@@ -242,7 +243,7 @@ export default function TasksView() {
   };
 
   return (
-    <div className="space-y-3 px-4 py-4">
+    <PageShell className="space-y-3">
       {/* §3.3 error state: queue not in the fleet cache and empty everywhere. */}
       {notFound && (
         <div className="flex items-start gap-2 rounded-lg border border-[var(--fc-warn)]/40 bg-[var(--fc-warn-bg)] px-3 py-2.5 text-xs text-[var(--fc-ink2)]">
@@ -307,7 +308,7 @@ export default function TasksView() {
             <div className="relative">
               <Search
                 size={13}
-                className="absolute left-2.5 top-1/2 -translate-y-1/2 text-[hsl(var(--muted-foreground))]"
+                className="absolute left-2.5 top-1/2 -translate-y-1/2 text-[var(--fc-ink3)]"
               />
               <Input
                 placeholder="Jump to task ID"
@@ -429,6 +430,6 @@ export default function TasksView() {
           }}
         />
       )}
-    </div>
+    </PageShell>
   );
 }

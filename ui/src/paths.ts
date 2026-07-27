@@ -26,16 +26,20 @@ export function queueDetailsPath(qname: string, taskStatus?: string): string {
   return path;
 }
 
+// taskDetailsPath returns the canonical task deep link: the Tasks console
+// scoped to the task's queue with the task peeked in the drawer. The old
+// /queues/:qname/tasks/:taskId route still exists as a redirect to exactly
+// this URL (TaskDetailsRedirect), so external bookmarks keep working while
+// in-app links skip the bounce.
 export function taskDetailsPath(qname: string, taskId: string): string {
-  return paths()
-    .TASK_DETAILS.replace(":qname", qname)
-    .replace(":taskId", taskId);
+  return `${paths().TASKS}${taskDrawerSearch(qname, taskId)}`;
 }
 
 // attentionFindingPath resolves an attention finding's suggested query to the
 // surface that can answer it (Tasks console or Queues Directory), with the
 // query pre-filled in the URL. The pure mapping lives in lib/fleet.ts.
 import { attentionTarget } from "./lib/fleet";
+import { taskDrawerSearch } from "./lib/urlstate";
 
 export function attentionFindingPath(suggestedQuery: string): string {
   const target = attentionTarget(suggestedQuery);

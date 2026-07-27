@@ -32,6 +32,7 @@ import { queueDetailsPath } from "../paths";
 import { timeAgo, toErrorString } from "../utils";
 import { cn, clickableRowClass, clickableRowProps } from "../lib/utils";
 import { FcChip } from "../components/FleetBits";
+import PageShell from "../components/PageShell";
 import { LazyMount, Sparkline } from "../components/charts";
 import SaveViewModal from "../components/SaveViewModal";
 import UpdatesPausedPill from "../components/UpdatesPausedPill";
@@ -348,7 +349,7 @@ export default function QueuesDirectoryView() {
   }, [view]);
 
   return (
-    <div className="px-4 py-4">
+    <PageShell>
       {/* Filter bar — f= passed to the server verbatim */}
       <div className="mb-2.5 flex items-center gap-2">
         <div className="flex flex-1 items-center gap-2 rounded-[7px] border border-[var(--fc-line)] bg-[var(--fc-panel)] px-3 py-2">
@@ -554,6 +555,6 @@ export default function QueuesDirectoryView() {
         state={directoryViewState}
         onClose={() => setSaveViewOpen(false)}
       />
-    </div>
+    </PageShell>
   );
 }

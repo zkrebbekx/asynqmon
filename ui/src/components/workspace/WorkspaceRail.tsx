@@ -175,7 +175,7 @@ export default function WorkspaceRail({
                       <Button
                         size="sm"
                         variant="outline"
-                        className="h-6 text-[10.5px] text-red-500 hover:text-red-600"
+                        className="h-6 text-[10.5px] text-[var(--fc-crit)] hover:opacity-80"
                         title="Bulk delete the archived tasks with this signature — gone forever"
                         onClick={() => onClusterVerb("delete", "archived", c.label)}
                       >

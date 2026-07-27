@@ -3,9 +3,9 @@ import { useSelector, useDispatch } from "react-redux";
 import { AppState } from "../store";
 import { pollIntervalChange, selectTheme } from "../actions/settingsActions";
 import { ThemePreference } from "../reducers/settingsReducer";
-import { Card, CardContent, CardHeader, CardTitle } from "../components/ui/card";
 import { Label } from "../components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../components/ui/select";
+import PageShell, { panelClass } from "../components/PageShell";
 import { getHealthRoles, HealthRolesResponse } from "../api-fleet";
 
 // Settings › Health refresh cadence (independent of the global poll slider —
@@ -83,13 +83,11 @@ function FleetHealthSection() {
   const stats = health?.stats;
 
   return (
-    <Card>
-      <CardHeader>
-        <CardTitle className="text-base font-medium text-[hsl(var(--foreground))]">
-          Fleet Console Health
-        </CardTitle>
-      </CardHeader>
-      <CardContent>
+    <section className={panelClass}>
+      <div className="border-b border-[var(--fc-line2)] px-3 py-2 text-xs font-semibold text-[var(--fc-ink)]">
+        Fleet Console Health
+      </div>
+      <div className="px-3 py-3">
         {error && (
           <p className="rounded-md border border-[var(--fc-line)] bg-[var(--fc-warn-bg)] px-3 py-2 text-sm text-[var(--fc-warn)]">
             {error}
@@ -206,8 +204,8 @@ function FleetHealthSection() {
             </div>
           </div>
         )}
-      </CardContent>
-    </Card>
+      </div>
+    </section>
   );
 }
 
@@ -225,16 +223,14 @@ export default function SettingsView() {
   }, [sliderValue, pollInterval, dispatch]);
 
   return (
-    <div className="max-w-2xl mx-auto px-4 py-8">
-      <h1 className="text-2xl font-semibold mb-6 text-[hsl(var(--foreground))]">Settings</h1>
-
-      <div className="space-y-4">
-        <Card>
-          <CardHeader>
-            <CardTitle className="text-base font-medium text-[hsl(var(--foreground))]">Polling Interval</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <p className="text-sm text-[hsl(var(--muted-foreground))] mb-4">
+    <PageShell className="max-w-2xl" title="Settings">
+      <div className="space-y-3">
+        <section className={panelClass}>
+          <div className="border-b border-[var(--fc-line2)] px-3 py-2 text-xs font-semibold text-[var(--fc-ink)]">
+            Polling Interval
+          </div>
+          <div className="px-3 py-3">
+            <p className="mb-4 text-sm text-[var(--fc-ink2)]">
               Web UI fetches live data every{" "}
               <strong>{sliderValue === 1 ? "1 second" : `${sliderValue} seconds`}</strong>
             </p>
@@ -246,22 +242,22 @@ export default function SettingsView() {
               value={sliderValue}
               onChange={(e) => setSliderValue(Number(e.target.value))}
               aria-label="Polling interval in seconds"
-              className="w-full accent-[hsl(var(--primary))]"
+              className="w-full accent-[var(--fc-acc)]"
             />
-            <div className="flex justify-between text-xs text-[hsl(var(--muted-foreground))] mt-1">
+            <div className="mt-1 flex justify-between text-xs text-[var(--fc-ink3)]">
               <span>2s</span>
               <span>20s</span>
             </div>
-          </CardContent>
-        </Card>
+          </div>
+        </section>
 
-        <Card>
-          <CardHeader>
-            <CardTitle className="text-base font-medium text-[hsl(var(--foreground))]">Dark Theme</CardTitle>
-          </CardHeader>
-          <CardContent>
+        <section className={panelClass}>
+          <div className="border-b border-[var(--fc-line2)] px-3 py-2 text-xs font-semibold text-[var(--fc-ink)]">
+            Dark Theme
+          </div>
+          <div className="px-3 py-3">
             <div className="flex items-center justify-between">
-              <Label className="text-sm text-[hsl(var(--muted-foreground))]">Theme preference</Label>
+              <Label className="text-sm text-[var(--fc-ink2)]">Theme preference</Label>
               <Select
                 value={String(themePreference)}
                 onValueChange={(v) => dispatch(selectTheme(Number(v) as ThemePreference))}
@@ -276,11 +272,11 @@ export default function SettingsView() {
                 </SelectContent>
               </Select>
             </div>
-          </CardContent>
-        </Card>
+          </div>
+        </section>
 
         <FleetHealthSection />
       </div>
-    </div>
+    </PageShell>
   );
 }

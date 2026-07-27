@@ -4,53 +4,60 @@ import { getRedisInfoAsync } from "../actions/redisInfoActions";
 import { usePolling } from "../hooks";
 import { timeAgoUnix } from "../utils";
 import { RedisInfo } from "../api";
-import { Alert, AlertDescription, AlertTitle } from "../components/ui/alert";
-import { AlertCircle } from "lucide-react";
-import { Card, CardContent, CardHeader, CardTitle } from "../components/ui/card";
+import { MicroLabel } from "../components/FleetBits";
+import PageShell, { panelClass } from "../components/PageShell";
 import QueueLocationTable from "../components/QueueLocationTable";
 import SyntaxHighlighter from "../components/SyntaxHighlighter";
 
-function MetricCard({ title, value }: { title: string; value: string }) {
+// Metric tile matching the Fleet KPI tile: caps eyebrow + left-aligned mono
+// value on a fc panel surface.
+function MetricTile({ label, value }: { label: string; value: string }) {
   return (
-    <Card>
-      <CardContent className="pt-6 text-center">
-        <p className="text-2xl font-semibold text-[hsl(var(--foreground))]">{value}</p>
-        <p className="text-xs text-[hsl(var(--muted-foreground))] mt-1">{title}</p>
-      </CardContent>
-    </Card>
+    <div className="rounded-lg border border-[var(--fc-line)] bg-[var(--fc-panel)] px-3 pb-2.5 pt-2.5">
+      <MicroLabel>{label}</MicroLabel>
+      <div className="mt-[3px] font-mono text-[19px] font-semibold tabular-nums tracking-[-0.01em] text-[var(--fc-ink)]">
+        {value}
+      </div>
+    </div>
   );
 }
 
-function RedisMetricCards({ redisInfo }: { redisInfo: RedisInfo }) {
+function RedisMetricTiles({ redisInfo }: { redisInfo: RedisInfo }) {
   return (
-    <div className="space-y-6">
+    <div className="space-y-3">
       <div>
-        <h3 className="text-sm font-medium text-[hsl(var(--muted-foreground))] mb-3">Server</h3>
-        <div className="grid grid-cols-2 gap-4">
-          <MetricCard title="Version" value={redisInfo.redis_version} />
-          <MetricCard title="Uptime" value={`${redisInfo.uptime_in_days} days`} />
+        <MicroLabel className="mb-1.5">Server</MicroLabel>
+        <div className="grid grid-cols-2 gap-2 lg:grid-cols-4">
+          <MetricTile label="version" value={redisInfo.redis_version} />
+          <MetricTile label="uptime" value={`${redisInfo.uptime_in_days} days`} />
         </div>
       </div>
       <div>
-        <h3 className="text-sm font-medium text-[hsl(var(--muted-foreground))] mb-3">Memory</h3>
-        <div className="grid grid-cols-3 gap-4">
-          <MetricCard title="Used Memory" value={redisInfo.used_memory_human} />
-          <MetricCard title="Peak Memory" value={redisInfo.used_memory_peak_human} />
-          <MetricCard title="Fragmentation Ratio" value={redisInfo.mem_fragmentation_ratio} />
+        <MicroLabel className="mb-1.5">Memory</MicroLabel>
+        <div className="grid grid-cols-3 gap-2 lg:grid-cols-4">
+          <MetricTile label="used memory" value={redisInfo.used_memory_human} />
+          <MetricTile label="peak memory" value={redisInfo.used_memory_peak_human} />
+          <MetricTile label="fragmentation ratio" value={redisInfo.mem_fragmentation_ratio} />
         </div>
       </div>
       <div>
-        <h3 className="text-sm font-medium text-[hsl(var(--muted-foreground))] mb-3">Connections</h3>
-        <div className="grid grid-cols-2 gap-4">
-          <MetricCard title="Connected Clients" value={redisInfo.connected_clients} />
-          <MetricCard title="Connected Replicas" value={redisInfo.connected_slaves} />
+        <MicroLabel className="mb-1.5">Connections</MicroLabel>
+        <div className="grid grid-cols-2 gap-2 lg:grid-cols-4">
+          <MetricTile label="connected clients" value={redisInfo.connected_clients} />
+          <MetricTile label="connected replicas" value={redisInfo.connected_slaves} />
         </div>
       </div>
       <div>
-        <h3 className="text-sm font-medium text-[hsl(var(--muted-foreground))] mb-3">Persistence</h3>
-        <div className="grid grid-cols-2 gap-4">
-          <MetricCard title="Last Save to Disk" value={timeAgoUnix(parseInt(redisInfo.rdb_last_save_time))} />
-          <MetricCard title="Changes Since Last Dump" value={redisInfo.rdb_changes_since_last_save} />
+        <MicroLabel className="mb-1.5">Persistence</MicroLabel>
+        <div className="grid grid-cols-2 gap-2 lg:grid-cols-4">
+          <MetricTile
+            label="last save to disk"
+            value={timeAgoUnix(parseInt(redisInfo.rdb_last_save_time))}
+          />
+          <MetricTile
+            label="changes since last dump"
+            value={redisInfo.rdb_changes_since_last_save}
+          />
         </div>
       </div>
     </div>
@@ -59,64 +66,77 @@ function RedisMetricCards({ redisInfo }: { redisInfo: RedisInfo }) {
 
 export default function RedisInfoView() {
   const dispatch = useAppDispatch();
-  const { loading, error, data: redisInfo, address: redisAddress, rawData: redisInfoRaw,
+  const { error, data: redisInfo, address: redisAddress, rawData: redisInfoRaw,
     cluster: redisClusterEnabled, rawClusterNodes: redisClusterNodesRaw, queueLocations } =
     useSelector((s: AppState) => s.redis);
   const pollInterval = useSelector((s: AppState) => s.settings.pollInterval);
 
   usePolling(() => dispatch(getRedisInfoAsync()), pollInterval);
 
+  if (error) {
+    return (
+      <PageShell>
+        <div className="rounded-md border border-[var(--fc-crit)]/40 bg-[var(--fc-crit-bg)] px-3 py-2 text-xs text-[var(--fc-crit)]">
+          Could not retrieve Redis data — see the logs for details.
+        </div>
+      </PageShell>
+    );
+  }
+
   return (
-    <div className="max-w-5xl mx-auto px-4 py-8 space-y-6">
-      {error ? (
-        <Alert variant="destructive">
-          <AlertCircle className="h-4 w-4" />
-          <AlertTitle>Error</AlertTitle>
-          <AlertDescription>Could not retrieve Redis data — see the logs for details.</AlertDescription>
-        </Alert>
-      ) : (
-        <>
-          <div>
-            <h1 className="text-2xl font-semibold">
-              {redisClusterEnabled ? "Redis Cluster Info" : "Redis Info"}
-            </h1>
-            {!redisClusterEnabled && redisAddress && (
-              <p className="text-sm text-[hsl(var(--muted-foreground))] mt-1">Connected to: {redisAddress}</p>
-            )}
+    <PageShell
+      className="space-y-3"
+      title={redisClusterEnabled ? "Redis Cluster Info" : "Redis Info"}
+      sub={!redisClusterEnabled && redisAddress ? `Connected to: ${redisAddress}` : undefined}
+    >
+      {queueLocations && queueLocations.length > 0 && (
+        <section className={panelClass}>
+          <div className="border-b border-[var(--fc-line2)] px-3 py-2 text-xs font-semibold text-[var(--fc-ink)]">
+            Queue Locations in Cluster
           </div>
-
-          {queueLocations && queueLocations.length > 0 && (
-            <div>
-              <h2 className="text-sm font-medium text-[hsl(var(--muted-foreground))] mb-3">Queue Locations in Cluster</h2>
-              <Card>
-                <QueueLocationTable queueLocations={queueLocations} />
-              </Card>
-            </div>
-          )}
-
-          {redisClusterNodesRaw && (
-            <div>
-              <h2 className="text-sm font-medium text-[hsl(var(--muted-foreground))] mb-3">
-                <a href="https://redis.io/commands/cluster-nodes" target="_blank" rel="noreferrer" className="hover:underline">CLUSTER NODES</a> Output
-              </h2>
-              <SyntaxHighlighter language="yaml">{redisClusterNodesRaw}</SyntaxHighlighter>
-            </div>
-          )}
-
-          {redisInfo && !redisClusterEnabled && <RedisMetricCards redisInfo={redisInfo} />}
-
-          {redisInfoRaw && (
-            <div>
-              <h2 className="text-sm font-medium text-[hsl(var(--muted-foreground))] mb-3">
-                <a href="https://redis.io/commands/info" target="_blank" rel="noreferrer" className="hover:underline">
-                  {redisClusterEnabled ? "CLUSTER INFO" : "INFO"}
-                </a> Output
-              </h2>
-              <SyntaxHighlighter language="yaml">{redisInfoRaw}</SyntaxHighlighter>
-            </div>
-          )}
-        </>
+          <QueueLocationTable queueLocations={queueLocations} />
+        </section>
       )}
-    </div>
+
+      {redisClusterNodesRaw && (
+        <section className={panelClass}>
+          <div className="border-b border-[var(--fc-line2)] px-3 py-2 text-xs font-semibold text-[var(--fc-ink)]">
+            <a
+              href="https://redis.io/commands/cluster-nodes"
+              target="_blank"
+              rel="noreferrer"
+              className="hover:underline"
+            >
+              CLUSTER NODES
+            </a>{" "}
+            <span className="font-normal text-[var(--fc-ink3)]">output</span>
+          </div>
+          <div className="px-3 py-2">
+            <SyntaxHighlighter language="yaml">{redisClusterNodesRaw}</SyntaxHighlighter>
+          </div>
+        </section>
+      )}
+
+      {redisInfo && !redisClusterEnabled && <RedisMetricTiles redisInfo={redisInfo} />}
+
+      {redisInfoRaw && (
+        <section className={panelClass}>
+          <div className="border-b border-[var(--fc-line2)] px-3 py-2 text-xs font-semibold text-[var(--fc-ink)]">
+            <a
+              href="https://redis.io/commands/info"
+              target="_blank"
+              rel="noreferrer"
+              className="hover:underline"
+            >
+              {redisClusterEnabled ? "CLUSTER INFO" : "INFO"}
+            </a>{" "}
+            <span className="font-normal text-[var(--fc-ink3)]">output</span>
+          </div>
+          <div className="px-3 py-2">
+            <SyntaxHighlighter language="yaml">{redisInfoRaw}</SyntaxHighlighter>
+          </div>
+        </section>
+      )}
+    </PageShell>
   );
 }

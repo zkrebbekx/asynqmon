@@ -851,7 +851,7 @@ export default function TaskDrawer({ peek, resultList, onClose, onPeek, onPivot 
               {(canRun || canArchive || canDelete || canCancel || canClone) && (
                 <section className="flex items-center gap-2 border-t border-[var(--fc-line2)] pt-4">
                   {canRun && (
-                    <DrawerButton onClick={doRun} className="border-[var(--fc-acc)] bg-[var(--fc-acc)] text-white hover:border-[var(--fc-acc)]">
+                    <DrawerButton onClick={doRun} className="border-[var(--fc-acc)] bg-[var(--fc-acc)] text-[var(--fc-acc-fg)] hover:border-[var(--fc-acc)]">
                       <Play size={12} /> Run now
                     </DrawerButton>
                   )}

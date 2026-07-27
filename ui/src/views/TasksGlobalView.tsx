@@ -34,6 +34,7 @@ import { usePolling } from "../hooks";
 import { useKeymap } from "../hooks/useKeymap";
 import { useFrozenData } from "../hooks/useFrozenData";
 import { STATE_BULK_VERBS } from "../lib/palette";
+import PageShell from "../components/PageShell";
 import { Button } from "../components/ui/button";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "../components/ui/table";
 import { Alert, AlertDescription, AlertTitle } from "../components/ui/alert";
@@ -618,10 +619,11 @@ export default function TasksGlobalView() {
   };
 
   return (
-    <div className="max-w-7xl mx-auto px-4 py-6 space-y-4">
-      <div className="flex items-center justify-between">
-        <h1 className="text-2xl font-semibold">Tasks</h1>
-        {!window.READ_ONLY && (
+    <PageShell
+      className="space-y-3"
+      title="Tasks"
+      actions={
+        !window.READ_ONLY && (
           <Button
             size="sm"
             variant="outline"
@@ -632,13 +634,13 @@ export default function TasksGlobalView() {
             <BookmarkPlus size={13} className="mr-1.5" />
             Save view…
           </Button>
-        )}
-      </div>
-
+        )
+      }
+    >
       {/* Query bar: AQL text input (single source of truth). Chips, pills
           and pivots all COMPOSE INTO this text. */}
       <div className="relative">
-        <Search size={13} className="absolute left-3 top-1/2 -translate-y-1/2 text-[hsl(var(--muted-foreground))]" />
+        <Search size={13} className="absolute left-3 top-1/2 -translate-y-1/2 text-[var(--fc-ink3)]" />
         {/* Plain <input> (the shadcn Input doesn't forward refs, and the
             typeahead needs one) with the same visual classes. */}
         <input
@@ -652,13 +654,13 @@ export default function TasksGlobalView() {
           }}
           onFocus={() => setTypeaheadOpen(true)}
           onBlur={() => setTimeout(() => setTypeaheadOpen(false), 150)}
-          className="flex h-9 w-full rounded-md border border-[hsl(var(--input))] bg-transparent py-1 pl-8 pr-3 font-mono text-xs shadow-sm transition-colors placeholder:text-[hsl(var(--muted-foreground))] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[hsl(var(--ring))]"
+          className="flex h-9 w-full rounded-[7px] border border-[var(--fc-line)] bg-[var(--fc-panel)] py-1 pl-8 pr-3 font-mono text-xs text-[var(--fc-ink)] transition-colors placeholder:text-[var(--fc-ink3)] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[var(--fc-acc)]"
           spellCheck={false}
           autoComplete="off"
         />
         {/* queue= typeahead from the fleet queues cache */}
         {typeaheadOpen && queueSuggestions.length > 0 && (
-          <div className="absolute z-20 mt-1 w-72 rounded-md border border-[hsl(var(--border))] bg-[hsl(var(--card))] shadow-lg">
+          <div className="absolute z-20 mt-1 w-72 rounded-md border border-[var(--fc-line)] bg-[var(--fc-panel)] shadow-[var(--fc-shadow)]">
             {queueSuggestions.map((name) => (
               <button
                 key={name}
@@ -666,7 +668,7 @@ export default function TasksGlobalView() {
                   e.preventDefault();
                   applyQueueSuggestion(name);
                 }}
-                className="block w-full px-3 py-1.5 text-left font-mono text-xs hover:bg-[hsl(var(--muted))]"
+                className="block w-full px-3 py-1.5 text-left font-mono text-xs text-[var(--fc-ink)] hover:bg-[var(--fc-raise)]"
               >
                 queue=<span className="font-semibold">{name}</span>
               </button>
@@ -683,11 +685,11 @@ export default function TasksGlobalView() {
             <div>
               <span className="font-medium">{rejection.error}</span>
               {rejection.hint && (
-                <span className="text-[hsl(var(--muted-foreground))]"> — {rejection.hint}</span>
+                <span className="text-[var(--fc-ink2)]"> — {rejection.hint}</span>
               )}
             </div>
           </div>
-          <pre className="overflow-x-auto rounded bg-[hsl(var(--muted))]/40 px-2 py-1 font-mono text-[11px] leading-4">
+          <pre className="overflow-x-auto rounded bg-[var(--fc-raise)]/60 px-2 py-1 font-mono text-[11px] leading-4">
             {rejection.query + "\n" + caretLine(rejection.query, rejection.position)}
           </pre>
         </div>
@@ -701,14 +703,14 @@ export default function TasksGlobalView() {
               key={st}
               onClick={() => setStateClause(st)}
               className={cn(
-                "inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-medium border transition-colors capitalize",
+                "inline-flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs transition-colors capitalize",
                 view.state === st
-                  ? "bg-[hsl(var(--primary))] text-[hsl(var(--primary-foreground))] border-[hsl(var(--primary))]"
-                  : "border-[hsl(var(--border))] text-[hsl(var(--muted-foreground))] hover:border-[hsl(var(--primary))] hover:text-[hsl(var(--foreground))]"
+                  ? "bg-[var(--fc-acc-bg)] font-semibold text-[var(--fc-acc)]"
+                  : "text-[var(--fc-ink2)] hover:bg-[var(--fc-raise)] hover:text-[var(--fc-ink)]"
               )}
             >
               {st}
-              <span className={cn("font-mono tabular-nums", view.state === st ? "opacity-80" : "opacity-60")}>
+              <span className={cn("font-mono text-[10.5px] tabular-nums", view.state === st ? "opacity-80" : "text-[var(--fc-ink3)]")}>
                 {countLabel(st)}
               </span>
             </button>
@@ -717,16 +719,16 @@ export default function TasksGlobalView() {
 
         {/* Result mode (failure states only — group-by error/type) */}
         {isFailureState && (
-          <div className="flex items-center gap-0.5 rounded-full border border-[hsl(var(--border))] p-0.5">
+          <div className="flex items-center gap-0.5 rounded-md border border-[var(--fc-line)] p-0.5">
             {RESULT_MODES.map((m) => (
               <button
                 key={m}
                 onClick={() => updateView({ mode: m })}
                 className={cn(
-                  "px-2.5 py-0.5 rounded-full text-xs transition-colors",
+                  "rounded px-2.5 py-0.5 text-xs transition-colors",
                   view.mode === m
-                    ? "bg-[hsl(var(--primary))]/10 text-[hsl(var(--primary))] font-medium"
-                    : "text-[hsl(var(--muted-foreground))] hover:text-[hsl(var(--foreground))]"
+                    ? "bg-[var(--fc-acc-bg)] font-medium text-[var(--fc-acc)]"
+                    : "text-[var(--fc-ink2)] hover:text-[var(--fc-ink)]"
                 )}
               >
                 {m === "rows" ? "rows" : m === "group:error" ? "group: error" : "group: type"}
@@ -736,7 +738,7 @@ export default function TasksGlobalView() {
         )}
 
         {isCursorMode && (
-          <span className="ml-auto text-xs text-[hsl(var(--muted-foreground))]">
+          <span className="ml-auto text-xs text-[var(--fc-ink3)]">
             score-cursorable · totals exact
           </span>
         )}
@@ -744,11 +746,11 @@ export default function TasksGlobalView() {
 
       {/* Scan meter (§5.9): visible whenever scan coverage is partial */}
       {meta.mode === "scan" && (scanPartial || extraScanned > 0) && (
-        <div className="flex flex-wrap items-center gap-3 rounded-lg border border-[hsl(var(--border))] bg-[hsl(var(--muted))]/30 px-4 py-2 text-xs">
-          <span className="text-[hsl(var(--muted-foreground))]">scan</span>
-          <div className="h-1.5 w-40 overflow-hidden rounded-full bg-[hsl(var(--border))]">
+        <div className="flex flex-wrap items-center gap-3 rounded-lg border border-[var(--fc-line)] bg-[var(--fc-panel)] px-4 py-2 text-xs">
+          <span className="text-[var(--fc-ink3)]">scan</span>
+          <div className="h-1.5 w-40 overflow-hidden rounded-full bg-[var(--fc-raise)]">
             <div
-              className="h-full bg-[hsl(var(--primary))]"
+              className="h-full bg-[var(--fc-acc)]"
               style={{
                 width: `${meta.candidateEstimate > 0 ? Math.min(100, (scannedTotal / meta.candidateEstimate) * 100) : 100}%`,
               }}
@@ -770,7 +772,7 @@ export default function TasksGlobalView() {
               </Button>
             )}
             {scanJobId && (
-              <Link to={paths().OPS} className="text-[hsl(var(--primary))] hover:underline">
+              <Link to={paths().OPS} className="text-[var(--fc-acc)] hover:underline">
                 Preview job {scanJobId.slice(0, 8)}… → Operations
               </Link>
             )}
@@ -781,12 +783,12 @@ export default function TasksGlobalView() {
       {/* Metadata facet chips — clicking COMPOSES a meta.key=value clause
           into the query text (single source of truth) */}
       <div className="flex flex-wrap items-center gap-1.5">
-        <Tag size={13} className="text-[hsl(var(--muted-foreground))]" />
+        <Tag size={13} className="text-[var(--fc-ink3)]" />
         {view.meta.map((p) => (
           <button
             key={metaId(p)}
             onClick={() => removeFilter(p)}
-            className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs bg-[hsl(var(--primary))] text-[hsl(var(--primary-foreground))]"
+            className="inline-flex items-center gap-1 rounded px-2 py-0.5 text-xs font-semibold bg-[var(--fc-acc-bg)] text-[var(--fc-acc)]"
             title={`Remove meta.${p.key}=${p.value} from the query`}
           >
             {p.key}: {p.value}
@@ -797,7 +799,7 @@ export default function TasksGlobalView() {
           <button
             key={metaId(p)}
             onClick={() => addFilter({ key: p.key, value: p.value })}
-            className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs border border-[hsl(var(--border))] text-[hsl(var(--muted-foreground))] hover:border-[hsl(var(--primary))] hover:text-[hsl(var(--foreground))] transition-colors"
+            className="inline-flex items-center gap-1 rounded px-2 py-0.5 text-xs border border-[var(--fc-line)] text-[var(--fc-ink2)] hover:border-[var(--fc-acc)] hover:text-[var(--fc-ink)] transition-colors"
             title={`Add meta.${p.key}=${p.value} to the query`}
           >
             {p.key}: {p.value}
@@ -805,38 +807,42 @@ export default function TasksGlobalView() {
           </button>
         ))}
         {view.meta.length === 0 && chips.length === 0 && (
-          <span className="text-xs text-[hsl(var(--muted-foreground))]">No metadata to filter on</span>
+          <span className="text-xs text-[var(--fc-ink3)]">No metadata to filter on</span>
         )}
       </div>
 
       {/* Failure analytics cards (rows mode; group mode shows the full table) */}
       {isFailureState && !isGroupMode && (errorGroups.length > 0 || typeGroups.length > 0) && (
         <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-          <div className="rounded-lg border border-[hsl(var(--border))] bg-[hsl(var(--card))] p-4">
-            <h3 className="mb-2 text-sm font-semibold">Top errors</h3>
-            <div className="space-y-1">
-              {errorGroups.length === 0 && <span className="text-xs text-[hsl(var(--muted-foreground))]">None</span>}
+          <div className="rounded-lg border border-[var(--fc-line)] bg-[var(--fc-panel)]">
+            <div className="border-b border-[var(--fc-line2)] px-3 py-2 text-xs font-semibold text-[var(--fc-ink)]">
+              Top errors
+            </div>
+            <div className="space-y-1 px-3 py-2">
+              {errorGroups.length === 0 && <span className="text-xs text-[var(--fc-ink3)]">None</span>}
               {errorGroups.map((g) => (
                 <div key={g.label} className="flex items-center justify-between gap-3 text-xs">
-                  <span className="truncate text-red-500" title={g.label}>{g.label}</span>
-                  <span className="shrink-0 tabular-nums text-[hsl(var(--muted-foreground))]">{g.count}</span>
+                  <span className="truncate text-[var(--fc-crit)]" title={g.label}>{g.label}</span>
+                  <span className="shrink-0 font-mono tabular-nums text-[var(--fc-ink2)]">{g.count}</span>
                 </div>
               ))}
             </div>
           </div>
-          <div className="rounded-lg border border-[hsl(var(--border))] bg-[hsl(var(--card))] p-4">
-            <h3 className="mb-2 text-sm font-semibold">Top failing types</h3>
-            <div className="space-y-1">
-              {typeGroups.length === 0 && <span className="text-xs text-[hsl(var(--muted-foreground))]">None</span>}
+          <div className="rounded-lg border border-[var(--fc-line)] bg-[var(--fc-panel)]">
+            <div className="border-b border-[var(--fc-line2)] px-3 py-2 text-xs font-semibold text-[var(--fc-ink)]">
+              Top failing types
+            </div>
+            <div className="space-y-1 px-3 py-2">
+              {typeGroups.length === 0 && <span className="text-xs text-[var(--fc-ink3)]">None</span>}
               {typeGroups.map((g) => (
                 <button
                   key={g.label}
                   onClick={() => updateView({ q: setClause(view.q, "type", "=", g.label), page: 0 })}
-                  className="flex w-full items-center justify-between gap-3 text-xs hover:text-[hsl(var(--primary))]"
+                  className="flex w-full items-center justify-between gap-3 text-xs text-[var(--fc-ink)] hover:text-[var(--fc-acc)]"
                   title={`Filter by ${g.label}`}
                 >
                   <span className="truncate font-medium">{g.label}</span>
-                  <span className="shrink-0 tabular-nums text-[hsl(var(--muted-foreground))]">{g.count}</span>
+                  <span className="shrink-0 font-mono tabular-nums text-[var(--fc-ink2)]">{g.count}</span>
                 </button>
               ))}
             </div>
@@ -850,9 +856,9 @@ export default function TasksGlobalView() {
           Visually distinct from row actions and red-guarded for delete. */}
       {!window.READ_ONLY && total > 0 && bulkActions.length > 0 && (
         <div className="flex flex-wrap items-center gap-2 rounded-lg border border-dashed border-[var(--fc-warn)]/50 bg-[var(--fc-warn-bg)]/40 px-4 py-2">
-          <span className="text-xs text-[hsl(var(--muted-foreground))]">
+          <span className="text-xs text-[var(--fc-ink2)]">
             Whole scope — all{" "}
-            <span className="font-semibold text-[hsl(var(--foreground))]">
+            <span className="font-semibold text-[var(--fc-ink)]">
               {isCursorMode ? total.toLocaleString() : truncated ? `${total}+` : total}
             </span>{" "}
             matching, as a background job:
@@ -862,7 +868,7 @@ export default function TasksGlobalView() {
               key={b.action}
               size="sm"
               variant={b.action === "delete" ? "outline" : "ghost"}
-              className={cn("h-7 text-xs", b.action === "delete" && "text-red-500 hover:text-red-600")}
+              className={cn("h-7 text-xs", b.action === "delete" && "text-[var(--fc-crit)] hover:opacity-80")}
               onClick={() => setBulkVerb(b.action)}
             >
               {b.label} all…
@@ -906,7 +912,7 @@ export default function TasksGlobalView() {
       {/* Legacy free-text scans have no resume cursor; the cap is still
           disclosed (never silent truncation). */}
       {meta.mode === "legacy" && truncated && (
-        <div className="text-xs text-amber-500">
+        <div className="text-xs text-[var(--fc-warn)]">
           Free-text scan hit its cap — counts are a floor. Use AQL clauses (queue=, state=, meta.*) for
           budgeted, resumable scans.
         </div>
@@ -934,7 +940,7 @@ export default function TasksGlobalView() {
             <Button
               size="sm"
               variant="ghost"
-              className="h-7 text-xs text-red-500 hover:text-red-600"
+              className="h-7 text-xs text-[var(--fc-crit)] hover:opacity-80"
               onClick={() => openSelectionVerb("delete")}
             >
               Delete <span className="ml-1 opacity-50">#</span>
@@ -971,7 +977,7 @@ export default function TasksGlobalView() {
 
       {isGroupMode ? (
         /* Group-by result mode: the aggregate IS the result set. */
-        <div className="rounded-lg border border-[hsl(var(--border))] bg-[hsl(var(--card))]">
+        <div className="rounded-lg border border-[var(--fc-line)] bg-[var(--fc-panel)]">
           <Table>
             <TableHeader>
               <TableRow>
@@ -982,7 +988,7 @@ export default function TasksGlobalView() {
             <TableBody>
               {groupRows.length === 0 ? (
                 <TableRow>
-                  <TableCell colSpan={2} className="text-center py-8 text-[hsl(var(--muted-foreground))]">
+                  <TableCell colSpan={2} className="text-center py-8 text-[var(--fc-ink3)]">
                     {loading ? "Loading…" : "No groups"}
                   </TableCell>
                 </TableRow>
@@ -997,7 +1003,7 @@ export default function TasksGlobalView() {
                         )
                       : {})}
                   >
-                    <TableCell className={cn("text-xs", view.mode === "group:error" && "text-red-500")}>
+                    <TableCell className={cn("text-xs", view.mode === "group:error" && "text-[var(--fc-crit)]")}>
                       {g.label || <span className="italic opacity-60">(empty)</span>}
                     </TableCell>
                     <TableCell className="text-right text-xs tabular-nums">{g.count}</TableCell>
@@ -1006,7 +1012,7 @@ export default function TasksGlobalView() {
               )}
             </TableBody>
           </Table>
-          <div className="px-4 py-2 border-t border-[hsl(var(--border))] text-xs text-[hsl(var(--muted-foreground))]">
+          <div className="px-4 py-2 border-t border-[var(--fc-line2)] text-xs text-[var(--fc-ink3)]">
             Group counts inherit the scan's coverage — partial until the scan completes.
             {view.mode === "group:type" && " Click a type to open it as rows."}
           </div>
@@ -1014,7 +1020,7 @@ export default function TasksGlobalView() {
       ) : (
         /* Rows result mode. Hover freezes row updates (§4.4). */
         <div
-          className="rounded-lg border border-[hsl(var(--border))] bg-[hsl(var(--card))]"
+          className="rounded-lg border border-[var(--fc-line)] bg-[var(--fc-panel)]"
           onMouseEnter={() => setHoveringTable(true)}
           onMouseLeave={() => setHoveringTable(false)}
         >
@@ -1037,14 +1043,14 @@ export default function TasksGlobalView() {
                   <TableRow key={`skeleton-${i}`}>
                     {Array.from({ length: window.READ_ONLY ? 4 : 6 }, (_, j) => (
                       <TableCell key={j}>
-                        <div className="h-4 animate-pulse rounded bg-[hsl(var(--muted))]" />
+                        <div className="h-4 animate-pulse rounded bg-[var(--fc-raise)]" />
                       </TableCell>
                     ))}
                   </TableRow>
                 ))
               ) : rows.length === 0 ? (
                 <TableRow>
-                  <TableCell colSpan={window.READ_ONLY ? 4 : 6} className="text-center py-8 text-[hsl(var(--muted-foreground))]">
+                  <TableCell colSpan={window.READ_ONLY ? 4 : 6} className="text-center py-8 text-[var(--fc-ink3)]">
                     No tasks
                   </TableCell>
                 </TableRow>
@@ -1055,7 +1061,7 @@ export default function TasksGlobalView() {
                     data-task-row={i}
                     className={cn(
                       clickableRowClass,
-                      peek && peek.id === t.id && peek.queue === t.queue && "bg-[hsl(var(--primary))]/5",
+                      peek && peek.id === t.id && peek.queue === t.queue && "bg-[var(--fc-acc-bg)]/60",
                       selected.has(rowKey(t)) && "bg-[var(--fc-acc-bg)]/50",
                       // Visible keyboard-focus ring (§4.5 j/k).
                       focusIdx === i && "shadow-[inset_0_0_0_1.5px_var(--fc-acc)]"
@@ -1111,7 +1117,7 @@ export default function TasksGlobalView() {
                             )}
                             {acts.delete && (
                               <Tooltip><TooltipTrigger asChild>
-                                <Button size="icon" variant="ghost" className="h-7 w-7 text-red-500" onClick={() => setConfirmDelete(t)}>
+                                <Button size="icon" variant="ghost" className="h-7 w-7 text-[var(--fc-crit)]" onClick={() => setConfirmDelete(t)}>
                                   <Trash2 size={13} />
                                 </Button>
                               </TooltipTrigger><TooltipContent>Delete</TooltipContent></Tooltip>
@@ -1147,8 +1153,8 @@ export default function TasksGlobalView() {
           {/* Pagination: cursor-based for exact zset listings, page/size
               otherwise. */}
           {isCursorMode ? (
-            <div className="flex items-center justify-between px-4 py-3 border-t border-[hsl(var(--border))]">
-              <span className="text-xs text-[hsl(var(--muted-foreground))]">
+            <div className="flex items-center justify-between px-4 py-3 border-t border-[var(--fc-line2)]">
+              <span className="text-xs text-[var(--fc-ink3)]">
                 {rows.length} rows · <span className="font-mono tabular-nums">{total.toLocaleString()}</span> total · exact
               </span>
               <div className="flex items-center gap-1">
@@ -1174,9 +1180,9 @@ export default function TasksGlobalView() {
             </div>
           ) : (
             total > 0 && (
-              <div className="flex items-center justify-between px-4 py-3 border-t border-[hsl(var(--border))]">
+              <div className="flex items-center justify-between px-4 py-3 border-t border-[var(--fc-line2)]">
                 <div className="flex items-center gap-3">
-                  <span className="text-xs text-[hsl(var(--muted-foreground))]">
+                  <span className="text-xs text-[var(--fc-ink3)]">
                     {view.page * view.size + 1}–{Math.min((view.page + 1) * view.size, total)} of{" "}
                     {truncated ? `${total}+` : total}
                     {extraMatches > 0 && ` (+${extraMatches} from continued scan)`}
@@ -1185,7 +1191,7 @@ export default function TasksGlobalView() {
                     value={view.size}
                     onChange={(e) => updateView({ size: Number(e.target.value), page: 0 })}
                     aria-label="Page size"
-                    className="h-6 rounded-md border border-[hsl(var(--input))] bg-[hsl(var(--background))] px-1 text-xs"
+                    className="h-6 rounded-md border border-[var(--fc-line)] bg-[var(--fc-panel)] px-1 text-xs text-[var(--fc-ink)]"
                   >
                     {PAGE_SIZES.map((s) => (
                       <option key={s} value={s}>{s} / page</option>
@@ -1229,6 +1235,6 @@ export default function TasksGlobalView() {
         state={consoleViewState}
         onClose={() => setSaveViewOpen(false)}
       />
-    </div>
+    </PageShell>
   );
 }

@@ -45,15 +45,12 @@ import {
 } from "../lib/hygiene";
 import { timeAgo, toErrorString } from "../utils";
 import { FcChip, MicroLabel } from "../components/FleetBits";
+import PageShell, { cellClass, panelClass, theadClass } from "../components/PageShell";
 import BulkJobModal from "../components/BulkJobModal";
 import { Button } from "../components/ui/button";
 import { Switch } from "../components/ui/switch";
 import { cn } from "../lib/utils";
 
-const panelClass = "rounded-lg border border-[var(--fc-line)] bg-[var(--fc-panel)]";
-const theadClass =
-  "whitespace-nowrap border-b border-[var(--fc-line)] px-2.5 py-[7px] text-left text-[10.5px] font-semibold uppercase tracking-[0.07em] text-[var(--fc-ink3)]";
-const cellClass = "border-b border-[var(--fc-line2)] px-2.5 py-1.5 align-middle";
 const numCell = cn(cellClass, "text-right font-mono tabular-nums");
 
 const fmt = (n: number | undefined | null) =>
@@ -104,7 +101,7 @@ function ScheduleEditor({
         value={interval}
         onChange={(e) => setIntervalSec(Number(e.target.value))}
         aria-label={`${card.title} interval`}
-        className="h-7 rounded-md border border-[hsl(var(--input))] bg-[hsl(var(--background))] px-1.5 text-[11.5px]"
+        className="h-7 rounded-md border border-[var(--fc-line)] bg-[var(--fc-panel)] px-1.5 text-[11.5px] text-[var(--fc-ink)]"
       >
         {intervalOptions(card.interval_seconds).map((p) => (
           <option key={p.seconds} value={p.seconds}>
@@ -582,7 +579,7 @@ export default function HygieneView() {
   };
 
   return (
-    <div className="p-4">
+    <PageShell>
       <div className="mb-3 text-[13px] text-[var(--fc-ink3)]">
         <b className="text-[var(--fc-ink)]">Hygiene</b> — what is rotting?
       </div>
@@ -631,6 +628,6 @@ export default function HygieneView() {
           onClose={() => setPendingAction(null)}
         />
       )}
-    </div>
+    </PageShell>
   );
 }

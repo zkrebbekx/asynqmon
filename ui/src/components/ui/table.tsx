@@ -23,7 +23,7 @@ export function TableFooter({ className, ...props }: React.HTMLAttributes<HTMLTa
 export function TableRow({ className, ...props }: React.HTMLAttributes<HTMLTableRowElement>) {
   return (
     <tr
-      className={cn("border-b border-[hsl(var(--border))] transition-colors hover:bg-[hsl(var(--muted))]/50 data-[state=selected]:bg-[hsl(var(--muted))]", className)}
+      className={cn("border-b border-[var(--fc-line2)] transition-colors hover:bg-[var(--fc-raise)] data-[state=selected]:bg-[var(--fc-raise)]", className)}
       {...props}
     />
   );
@@ -32,7 +32,7 @@ export function TableRow({ className, ...props }: React.HTMLAttributes<HTMLTable
 export function TableHead({ className, ...props }: React.ThHTMLAttributes<HTMLTableCellElement>) {
   return (
     <th
-      className={cn("h-10 px-4 text-left align-middle font-medium text-[hsl(var(--muted-foreground))] [&:has([role=checkbox])]:pr-0", className)}
+      className={cn("h-8 whitespace-nowrap px-3 text-left align-middle text-[10.5px] font-semibold uppercase tracking-[0.07em] text-[var(--fc-ink3)] [&:has([role=checkbox])]:pr-0", className)}
       {...props}
     />
   );
@@ -41,7 +41,7 @@ export function TableHead({ className, ...props }: React.ThHTMLAttributes<HTMLTa
 export function TableCell({ className, ...props }: React.TdHTMLAttributes<HTMLTableCellElement>) {
   return (
     <td
-      className={cn("px-4 py-3 align-middle [&:has([role=checkbox])]:pr-0", className)}
+      className={cn("px-3 py-2 align-middle [&:has([role=checkbox])]:pr-0", className)}
       {...props}
     />
   );

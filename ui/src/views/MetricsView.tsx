@@ -6,8 +6,7 @@ import { listQueuesAsync } from "../actions/queuesActions";
 import { AppState, useAppDispatch } from "../store";
 import { currentUnixtime } from "../utils";
 import { useQuery, usePolling } from "../hooks";
-import { Alert, AlertDescription, AlertTitle } from "../components/ui/alert";
-import { AlertCircle } from "lucide-react";
+import PageShell, { panelClass } from "../components/PageShell";
 
 // QueueMetricsChart pulls in recharts; load it lazily.
 const QueueMetricsChart = lazy(() => import("../components/QueueMetricsChart"));
@@ -47,37 +46,38 @@ export default function MetricsView() {
 
   if (!window.PROMETHEUS_SERVER_ADDRESS) {
     return (
-      <div className="max-w-2xl mx-auto px-4 py-16 text-center">
-        <Alert>
-          <AlertCircle className="h-4 w-4" />
-          <AlertTitle>Prometheus Not Configured</AlertTitle>
-          <AlertDescription>
-            Set the <code>--prometheus-addr</code> flag when starting asynqmon to enable metrics.
-          </AlertDescription>
-        </Alert>
-      </div>
+      <PageShell>
+        <div className={`${panelClass} p-8 text-center`}>
+          <div className="text-sm font-semibold text-[var(--fc-ink)]">
+            Prometheus Not Configured
+          </div>
+          <p className="mx-auto mt-2 max-w-md text-xs text-[var(--fc-ink2)]">
+            Set the <code className="font-mono text-[var(--fc-ink)]">--prometheus-addr</code>{" "}
+            flag when starting asynqmon to enable metrics.
+          </p>
+        </div>
+      </PageShell>
     );
   }
 
   return (
-    <div className="max-w-7xl mx-auto px-4 py-8 space-y-6">
-      <div className="flex items-center justify-between">
-        <h1 className="text-2xl font-semibold">Queue Metrics</h1>
-        <MetricsFetchControls endTime={endTime} duration={duration} />
-      </div>
-
+    <PageShell
+      className="space-y-3"
+      title="Queue Metrics"
+      actions={<MetricsFetchControls endTime={endTime} duration={duration} />}
+    >
       {error && (
-        <div className="flex items-center gap-2 text-amber-500 text-sm">
-          <AlertTriangle size={16} />
+        <div className="flex items-center gap-2 rounded-md border border-[var(--fc-warn)]/45 bg-[var(--fc-warn-bg)] px-3 py-2 text-xs text-[var(--fc-warn)]">
+          <AlertTriangle size={14} />
           <span>Could not load some metrics data</span>
         </div>
       )}
 
       {metrics && (
-        <Suspense fallback={<div className="h-64 animate-pulse rounded-md bg-[hsl(var(--muted))]/40" />}>
+        <Suspense fallback={<div className="h-64 animate-pulse rounded-lg bg-[var(--fc-raise)]/60" />}>
           <QueueMetricsChart metrics={metrics} queues={queues} />
         </Suspense>
       )}
-    </div>
+    </PageShell>
   );
 }
