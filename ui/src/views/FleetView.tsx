@@ -480,7 +480,7 @@ export default function FleetView() {
           {error ? (
             <>
               <div className="text-sm font-semibold text-[var(--fc-ink)]">
-                Fleet data unavailable
+                Overview data unavailable
               </div>
               <p className="mx-auto mt-2 max-w-md text-xs text-[var(--fc-ink2)]">
                 The fleet stats endpoints are not answering ({error}). The stats
@@ -509,7 +509,7 @@ export default function FleetView() {
       {stale && (
         <div className="mb-3 flex items-center gap-2 rounded-md border border-[var(--fc-warn)]/45 bg-[var(--fc-warn-bg)] px-3 py-2 text-xs text-[var(--fc-warn)]">
           <span className="font-semibold">
-            Fleet data is {Math.round((now - updatedAt) / 1000)}s stale
+            Overview data is {Math.round((now - updatedAt) / 1000)}s stale
           </span>
           <span className="text-[var(--fc-ink2)]">
             — stream disconnected or stats poller unhealthy; retrying in the background.
@@ -649,7 +649,7 @@ export default function FleetView() {
         ) : attention.findings.length === 0 ? (
           <div className="px-3 py-8 text-center">
             <div className="text-sm font-semibold text-[var(--fc-good)]">
-              Fleet healthy — {fmt(F.queues_total)} queues quiet.
+              All healthy — {fmt(F.queues_total)} queues quiet.
             </div>
             <div className="mt-1 text-[11px] text-[var(--fc-ink3)]">
               {attention.detectors_live} detectors live

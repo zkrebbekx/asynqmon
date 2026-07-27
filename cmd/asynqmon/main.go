@@ -119,7 +119,7 @@ func parseFlags(progname string, args []string) (cfg *Config, output string, err
 	flags.StringVar(&conf.PrometheusServerAddr, "prometheus-addr", getEnvDefaultString("PROMETHEUS_ADDR", ""), "address of prometheus server to query time series")
 	flags.StringVar(&conf.PrometheusBasicAuth, "prometheus-basic-auth", getEnvDefaultString("PROMETHEUS_BASIC_AUTH", ""), "user:password basic-auth credentials sent with every query to --prometheus-addr (upstream #248); prefer the env var to keep the secret out of argv")
 	flags.BoolVar(&conf.ReadOnly, "read-only", getEnvOrDefaultBool("READ_ONLY", false), "restrict to read-only mode")
-	flags.DurationVar(&conf.StatsInterval, "stats-interval", getEnvOrDefaultDuration("STATS_INTERVAL", 5*time.Second), "interval between fleet stats sweeps (e.g. 5s, 30s)")
+	flags.DurationVar(&conf.StatsInterval, "stats-interval", getEnvOrDefaultDuration("STATS_INTERVAL", 5*time.Second), "interval between stats sweeps (e.g. 5s, 30s)")
 	flags.BoolVar(&conf.DisableStats, "disable-stats", getEnvOrDefaultBool("DISABLE_STATS", false), "disable the background fleet stats sweeper and /api/fleet endpoints")
 	flags.StringVar(&conf.AuthHeader, "auth-header", getEnvDefaultString("AUTH_HEADER", ""), "reverse-proxy header resolved as the acting user for the audit log (e.g. X-Auth-Request-User)")
 	flags.StringVar(&conf.TrustedProxies, "trusted-proxies", getEnvDefaultString("TRUSTED_PROXIES", ""), "comma separated CIDRs the auth header is trusted from (empty: trusted from any peer)")

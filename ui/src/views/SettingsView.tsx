@@ -85,7 +85,7 @@ function FleetHealthSection() {
   return (
     <section className={panelClass}>
       <div className="border-b border-[var(--fc-line2)] px-3 py-2 text-xs font-semibold text-[var(--fc-ink)]">
-        Fleet Console Health
+        Console Health
       </div>
       <div className="px-3 py-3">
         {error && (

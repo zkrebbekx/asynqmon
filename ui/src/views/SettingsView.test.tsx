@@ -81,7 +81,7 @@ describe("SettingsView health section", () => {
     vi.mocked(apiFleet.getHealthRoles).mockResolvedValue(healthFixture());
     renderView();
 
-    expect(await screen.findByText("Fleet Console Health")).toBeInTheDocument();
+    expect(await screen.findByText("Console Health")).toBeInTheDocument();
     expect(screen.getByText("Stats sweeper")).toBeInTheDocument();
     expect(screen.getByText("Error-signature indexer")).toBeInTheDocument();
     expect(screen.getByText("Hygiene scheduler")).toBeInTheDocument();

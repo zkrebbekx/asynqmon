@@ -205,7 +205,7 @@ func readStats(w http.ResponseWriter, r *http.Request, engine *stats.Engine) (*s
 	if err != nil {
 		if errors.Is(err, stats.ErrNotReady) {
 			writeErrorMsg(w, http.StatusServiceUnavailable,
-				"fleet stats not available yet: the stats sweeper has not completed a sweep (it may be starting up, or no replica holds the sweeper lease)")
+				"overview stats not available yet: the stats sweeper has not completed a sweep (it may be starting up, or no replica holds the sweeper lease)")
 			return nil, false
 		}
 		writeError(w, http.StatusInternalServerError, err)
@@ -273,7 +273,7 @@ func newFleetAttentionHandlerFunc(engine *stats.Engine) http.HandlerFunc {
 		if err != nil {
 			if errors.Is(err, stats.ErrNotReady) {
 				writeErrorMsg(w, http.StatusServiceUnavailable,
-					"fleet attention not available yet: the stats sweeper has not completed a sweep (it may be starting up, or no replica holds the sweeper lease)")
+					"attention not available yet: the stats sweeper has not completed a sweep (it may be starting up, or no replica holds the sweeper lease)")
 				return
 			}
 			writeError(w, http.StatusInternalServerError, err)

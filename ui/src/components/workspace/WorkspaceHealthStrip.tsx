@@ -107,7 +107,7 @@ export default function WorkspaceHealthStrip({
           <span
             title={
               fleetUnavailable
-                ? "needs the fleet stats engine — unavailable"
+                ? "needs the stats engine — unavailable"
                 : "age of the oldest pending task (pending_since)"
             }
             className={cn(
@@ -119,7 +119,7 @@ export default function WorkspaceHealthStrip({
           </span>
         </Cell>
         <Cell label="latency">
-          <span title={fleetUnavailable ? "needs the fleet stats engine — unavailable" : undefined}>
+          <span title={fleetUnavailable ? "needs the stats engine — unavailable" : undefined}>
             {fleetRow ? formatLatencyMs(fleetRow.latency_ms) : "—"}
           </span>
         </Cell>

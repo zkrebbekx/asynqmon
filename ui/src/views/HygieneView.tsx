@@ -254,7 +254,7 @@ function StorageTable({ report }: { report: HygieneReport }) {
           </thead>
           <tbody>
             <tr>
-              <td className={cn(cellClass, "font-semibold")}>fleet</td>
+              <td className={cn(cellClass, "font-semibold")}>all queues</td>
               {st.retention.fleet.counts.map((c, i) => (
                 <td key={i} className={numCell}>
                   {fmt(c)}
