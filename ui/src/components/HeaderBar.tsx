@@ -50,7 +50,7 @@ function useBreadcrumbs(): Crumb[] {
   for (const [path, label] of sections) {
     if (matchPath(path, pathname)) return [{ label }];
   }
-  return [{ label: "Fleet" }];
+  return [{ label: "Overview" }];
 }
 
 // True on macOS/iOS — decides whether the palette hint shows ⌘K or Ctrl K.
@@ -83,7 +83,6 @@ export default function HeaderBar({ onOpenPalette }: Props) {
       <div className="flex w-[180px] shrink-0 items-center gap-2 text-[13px] font-semibold tracking-[0.01em]">
         <span aria-hidden className="h-[9px] w-[9px] rounded-[2px] bg-[var(--fc-acc)]" />
         Asynqmon
-        <span className="font-normal text-[var(--fc-ink3)]">Fleet</span>
       </div>
 
       {/* Breadcrumb */}

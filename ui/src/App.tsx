@@ -147,7 +147,7 @@ function AppContent() {
       <aside className="flex flex-col overflow-y-auto border-r border-[var(--fc-line)] bg-[var(--fc-panel)] px-2 py-2">
         <nav className="flex flex-1 flex-col gap-px">
           <NavGroupLabel label="Monitor" collapsed={collapsed} />
-          <NavItem to={appPaths.HOME} end icon={<Activity size={15} />} label="Fleet" collapsed={collapsed} />
+          <NavItem to={appPaths.HOME} end icon={<Activity size={15} />} label="Overview" collapsed={collapsed} />
           <NavItem to={appPaths.QUEUES} icon={<Layers size={15} />} label="Queues" collapsed={collapsed} />
           <NavItem to={appPaths.TASKS} icon={<ListChecks size={15} />} label="Tasks" collapsed={collapsed} />
           <NavItem to={appPaths.ERRORS} icon={<AlertTriangle size={15} />} label="Errors" collapsed={collapsed} />

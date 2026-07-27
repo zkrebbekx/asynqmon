@@ -406,7 +406,7 @@ function SchedulerHealthTable({ report }: { report: HygieneReport }) {
         r.last_seen_at ? `last seen ${timeAgo(r.last_seen_at)}` : ""
       )}
       {section(
-        "Retention-less entries — outcome unknowable (§3.8)",
+        "Retention-less entries — outcome unknowable",
         "warn",
         sh.retention_less,
         () => "set asynq.Retention to make outcomes traceable"

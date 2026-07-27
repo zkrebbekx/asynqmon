@@ -2,9 +2,12 @@ import { describe, expect, it } from "vitest";
 import {
   archiveTrimWarning,
   costEstimateLabel,
+  executeEtaSeconds,
+  fmtEta,
   gateExecute,
   isTerminalJobState,
   jobProgress,
+  scanEtaSeconds,
   scopeLabel,
   typedConfirmPhrase,
   verifyVerdict,
@@ -127,6 +130,46 @@ describe("isTerminalJobState", () => {
     for (const s of ["done", "canceled", "failed"]) expect(isTerminalJobState(s)).toBe(true);
     for (const s of ["previewing", "preview_ready", "running", "paused"])
       expect(isTerminalJobState(s)).toBe(false);
+  });
+});
+
+describe("executeEtaSeconds (throttle-aware)", () => {
+  it("divides the remaining candidates by the throttle rate", () => {
+    // 1000 remaining at 200 tasks/sec → 5s.
+    expect(
+      executeEtaSeconds({ candidates: 1200, acted: 150, skipped: 30, failed: 20 }, 200)
+    ).toBe(5);
+  });
+
+  it("is null when unknowable — never a guess", () => {
+    expect(executeEtaSeconds({ candidates: 0, acted: 0, skipped: 0, failed: 0 }, 200)).toBeNull();
+    expect(executeEtaSeconds({ candidates: 10, acted: 10, skipped: 0, failed: 0 }, 200)).toBeNull();
+    expect(executeEtaSeconds({ candidates: 10, acted: 0, skipped: 0, failed: 0 }, 0)).toBeNull();
+  });
+});
+
+describe("scanEtaSeconds (observed enumeration rate)", () => {
+  const first = { t: 0, scanned: 0 };
+
+  it("projects the remaining scan at the observed rate", () => {
+    // 1000 scanned in 2s = 500/s; 9000 remaining → 18s.
+    expect(scanEtaSeconds(first, { t: 2000, scanned: 1000 }, 10_000)).toBe(18);
+  });
+
+  it("is null without an estimate, without progress, or past the bound", () => {
+    expect(scanEtaSeconds(first, { t: 2000, scanned: 1000 }, 0)).toBeNull();
+    expect(scanEtaSeconds(first, { t: 2000, scanned: 0 }, 10_000)).toBeNull();
+    expect(scanEtaSeconds(first, { t: 0, scanned: 1000 }, 10_000)).toBeNull();
+    expect(scanEtaSeconds(first, { t: 2000, scanned: 12_000 }, 10_000)).toBeNull();
+  });
+});
+
+describe("fmtEta", () => {
+  it("renders the compact vocabulary", () => {
+    expect(fmtEta(0.4)).toBe("<1s");
+    expect(fmtEta(42.2)).toBe("~43s");
+    expect(fmtEta(300)).toBe("~5m");
+    expect(fmtEta(7200)).toBe("~2.0h");
   });
 });
 

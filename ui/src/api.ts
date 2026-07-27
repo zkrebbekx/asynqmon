@@ -1384,6 +1384,9 @@ export interface JobCounts {
   acted: number;
   skipped: number;
   failed: number;
+  // How many tasks enumeration has examined (candidates counts only the
+  // matches) — the live scan meter's numerator. Additive backend field.
+  scanned: number;
 }
 
 export interface JobInfo {

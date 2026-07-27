@@ -489,7 +489,7 @@ export default function FleetView() {
               </p>
             </>
           ) : (
-            <div className="text-sm text-[var(--fc-ink3)]">Waiting for fleet data…</div>
+            <div className="text-sm text-[var(--fc-ink3)]">Waiting for overview data…</div>
           )}
         </div>
       </PageShell>
@@ -519,7 +519,7 @@ export default function FleetView() {
 
       {/* Region A — KPI strip, 8 tiles, each a click-through; the four
           state tiles carry 30m sparklines + fitted Δ rates (phase 10) */}
-      <div className="mb-1.5 grid grid-cols-4 gap-2 xl:grid-cols-8">
+      <div className="mb-1.5 grid grid-cols-3 gap-2 xl:grid-cols-9">
         <KpiTile
           label="pending"
           value={fmt(F.pending)}
@@ -555,6 +555,14 @@ export default function FleetView() {
           sub={`${fmt(F.failed_today)} failed today · ${formatErrorRate(F.error_rate)}`}
           spark={fleetSpark("archived")}
           delta={rate("archived", true)}
+        />
+        {/* No sparkline: completed depth is not in the series metric set
+            (§5.8) — the tile shows the live count and today's throughput. */}
+        <KpiTile
+          label="completed"
+          value={fmt(F.completed)}
+          to={`${appPaths.TASKS}?state=completed`}
+          sub={`${fmt(F.processed_today)} processed today`}
         />
         <KpiTile
           label="scheduled"

@@ -31,62 +31,13 @@ import (
 // ****************************************************************************
 
 // jobJSON is the frozen wire shape of a job. Field names are a frontend
-// contract (ui/src/api.ts JobInfo).
-type jobJSON struct {
-	ID    string     `json:"id"`
-	Verb  string     `json:"verb"`
-	Scope jobs.Scope `json:"scope"`
-	Phase string     `json:"phase"`
-	State string     `json:"state"`
-
-	Throttle int    `json:"throttle"`
-	Reason   string `json:"reason"`
-	Actor    string `json:"actor"`
-
-	Counts      jobs.Counts `json:"counts"`
-	CostClass   string      `json:"cost_class"`
-	CostListLen int64       `json:"cost_list_len"`
-
-	PreviewComplete  bool `json:"preview_complete"`
-	ProceedOnPartial bool `json:"proceed_on_partial"`
-
-	CreatedAt  string `json:"created_at"`
-	StartedAt  string `json:"started_at"`
-	FinishedAt string `json:"finished_at"`
-
-	Fence            int64  `json:"fence"`
-	Error            string `json:"error"`
-	FailuresOverflow int64  `json:"failures_overflow"`
-	CtlPending       string `json:"ctl_pending"` // "pause"/"cancel" while a request is unhonored
-}
+// contract (ui/src/api.ts JobInfo). The struct is canonically defined as
+// jobs.WireJob so the /api/jobs bodies and the asynqmon:events:jobs pub/sub
+// payloads (jobs/events.go, fed into the SSE `jobs` event) can never drift.
+type jobJSON = jobs.WireJob
 
 func toJobJSON(j *jobs.Job) jobJSON {
-	scope := j.Scope
-	if scope.Meta == nil {
-		scope.Meta = []string{}
-	}
-	return jobJSON{
-		ID:               j.ID,
-		Verb:             string(j.Verb),
-		Scope:            scope,
-		Phase:            string(j.Phase),
-		State:            string(j.State),
-		Throttle:         j.Throttle,
-		Reason:           j.Reason,
-		Actor:            j.Actor,
-		Counts:           j.Counts,
-		CostClass:        string(j.CostClass),
-		CostListLen:      j.CostListLen,
-		PreviewComplete:  j.PreviewComplete,
-		ProceedOnPartial: j.ProceedOnPartial,
-		CreatedAt:        fmtTime(j.CreatedAt),
-		StartedAt:        fmtTime(j.StartedAt),
-		FinishedAt:       fmtTime(j.FinishedAt),
-		Fence:            j.Fence,
-		Error:            j.Error,
-		FailuresOverflow: j.FailuresOverflow,
-		CtlPending:       j.Ctl,
-	}
+	return jobs.WireOf(j)
 }
 
 // jobThrottles are the accepted tasks/sec settings (§4.3 confirm step). The
@@ -116,7 +67,8 @@ func newCreateJobHandlerFunc(store *jobs.Store) http.HandlerFunc {
 			return
 		}
 		if req.Phase != "" && req.Phase != string(jobs.PhasePreview) {
-			writeErrorMsg(w, http.StatusBadRequest, "jobs are always created in the preview phase (§4.3); execute is a separate, gated request")
+			// Build-contract §4.3; the reference stays out of the user-facing text.
+			writeErrorMsg(w, http.StatusBadRequest, "jobs are always created in the preview phase; execute is a separate, gated request")
 			return
 		}
 		verb := jobs.Verb(req.Verb)

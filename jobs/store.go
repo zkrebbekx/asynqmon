@@ -71,17 +71,21 @@ func leaseKey(id string) string      { return jobKey(id) + ":lease" }
 const candidateSep = "\x1f"
 
 // Store is the shared persistence layer: every replica's HTTP handlers and
-// the claiming runner read and write jobs through it.
+// the claiming runner read and write jobs through it. Every mutation
+// best-effort publishes the affected job's public JSON on EventsChannel
+// (events.go) so SSE brokers on all replicas can fan live progress out.
 type Store struct {
-	rc redis.UniversalClient
+	rc     redis.UniversalClient
+	events *eventPublisher
 }
 
-// NewStore creates a Store. It is stateless and cheap.
+// NewStore creates a Store. It is cheap; the only state is the in-memory
+// event-publish throttle.
 func NewStore(rc redis.UniversalClient) *Store {
 	if rc == nil {
 		panic("jobs.NewStore: redis client is required")
 	}
-	return &Store{rc: rc}
+	return &Store{rc: rc, events: newEventPublisher(rc)}
 }
 
 // NewJobID returns a time-ordered, collision-resistant job id ("jb_<unixms>_<rand>").
@@ -144,6 +148,7 @@ func jobToHash(j *Job) map[string]interface{} {
 		"acted":              strconv.FormatInt(j.Counts.Acted, 10),
 		"skipped":            strconv.FormatInt(j.Counts.Skipped, 10),
 		"failed":             strconv.FormatInt(j.Counts.Failed, 10),
+		"scanned":            strconv.FormatInt(j.Counts.Scanned, 10),
 		"cost_class":         string(j.CostClass),
 		"cost_list_len":      strconv.FormatInt(j.CostListLen, 10),
 		"preview_complete":   fmtBool(j.PreviewComplete),
@@ -193,6 +198,7 @@ func jobFromHash(m map[string]string) (*Job, error) {
 		Acted:      parseInt64(m["acted"]),
 		Skipped:    parseInt64(m["skipped"]),
 		Failed:     parseInt64(m["failed"]),
+		Scanned:    parseInt64(m["scanned"]),
 	}
 	if err := json.Unmarshal([]byte(m["scope"]), &j.Scope); err != nil {
 		return nil, fmt.Errorf("decoding job %s scope: %w", j.ID, err)
@@ -224,8 +230,11 @@ func (s *Store) Create(ctx context.Context, j *Job) error {
 	pipe.ZAdd(ctx, jobsIndexKey, redis.Z{Score: float64(j.CreatedAt.UnixMilli()), Member: j.ID})
 	// Bound the index; artifact keys of evicted jobs age out via their TTL.
 	pipe.ZRemRangeByRank(ctx, jobsIndexKey, 0, int64(-jobsIndexCap-1))
-	_, err := pipe.Exec(ctx)
-	return err
+	if _, err := pipe.Exec(ctx); err != nil {
+		return err
+	}
+	s.publishJob(ctx, j) // a job coming into existence is a state transition
+	return nil
 }
 
 // Get loads one job.
@@ -382,7 +391,18 @@ func (s *Store) RequestExecute(ctx context.Context, id string, proceedOnPartial 
 	if err := s.rc.HSet(ctx, jobKey(id), fields).Err(); err != nil {
 		return nil, err
 	}
-	return s.Get(ctx, id)
+	return s.getAndPublish(ctx, id)
+}
+
+// getAndPublish re-reads a job after a control-plane transition and publishes
+// the fresh state (transitions are never throttled away).
+func (s *Store) getAndPublish(ctx context.Context, id string) (*Job, error) {
+	j, err := s.Get(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	s.publishJob(ctx, j)
+	return j, nil
 }
 
 // RequestCancel asks the claiming runner to stop after the current batch. A
@@ -401,12 +421,12 @@ func (s *Store) RequestCancel(ctx context.Context, id string) (*Job, error) {
 			"state", string(StateCanceled), "finished_at", fmtTime(time.Now())).Err(); err != nil {
 			return nil, err
 		}
-		return s.Get(ctx, id)
+		return s.getAndPublish(ctx, id)
 	}
 	if err := s.rc.HSet(ctx, jobKey(id), "ctl", CtlCancel).Err(); err != nil {
 		return nil, err
 	}
-	return s.Get(ctx, id)
+	return s.getAndPublish(ctx, id)
 }
 
 // RequestPause asks the claiming runner to pause between batches.
@@ -421,7 +441,7 @@ func (s *Store) RequestPause(ctx context.Context, id string) (*Job, error) {
 	if err := s.rc.HSet(ctx, jobKey(id), "ctl", CtlPause).Err(); err != nil {
 		return nil, err
 	}
-	return s.Get(ctx, id)
+	return s.getAndPublish(ctx, id)
 }
 
 // RequestResume clears a pause (requested or already honored).
@@ -446,7 +466,7 @@ func (s *Store) RequestResume(ctx context.Context, id string) (*Job, error) {
 	if err := s.rc.HSet(ctx, jobKey(id), fields).Err(); err != nil {
 		return nil, err
 	}
-	return s.Get(ctx, id)
+	return s.getAndPublish(ctx, id)
 }
 
 // ----------------------------------------------------------------------------
@@ -598,6 +618,11 @@ func (s *Store) WriteProgress(ctx context.Context, id string, token int64, w Pro
 		pipe.Expire(ctx, k, jobTTL)
 	}
 	_, _ = pipe.Exec(ctx)
+	// Live progress event: a write carrying a state change publishes
+	// unconditionally; count/cursor-only batch writes coalesce to at most one
+	// publish per job per second (events.go).
+	_, isTransition := w.Fields["state"]
+	s.publishProgress(ctx, id, isTransition)
 	return true, nil
 }
 
@@ -621,6 +646,11 @@ func (s *Store) CompletePreview(ctx context.Context, id string, token int64) (bo
 		strconv.FormatInt(token, 10)).Int()
 	if err != nil {
 		return false, err
+	}
+	if n == 1 {
+		// preview_complete (usually with the preview_ready park) is a state
+		// transition — publish immediately.
+		s.publishProgress(ctx, id, true)
 	}
 	return n == 1, nil
 }

@@ -145,6 +145,55 @@ export function isTerminalJobState(state: string): boolean {
   return state === "done" || state === "canceled" || state === "failed";
 }
 
+// executeEtaSeconds is the throttle-aware remaining-time estimate for an
+// EXECUTING job: remaining candidates at the job's tasks/sec throttle (the
+// runner paces batches to exactly that rate). null when unknowable — never a
+// guess.
+export function executeEtaSeconds(
+  counts: { candidates: number; acted: number; skipped: number; failed: number },
+  throttle: number
+): number | null {
+  if (throttle <= 0 || counts.candidates <= 0) return null;
+  const remaining =
+    counts.candidates - counts.acted - counts.skipped - counts.failed;
+  if (remaining <= 0) return null;
+  return remaining / throttle;
+}
+
+// ScanSample is one observation of a scan job's enumeration progress.
+export interface ScanSample {
+  t: number; // epoch ms of the observation
+  scanned: number;
+}
+
+// scanEtaSeconds is the observed-rate ETA for a preview enumeration: the
+// linear rate between the first and latest observation, against the
+// console's candidate estimate (the enumeration bound). null when the rate
+// or the bound is unknowable (no estimate, no progress between the samples,
+// or the scan already passed the estimate) — the meter then shows no ETA
+// rather than a fabricated one.
+export function scanEtaSeconds(
+  first: ScanSample,
+  latest: ScanSample,
+  estimate: number
+): number | null {
+  if (estimate <= 0) return null;
+  const dtSec = (latest.t - first.t) / 1000;
+  const scannedDelta = latest.scanned - first.scanned;
+  if (dtSec <= 0 || scannedDelta <= 0) return null;
+  const remaining = estimate - latest.scanned;
+  if (remaining <= 0) return null;
+  return remaining / (scannedDelta / dtSec);
+}
+
+// fmtEta renders an ETA in the meter's compact vocabulary.
+export function fmtEta(seconds: number): string {
+  if (seconds < 1) return "<1s";
+  if (seconds < 90) return `~${Math.ceil(seconds)}s`;
+  if (seconds < 3600) return `~${Math.ceil(seconds / 60)}m`;
+  return `~${(seconds / 3600).toFixed(1)}h`;
+}
+
 // verifyVerdict is the plain-language §3.9 verify-panel sentence: the scope
 // re-counted live against what the job reported.
 export function verifyVerdict(

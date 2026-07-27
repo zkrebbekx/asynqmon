@@ -868,7 +868,7 @@ export default function TaskDrawer({ peek, resultList, onClose, onPeek, onPivot 
                   {canClone && (
                     <DrawerButton
                       onClick={() => setCloneOpen(true)}
-                      title="Create a new task from this one (§5.10 enqueue)"
+                      title="Create a new task from this one"
                     >
                       <CopyPlus size={12} /> Clone &amp; edit…
                     </DrawerButton>
