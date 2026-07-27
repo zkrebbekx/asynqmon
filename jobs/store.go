@@ -136,36 +136,37 @@ func jobToHash(j *Job) map[string]interface{} {
 	queuesJSON, _ := json.Marshal(j.cursorQueues)
 	groupsJSON, _ := json.Marshal(j.cursorGroups)
 	return map[string]interface{}{
-		"id":                 j.ID,
-		"verb":               string(j.Verb),
-		"scope":              string(scopeJSON),
-		"phase":              string(j.Phase),
-		"state":              string(j.State),
-		"throttle":           strconv.Itoa(j.Throttle),
-		"reason":             j.Reason,
-		"actor":              j.Actor,
-		"candidates":         strconv.FormatInt(j.Counts.Candidates, 10),
-		"acted":              strconv.FormatInt(j.Counts.Acted, 10),
-		"skipped":            strconv.FormatInt(j.Counts.Skipped, 10),
-		"failed":             strconv.FormatInt(j.Counts.Failed, 10),
-		"scanned":            strconv.FormatInt(j.Counts.Scanned, 10),
-		"cost_class":         string(j.CostClass),
-		"cost_list_len":      strconv.FormatInt(j.CostListLen, 10),
-		"preview_complete":   fmtBool(j.PreviewComplete),
-		"proceed_on_partial": fmtBool(j.ProceedOnPartial),
-		"created_at":         fmtTime(j.CreatedAt),
-		"started_at":         fmtTime(j.StartedAt),
-		"finished_at":        fmtTime(j.FinishedAt),
-		"fence":              strconv.FormatInt(j.Fence, 10),
-		"error":              j.Error,
-		"failures_overflow":  strconv.FormatInt(j.FailuresOverflow, 10),
-		"ctl":                j.Ctl,
-		"cursor_queues":      string(queuesJSON),
-		"cursor_groups":      string(groupsJSON),
-		"cursor_qidx":        strconv.Itoa(j.cursorQIdx),
-		"cursor_gidx":        strconv.Itoa(j.cursorGIdx),
-		"cursor_page":        strconv.Itoa(j.cursorPage),
-		"act_cursor":         strconv.FormatInt(j.actCursor, 10),
+		"id":                   j.ID,
+		"verb":                 string(j.Verb),
+		"scope":                string(scopeJSON),
+		"phase":                string(j.Phase),
+		"state":                string(j.State),
+		"throttle":             strconv.Itoa(j.Throttle),
+		"reason":               j.Reason,
+		"actor":                j.Actor,
+		"candidates":           strconv.FormatInt(j.Counts.Candidates, 10),
+		"acted":                strconv.FormatInt(j.Counts.Acted, 10),
+		"skipped":              strconv.FormatInt(j.Counts.Skipped, 10),
+		"failed":               strconv.FormatInt(j.Counts.Failed, 10),
+		"scanned":              strconv.FormatInt(j.Counts.Scanned, 10),
+		"cost_class":           string(j.CostClass),
+		"cost_list_len":        strconv.FormatInt(j.CostListLen, 10),
+		"preview_complete":     fmtBool(j.PreviewComplete),
+		"preview_completed_at": fmtTime(j.PreviewCompletedAt),
+		"proceed_on_partial":   fmtBool(j.ProceedOnPartial),
+		"created_at":           fmtTime(j.CreatedAt),
+		"started_at":           fmtTime(j.StartedAt),
+		"finished_at":          fmtTime(j.FinishedAt),
+		"fence":                strconv.FormatInt(j.Fence, 10),
+		"error":                j.Error,
+		"failures_overflow":    strconv.FormatInt(j.FailuresOverflow, 10),
+		"ctl":                  j.Ctl,
+		"cursor_queues":        string(queuesJSON),
+		"cursor_groups":        string(groupsJSON),
+		"cursor_qidx":          strconv.Itoa(j.cursorQIdx),
+		"cursor_gidx":          strconv.Itoa(j.cursorGIdx),
+		"cursor_page":          strconv.Itoa(j.cursorPage),
+		"act_cursor":           strconv.FormatInt(j.actCursor, 10),
 	}
 }
 
@@ -174,23 +175,24 @@ func jobFromHash(m map[string]string) (*Job, error) {
 		return nil, ErrNotFound
 	}
 	j := &Job{
-		ID:               m["id"],
-		Verb:             Verb(m["verb"]),
-		Phase:            Phase(m["phase"]),
-		State:            State(m["state"]),
-		Reason:           m["reason"],
-		Actor:            m["actor"],
-		CostClass:        CostClass(m["cost_class"]),
-		CostListLen:      parseInt64(m["cost_list_len"]),
-		PreviewComplete:  m["preview_complete"] == "1",
-		ProceedOnPartial: m["proceed_on_partial"] == "1",
-		CreatedAt:        parseTimeMs(m["created_at"]),
-		StartedAt:        parseTimeMs(m["started_at"]),
-		FinishedAt:       parseTimeMs(m["finished_at"]),
-		Fence:            parseInt64(m["fence"]),
-		Error:            m["error"],
-		FailuresOverflow: parseInt64(m["failures_overflow"]),
-		Ctl:              m["ctl"],
+		ID:                 m["id"],
+		Verb:               Verb(m["verb"]),
+		Phase:              Phase(m["phase"]),
+		State:              State(m["state"]),
+		Reason:             m["reason"],
+		Actor:              m["actor"],
+		CostClass:          CostClass(m["cost_class"]),
+		CostListLen:        parseInt64(m["cost_list_len"]),
+		PreviewComplete:    m["preview_complete"] == "1",
+		PreviewCompletedAt: parseTimeMs(m["preview_completed_at"]),
+		ProceedOnPartial:   m["proceed_on_partial"] == "1",
+		CreatedAt:          parseTimeMs(m["created_at"]),
+		StartedAt:          parseTimeMs(m["started_at"]),
+		FinishedAt:         parseTimeMs(m["finished_at"]),
+		Fence:              parseInt64(m["fence"]),
+		Error:              m["error"],
+		FailuresOverflow:   parseInt64(m["failures_overflow"]),
+		Ctl:                m["ctl"],
 	}
 	j.Throttle, _ = strconv.Atoi(m["throttle"])
 	j.Counts = Counts{
@@ -532,10 +534,11 @@ func (s *Store) ReleaseClaim(ctx context.Context, id, instanceID string) error {
 //
 // KEYS: 1=job hash  2=candidates list  3=sample list  4=failures list
 // ARGV: 1=token
-//       2=nfields, then nfields × (field, value)
-//       next=ncand, then ncand candidate refs
-//       next=nsample, then nsample sample rows
-//       next=nfail, then nfail failure rows
+//
+//	2=nfields, then nfields × (field, value)
+//	next=ncand, then ncand candidate refs
+//	next=nsample, then nsample sample rows
+//	next=nfail, then nfail failure rows
 var progressScript = redis.NewScript(`
 if redis.call("HGET", KEYS[1], "fence") ~= ARGV[1] then
 	return 0
@@ -626,15 +629,17 @@ func (s *Store) WriteProgress(ctx context.Context, id string, token int64, w Pro
 	return true, nil
 }
 
-// completePreviewScript flips preview_complete and — only if the job is
-// still in the preview phase — parks it in preview_ready. Doing the phase
-// check inside the script closes the race where an execute request lands
-// between the runner's read and this write (the job must stay "running").
+// completePreviewScript flips preview_complete (stamping when — the results
+// banner's honest "as of" time; finished_at only marks terminal transitions)
+// and — only if the job is still in the preview phase — parks it in
+// preview_ready. Doing the phase check inside the script closes the race
+// where an execute request lands between the runner's read and this write
+// (the job must stay "running").
 var completePreviewScript = redis.NewScript(`
 if redis.call("HGET", KEYS[1], "fence") ~= ARGV[1] then
 	return 0
 end
-redis.call("HSET", KEYS[1], "preview_complete", "1")
+redis.call("HSET", KEYS[1], "preview_complete", "1", "preview_completed_at", ARGV[2])
 if redis.call("HGET", KEYS[1], "phase") == "preview" then
 	redis.call("HSET", KEYS[1], "state", "preview_ready")
 end
@@ -643,7 +648,7 @@ return 1`)
 // CompletePreview marks enumeration finished (fence-guarded).
 func (s *Store) CompletePreview(ctx context.Context, id string, token int64) (bool, error) {
 	n, err := completePreviewScript.Run(ctx, s.rc, []string{jobKey(id)},
-		strconv.FormatInt(token, 10)).Int()
+		strconv.FormatInt(token, 10), fmtTime(time.Now())).Int()
 	if err != nil {
 		return false, err
 	}
@@ -661,13 +666,13 @@ func (s *Store) CompletePreview(ctx context.Context, id string, token int64) (bo
 
 // AuditEntry is one row of the capped asynqmon:audit stream.
 type AuditEntry struct {
-	ID           string `json:"id"` // stream entry id (also the timestamp)
-	Event        string `json:"event"`
-	Actor        string `json:"actor"`
-	Verb         string `json:"verb"`
-	Scope        Scope  `json:"scope"`
-	Reason       string `json:"reason"`
-	JobID        string `json:"job_id"`
+	ID     string `json:"id"` // stream entry id (also the timestamp)
+	Event  string `json:"event"`
+	Actor  string `json:"actor"`
+	Verb   string `json:"verb"`
+	Scope  Scope  `json:"scope"`
+	Reason string `json:"reason"`
+	JobID  string `json:"job_id"`
 	// TaskID is the subject task for single-task events (§5.10 enqueue);
 	// empty on job-level entries.
 	TaskID       string `json:"task_id"`
@@ -681,7 +686,7 @@ type AuditEntry struct {
 // Audit events.
 const (
 	AuditJobCreated   = "job_created"
-	AuditJobFinished  = "job_finished" // done, failed, or canceled — final counts attached
+	AuditJobFinished  = "job_finished"  // done, failed, or canceled — final counts attached
 	AuditTaskEnqueued = "task_enqueued" // §5.10 single-task enqueue; TaskID set, Acted = 1
 
 	// Hygiene events (§3.10). Verb carries the report kind. Run triggers are

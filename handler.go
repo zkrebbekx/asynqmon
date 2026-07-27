@@ -606,6 +606,10 @@ func muxRouter(opts Options, rc redis.UniversalClient, inspector *asynq.Inspecto
 	api.HandleFunc("/jobs", newCreateJobHandlerFunc(jobsStore)).Methods("POST")
 	api.HandleFunc("/jobs", newListJobsHandlerFunc(jobsStore)).Methods("GET")
 	api.HandleFunc("/jobs/{job_id}", newGetJobHandlerFunc(jobsStore)).Methods("GET")
+	// The job's own enumerated result set, paged + hydrated (the console's
+	// source of truth once a scan-to-completion job finishes — never a
+	// fresh budgeted re-scan that would drop matches beyond one budget).
+	api.HandleFunc("/jobs/{job_id}/results", newJobResultsHandlerFunc(jobsStore, inspector, payloadFmt)).Methods("GET")
 	api.HandleFunc("/jobs/{job_id}/execute", newExecuteJobHandlerFunc(jobsStore)).Methods("POST")
 	api.HandleFunc("/jobs/{job_id}/cancel", newCancelJobHandlerFunc(jobsStore)).Methods("POST")
 	api.HandleFunc("/jobs/{job_id}/pause", newPauseJobHandlerFunc(jobsStore)).Methods("POST")

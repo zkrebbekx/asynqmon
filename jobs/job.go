@@ -404,6 +404,12 @@ type Job struct {
 	PreviewComplete  bool `json:"preview_complete"`
 	ProceedOnPartial bool `json:"proceed_on_partial"`
 
+	// PreviewCompletedAt is when enumeration finished (the preview_complete
+	// flip). Zero until then. Additive field: the job-results banner's honest
+	// "as of" stamp — FinishedAt only marks terminal transitions, and a
+	// scan-to-completion preview parks in preview_ready, which is not one.
+	PreviewCompletedAt time.Time `json:"preview_completed_at"`
+
 	CreatedAt  time.Time `json:"created_at"`
 	StartedAt  time.Time `json:"started_at"`  // execute start
 	FinishedAt time.Time `json:"finished_at"` // terminal transition
