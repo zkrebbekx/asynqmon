@@ -14,7 +14,7 @@
 //     cap labeled.
 
 import React, { useCallback, useEffect, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 import { ChevronDown, ChevronRight, Loader2, Play } from "lucide-react";
 import { useSelector } from "react-redux";
 import { toast } from "sonner";
@@ -44,6 +44,8 @@ import {
 import { paths, taskDetailsPath } from "../paths";
 import { serializePeek } from "../lib/urlstate";
 import { timeAgo, durationBefore, uuidPrefix, toErrorString } from "../utils";
+import { humanizeMs } from "../lib/fleet";
+import { listHygiene, HygieneCard } from "../api-hygiene";
 import { FcChip, MicroLabel } from "../components/FleetBits";
 import PageShell, { panelClass, theadClass } from "../components/PageShell";
 import SyntaxHighlighter from "../components/SyntaxHighlighter";
@@ -467,6 +469,86 @@ export default function SchedulersView() {
           </table>
         )}
       </div>
+
+      <ConsoleSchedulesPanel />
     </PageShell>
+  );
+}
+
+/**************************************************************
+   Console schedules — the console's own scheduled work
+ **************************************************************/
+
+// The Schedulers screen is where operators look for anything scheduled, so
+// the console's own scheduled work (the hygiene reports) is listed here too —
+// read-only rows linking to the Hygiene screen, which owns the editors.
+function ConsoleSchedulesPanel() {
+  const pollInterval = useSelector((s: AppState) => s.settings.pollInterval);
+  const [cards, setCards] = useState<HygieneCard[] | null>(null);
+
+  const fetchCards = useCallback(() => {
+    listHygiene()
+      .then((r) => setCards(r.reports ?? []))
+      // Non-fatal: the panel simply stays hidden if hygiene is unreachable.
+      .catch(() => setCards(null));
+  }, []);
+  usePolling(fetchCards, pollInterval);
+
+  if (cards === null || cards.length === 0) return null;
+
+  const nextDue = (c: HygieneCard): string => {
+    if (!c.enabled) return "—";
+    if (c.last_generated_at === "") return "on next scheduler tick";
+    const dueMs =
+      Date.parse(c.last_generated_at) + c.interval_seconds * 1000;
+    return dueMs <= Date.now() ? "due now" : durationBefore(new Date(dueMs).toISOString());
+  };
+
+  return (
+    <div className={cn(panelClass, "mt-3 overflow-x-auto")}>
+      <div className="flex flex-wrap items-center gap-2 border-b border-[var(--fc-line2)] px-3 py-2">
+        <span className="text-xs font-semibold text-[var(--fc-ink)]">Console schedules</span>
+        <span className="text-[10.5px] text-[var(--fc-ink3)]">
+          the console's own scheduled work — hygiene reports, run under a lease
+        </span>
+        <span className="flex-1" />
+        <Link
+          to={paths().HYGIENE}
+          className="text-xs text-[var(--fc-acc)] hover:underline"
+        >
+          Manage on Hygiene →
+        </Link>
+      </div>
+      <table className="w-full border-collapse text-left">
+        <thead>
+          <tr>
+            <th className={theadClass}>Report</th>
+            <th className={theadClass}>Schedule</th>
+            <th className={theadClass}>Last run</th>
+            <th className={theadClass}>Next due</th>
+          </tr>
+        </thead>
+        <tbody>
+          {cards.map((c) => (
+            <tr key={c.kind} className="border-b border-[var(--fc-line2)] last:border-b-0">
+              <td className="px-3 py-2 text-xs font-medium text-[var(--fc-ink)]">{c.title}</td>
+              <td className="px-3 py-2 text-xs text-[var(--fc-ink3)]">
+                {c.enabled ? (
+                  <span className="font-mono">every {humanizeMs(c.interval_seconds * 1000)}</span>
+                ) : (
+                  <FcChip tone="mut">disabled</FcChip>
+                )}
+              </td>
+              <td className="px-3 py-2 font-mono text-xs tabular-nums text-[var(--fc-ink3)]">
+                {c.last_generated_at === "" ? "never" : timeAgo(c.last_generated_at)}
+              </td>
+              <td className="px-3 py-2 font-mono text-xs tabular-nums text-[var(--fc-ink3)]">
+                {nextDue(c)}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
   );
 }
