@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useState, useCallback, useRef } from "react";
 import { useSelector } from "react-redux";
-import { Link, useSearchParams } from "react-router-dom";
-import { Search, Play, Trash2, Archive, X, ChevronLeft, ChevronRight, Tag, AlertCircle, BookmarkPlus } from "lucide-react";
+import { useSearchParams } from "react-router-dom";
+import { toast } from "sonner";
+import { Search, Play, Trash2, Archive, X, ChevronLeft, ChevronRight, Tag, Clock, AlertCircle, BookmarkPlus } from "lucide-react";
 import { AppState, useAppDispatch } from "../store";
 import { listQueuesAsync } from "../actions/queuesActions";
 import * as api from "../api";
@@ -17,22 +18,27 @@ import {
   serializeConsoleState,
   parsePeek,
   serializePeek,
+  parseScanJob,
+  withScanJob,
   PeekTarget,
 } from "../lib/urlstate";
 import {
   addMetaClause,
   removeMetaClause,
+  removeClause,
   setClause,
   isAqlQuery,
   isAqlRejection,
   caretLine,
   AqlRejection,
 } from "../lib/aql";
-import { paths } from "../paths";
+import { TIME_CHIPS, TimeChip, applyTimeChip, isTimeChipActive, timeChipClause } from "../lib/timechips";
 import { cn, clickableRowClass, clickableRowProps } from "../lib/utils";
 import { usePolling } from "../hooks";
 import { useKeymap } from "../hooks/useKeymap";
 import { useFrozenData } from "../hooks/useFrozenData";
+import { useJobProgress } from "../hooks/useJobProgress";
+import { isTerminalJobState } from "../lib/bulkjob";
 import { STATE_BULK_VERBS } from "../lib/palette";
 import PageShell from "../components/PageShell";
 import { Button } from "../components/ui/button";
@@ -42,6 +48,7 @@ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "../com
 import SyntaxHighlighter from "../components/SyntaxHighlighter";
 import ConfirmDialog from "../components/ConfirmDialog";
 import BulkJobModal from "../components/BulkJobModal";
+import ScanJobMeter from "../components/ScanJobMeter";
 import TaskDrawer, { PivotRequest } from "../components/TaskDrawer";
 import SaveViewModal from "../components/SaveViewModal";
 import UpdatesPausedPill from "../components/UpdatesPausedPill";
@@ -225,8 +232,16 @@ export default function TasksGlobalView() {
   // null = not continued yet (follow the base response's cursor); "" = done.
   const [contCursor, setContCursor] = useState<string | null>(null);
   const [continuing, setContinuing] = useState(false);
-  // Scan-to-completion preview job handoff.
-  const [scanJobId, setScanJobId] = useState<string | null>(null);
+  // Scan-to-completion preview job: tracked LIVE on this page (the meter
+  // swaps to a job tracker — no /ops navigation). The id lives in the
+  // `scanjob` URL param so a reload re-attaches to the running job.
+  const scanJobId = useMemo(() => parseScanJob(searchParams), [searchParams]);
+  const setScanJobParam = useCallback(
+    (id: string | null) => {
+      setSearchParams((prev) => withScanJob(prev, id), { replace: true });
+    },
+    [setSearchParams]
+  );
 
   // After a drawer pivot, close the drawer if the peeked task fell out of
   // the visible results (kept open when it survived the new filter).
@@ -346,7 +361,10 @@ export default function TasksGlobalView() {
   }, [fetchAnalytics]);
 
   // Drop the now-mismatched rows and all pagination/continuation state when
-  // the filter changes so stale windows don't linger.
+  // the filter changes so stale windows don't linger. The scanjob param is
+  // dropped too (it belonged to the old query) — but NOT on mount: on a
+  // reload the whole point of the param is surviving into this first render.
+  const filterMounted = useRef(false);
   useEffect(() => {
     setTasks([]);
     setLoading(true);
@@ -355,7 +373,8 @@ export default function TasksGlobalView() {
     setExtraScanned(0);
     setExtraMatches(0);
     setContCursor(null);
-    setScanJobId(null);
+    if (filterMounted.current) setScanJobParam(null);
+    filterMounted.current = true;
     setFocusIdx(-1);
     setSelected(new Set());
     selectAnchor.current = -1;
@@ -390,6 +409,15 @@ export default function TasksGlobalView() {
     updateView({ q: addMetaClause(view.q, p.key, p.value), page: 0 });
   const removeFilter = (p: MetaPair) =>
     updateView({ q: removeMetaClause(view.q, p.key, p.value), page: 0 });
+  // Time quick-picks compose their clause into the text (replace-same-field
+  // or append); clicking an exact-match active chip removes the clause, the
+  // same toggle contract as the facet chips. agoMs chips (failed_after)
+  // stamp the absolute RFC3339 window from NOW at click time.
+  const toggleTimeChip = (chip: TimeChip, active: boolean) =>
+    updateView({
+      q: active ? removeClause(view.q, chip.field) : applyTimeChip(view.q, chip, new Date()),
+      page: 0,
+    });
 
   const acts = actionFns[view.state];
   const runAction = async (fn: ActionFn, queue: string, id: string) => {
@@ -444,9 +472,11 @@ export default function TasksGlobalView() {
   };
 
   // Scan-to-completion as a preview job: the job runner enumerates the whole
-  // scope server-side and reports the exact final count on /ops (§3.4 —
-  // exactness moves into the job, not the preview). Least-destructive verb;
-  // it is never executed from here.
+  // scope server-side and reports the exact final count (§3.4 — exactness
+  // moves into the job, not the preview). Least-destructive verb; it is
+  // never executed from here. The console STAYS here: the meter swaps to a
+  // live tracker fed by the `jobs` SSE events (poll fallback inside the
+  // hook), and the job id rides the `scanjob` URL param.
   const scanAsJob = async () => {
     try {
       const j = await api.createJob({
@@ -459,11 +489,58 @@ export default function TasksGlobalView() {
         },
         reason: "Scan-to-completion count for console query (preview only)",
       });
-      setScanJobId(j.id);
+      setScanJobParam(j.id);
     } catch (e) {
       setError(toErrorString(e));
     }
   };
+
+  // Live scan-job tracker. Settlement = enumeration finished (the
+  // preview_ready park) or a terminal state. On a completion observed live:
+  // announce the exact count and re-run the current query ONCE — fresh
+  // results now that the full scan bound is known — with the continuation
+  // state reset so the page/cursor semantics start clean.
+  const scanSettled = useCallback(
+    (j: api.JobInfo) => j.preview_complete || isTerminalJobState(j.state),
+    []
+  );
+  const onScanSettled = useCallback(
+    (j: api.JobInfo) => {
+      if (j.preview_complete && !isTerminalJobState(j.state)) {
+        toast.success(
+          `Scan complete — ${j.counts.candidates.toLocaleString()} matches (exact)`,
+          { description: "Results below were re-run against the fully scanned scope." }
+        );
+        setExtraTasks([]);
+        setExtraScanned(0);
+        setExtraMatches(0);
+        setContCursor(null);
+        if (view.page !== 0) {
+          updateView({ page: 0 }, { replace: true }); // refetches via the poll key
+        } else {
+          fetchTasks();
+        }
+      } else if (j.state === "failed") {
+        toast.error(`Scan job failed${j.error ? ` — ${j.error}` : ""}`);
+      }
+    },
+    [view.page, updateView, fetchTasks]
+  );
+  const { job: scanJob, source: scanJobSource } = useJobProgress(scanJobId, {
+    settled: scanSettled,
+    onSettled: onScanSettled,
+  });
+  const cancelScanJob = useCallback(() => {
+    if (scanJobId) api.cancelJob(scanJobId).catch((e) => setError(toErrorString(e)));
+  }, [scanJobId]);
+  const dismissScanJob = useCallback(() => {
+    // Best-effort cleanup of a job that never settled (same courtesy the
+    // bulk modal extends to orphan previews), then drop the param.
+    if (scanJobId && scanJob && !scanSettled(scanJob)) {
+      api.cancelJob(scanJobId).catch(() => {});
+    }
+    setScanJobParam(null);
+  }, [scanJobId, scanJob, scanSettled, setScanJobParam]);
 
   // Which bulk actions are valid for the current state.
   const bulkActions = bulkCaps[view.state].map((action) => ({
@@ -646,7 +723,7 @@ export default function TasksGlobalView() {
         <input
           ref={inputRef}
           data-fc-querybar
-          placeholder='AQL — e.g. queue=email state=retry error~"gateway timeout"  ·  free text still works'
+          placeholder='Search — free text or AQL, e.g. queue=email state=retry error~"gateway timeout"'
           value={searchInput}
           onChange={(e) => {
             setSearchInput(e.target.value);
@@ -744,40 +821,83 @@ export default function TasksGlobalView() {
         )}
       </div>
 
-      {/* Scan meter (§5.9): visible whenever scan coverage is partial */}
-      {meta.mode === "scan" && (scanPartial || extraScanned > 0) && (
-        <div className="flex flex-wrap items-center gap-3 rounded-lg border border-[var(--fc-line)] bg-[var(--fc-panel)] px-4 py-2 text-xs">
-          <span className="text-[var(--fc-ink3)]">scan</span>
-          <div className="h-1.5 w-40 overflow-hidden rounded-full bg-[var(--fc-raise)]">
-            <div
-              className="h-full bg-[var(--fc-acc)]"
-              style={{
-                width: `${meta.candidateEstimate > 0 ? Math.min(100, (scannedTotal / meta.candidateEstimate) * 100) : 100}%`,
-              }}
-            />
-          </div>
-          <span className="font-mono tabular-nums">
-            scanned {scannedTotal.toLocaleString()} of ~{meta.candidateEstimate.toLocaleString()} candidates
-            {scanPartial ? " · results partial" : " · scan complete"}
-          </span>
-          <div className="ml-auto flex items-center gap-2">
-            {scanPartial && (
-              <Button size="sm" variant="outline" className="h-6 text-xs" disabled={continuing} onClick={continueScan}>
-                {continuing ? "Scanning…" : "Continue"}
-              </Button>
-            )}
-            {scanPartial && !scanJobId && (
-              <Button size="sm" variant="outline" className="h-6 text-xs" onClick={scanAsJob}>
-                Scan-to-completion as job
-              </Button>
-            )}
-            {scanJobId && (
-              <Link to={paths().OPS} className="text-[var(--fc-acc)] hover:underline">
-                Preview job {scanJobId.slice(0, 8)}… → Operations
-              </Link>
-            )}
-          </div>
+      {/* Time quick-picks — the CURRENT state's matrix-legal time predicates
+          (lib/timechips). Clicking COMPOSES the clause into the query text
+          (single source of truth, same rule as the facet chips): replace an
+          existing clause of the same field, else append. Hidden for states
+          with no time predicates (aggregating). */}
+      {TIME_CHIPS[view.state].length > 0 && (
+        <div className="flex flex-wrap items-center gap-1.5">
+          <Clock size={13} className="text-[var(--fc-ink3)]" />
+          {TIME_CHIPS[view.state].map((chip) => {
+            const active = isTimeChipActive(view.q, chip);
+            return (
+              <button
+                key={`${view.state}:${chip.label}`}
+                onClick={() => toggleTimeChip(chip, active)}
+                className={cn(
+                  "inline-flex items-center gap-1 rounded px-2 py-0.5 text-xs transition-colors",
+                  active
+                    ? "font-semibold bg-[var(--fc-acc-bg)] text-[var(--fc-acc)]"
+                    : "border border-[var(--fc-line)] text-[var(--fc-ink2)] hover:border-[var(--fc-acc)] hover:text-[var(--fc-ink)]"
+                )}
+                title={
+                  active
+                    ? `Remove ${chip.field} from the query`
+                    : chip.agoMs !== undefined
+                      ? `Add ${chip.field}=<now − ${chip.label.replace(/^.*last /, "")}> to the query (absolute timestamp, stamped now)`
+                      : `Add ${timeChipClause(chip, new Date(0))} to the query`
+                }
+              >
+                {chip.label}
+                {active && <X size={11} />}
+              </button>
+            );
+          })}
         </div>
+      )}
+
+      {/* Scan meter (§5.9): visible whenever scan coverage is partial. Once a
+          scan-to-completion job is running (scanjob URL param), the meter
+          swaps to the LIVE job tracker — the console keeps the thread. */}
+      {scanJobId ? (
+        <ScanJobMeter
+          job={scanJob}
+          live={scanJobSource === "sse"}
+          candidateEstimate={meta.candidateEstimate}
+          onCancel={cancelScanJob}
+          onDismiss={dismissScanJob}
+        />
+      ) : (
+        meta.mode === "scan" && (scanPartial || extraScanned > 0) && (
+          <div className="flex flex-wrap items-center gap-3 rounded-lg border border-[var(--fc-line)] bg-[var(--fc-panel)] px-4 py-2 text-xs">
+            <span className="text-[var(--fc-ink3)]">scan</span>
+            <div className="h-1.5 w-40 overflow-hidden rounded-full bg-[var(--fc-raise)]">
+              <div
+                className="h-full bg-[var(--fc-acc)]"
+                style={{
+                  width: `${meta.candidateEstimate > 0 ? Math.min(100, (scannedTotal / meta.candidateEstimate) * 100) : 100}%`,
+                }}
+              />
+            </div>
+            <span className="font-mono tabular-nums">
+              scanned {scannedTotal.toLocaleString()} of ~{meta.candidateEstimate.toLocaleString()} candidates
+              {scanPartial ? " · results partial" : " · scan complete"}
+            </span>
+            <div className="ml-auto flex items-center gap-2">
+              {scanPartial && (
+                <Button size="sm" variant="outline" className="h-6 text-xs" disabled={continuing} onClick={continueScan}>
+                  {continuing ? "Scanning…" : "Continue"}
+                </Button>
+              )}
+              {scanPartial && (
+                <Button size="sm" variant="outline" className="h-6 text-xs" onClick={scanAsJob}>
+                  Scan-to-completion as job
+                </Button>
+              )}
+            </div>
+          </div>
+        )
       )}
 
       {/* Metadata facet chips — clicking COMPOSES a meta.key=value clause
@@ -892,7 +1012,8 @@ export default function TasksGlobalView() {
           }}
           onClose={() => setBulkVerb(null)}
           onStarted={() => {
-            setBulkVerb(null);
+            // The modal STAYS OPEN showing live execute progress (its jobs-
+            // SSE feed); it unmounts when the user closes it (onClose).
             applyNextChange(); // mutations invalidate immediately (§4.4)
             fetchTasks();
             fetchFacets();
