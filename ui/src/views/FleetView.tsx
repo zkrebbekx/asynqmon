@@ -489,7 +489,7 @@ export default function FleetView() {
               </p>
             </>
           ) : (
-            <div className="text-sm text-[var(--fc-ink3)]">Waiting for fleet data…</div>
+            <div className="text-sm text-[var(--fc-ink3)]">Waiting for overview data…</div>
           )}
         </div>
       </PageShell>

@@ -116,7 +116,8 @@ func newCreateJobHandlerFunc(store *jobs.Store) http.HandlerFunc {
 			return
 		}
 		if req.Phase != "" && req.Phase != string(jobs.PhasePreview) {
-			writeErrorMsg(w, http.StatusBadRequest, "jobs are always created in the preview phase (§4.3); execute is a separate, gated request")
+			// Build-contract §4.3; the reference stays out of the user-facing text.
+			writeErrorMsg(w, http.StatusBadRequest, "jobs are always created in the preview phase; execute is a separate, gated request")
 			return
 		}
 		verb := jobs.Verb(req.Verb)

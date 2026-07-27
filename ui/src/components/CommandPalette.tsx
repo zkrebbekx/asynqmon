@@ -265,7 +265,7 @@ export default function CommandPalette({ open, onClose }: Props) {
 
     // Go to — every nav item.
     const nav: Array<[string, string]> = [
-      ["Fleet", p.HOME],
+      ["Overview", p.HOME],
       ["Queues", p.QUEUES],
       ["Tasks", p.TASKS],
       ["Errors", p.ERRORS],
