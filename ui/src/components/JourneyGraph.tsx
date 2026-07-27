@@ -210,8 +210,12 @@ export default function JourneyGraph({ task }: { task: TaskInfo }) {
                 {s}
               </text>
               {isCurrent && (
+                // Terminal states (completed/archived) get a static dot — a
+                // pulse reads as "still running", which a finished task is not.
                 <circle
-                  className="fc-pulse"
+                  className={
+                    s === "completed" || s === "archived" ? undefined : "fc-pulse"
+                  }
                   cx={n.x + n.w - 11}
                   cy={n.y + 16}
                   r={4}
