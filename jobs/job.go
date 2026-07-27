@@ -376,6 +376,10 @@ type Counts struct {
 	Acted      int64 `json:"acted"`
 	Skipped    int64 `json:"skipped"`
 	Failed     int64 `json:"failed"`
+	// Scanned is how many tasks enumeration has examined so far (additive
+	// field; candidates counts only the matches). It is the live scan
+	// meter's numerator against the console's candidate estimate.
+	Scanned int64 `json:"scanned"`
 }
 
 // Job is one bulk operation. Persisted as the asynqmon:jobs:<id> hash;

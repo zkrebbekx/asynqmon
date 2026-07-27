@@ -200,7 +200,7 @@ func eventuallyTrue(timeout time.Duration, cond func() bool) bool {
 
 func TestFleetEventsHandler(t *testing.T) {
 	engine := newStatsTestEngine(t)
-	broker := newFleetEventsBroker(engine)
+	broker := newFleetEventsBroker(engine, nil, nil)
 	broker.heartbeatEvery = 40 * time.Millisecond // testable heartbeat cadence
 	broker.start(context.Background())
 	t.Cleanup(broker.stop)
@@ -295,7 +295,7 @@ func TestFleetEventsHandler(t *testing.T) {
 
 func TestFleetEventsHandlerUnavailable(t *testing.T) {
 	engine := newStatsTestEngine(t)
-	broker := newFleetEventsBroker(engine)
+	broker := newFleetEventsBroker(engine, nil, nil)
 	broker.start(context.Background())
 	t.Cleanup(broker.stop)
 

@@ -245,7 +245,6 @@ func New(opts Options) *HTTPHandler {
 	// from the shared cache, so starting it unconditionally is safe in
 	// multi-replica deployments (§5.13).
 	var statsEngine *stats.Engine
-	var eventsBroker *fleetEventsBroker
 	if !opts.StatsDisabled {
 		statsEngine = stats.NewEngine(stats.Config{
 			RedisClient:         rc,
@@ -257,17 +256,21 @@ func New(opts Options) *HTTPHandler {
 			GroupStallAfter:     opts.AttentionGroupStallAfter,
 		})
 		statsEngine.Start(context.Background())
-		// One broker per process fans the SSE payloads out to all
-		// /api/fleet/events subscribers (§4.4) — subscribers never multiply
-		// sweeps or cache reads.
-		eventsBroker = newFleetEventsBroker(statsEngine)
-		eventsBroker.start(context.Background())
-		// Stop broker then engine before the redis clients they use close.
 		closers = append([]func() error{
-			func() error { eventsBroker.stop(); return nil },
 			func() error { statsEngine.Stop(); return nil },
 		}, closers...)
 	}
+	// One broker per process fans the SSE payloads out to all
+	// /api/fleet/events subscribers (§4.4) — subscribers never multiply
+	// sweeps or cache reads. It also relays the shared jobs event channel
+	// (asynqmon:events:jobs) as `jobs` events, so it runs even when the
+	// stats engine is disabled (the stream then carries jobs + heartbeats
+	// only). Stopped (prepended) before the redis client it uses closes.
+	eventsBroker := newFleetEventsBroker(statsEngine, rc, jobs.NewStore(rc))
+	eventsBroker.start(context.Background())
+	closers = append([]func() error{
+		func() error { eventsBroker.stop(); return nil },
+	}, closers...)
 
 	// ------------------------------------------------------------------
 	// Fleet Console phase 5 — bulk-job runner lifecycle (§5.4, §5.13).

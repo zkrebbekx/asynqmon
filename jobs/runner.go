@@ -590,6 +590,7 @@ func (r *Runner) enumerate(ctx context.Context, j *Job, token int64, cs *claimSe
 					}
 				}
 				j.Counts.Candidates += int64(len(refs))
+				j.Counts.Scanned += int64(len(batch))
 
 				last := len(batch) < r.cfg.PreviewBatch
 				nextQ, nextG, nextPage := qi, gi, page+1
@@ -602,6 +603,7 @@ func (r *Runner) enumerate(ctx context.Context, j *Job, token int64, cs *claimSe
 				ok, werr := r.store.WriteProgress(ctx, j.ID, token, ProgressWrite{
 					Fields: map[string]string{
 						"candidates":  strconv.FormatInt(j.Counts.Candidates, 10),
+						"scanned":     strconv.FormatInt(j.Counts.Scanned, 10),
 						"cursor_qidx": strconv.Itoa(nextQ),
 						"cursor_gidx": strconv.Itoa(nextG),
 						"cursor_page": strconv.Itoa(nextPage),

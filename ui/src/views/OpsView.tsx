@@ -2,17 +2,24 @@
 // state, progress (acted / skipped / failed), throttle, actor, reason,
 // timestamps — with row expand into the per-item failure report + preview
 // sample, a live verify panel for finished jobs (scope re-counted against
-// the job's final numbers), and the audit log. Polls tightly while any job
-// is non-terminal.
+// the job's final numbers), and the audit log. Row progress rides the `jobs`
+// SSE events when the stream is up; the tight 2s poll remains the fallback
+// while any job is non-terminal.
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { AlertCircle, ChevronDown, ChevronRight, Pause, Play, X } from "lucide-react";
 import { useSelector } from "react-redux";
+import { Link } from "react-router-dom";
 import { AppState } from "../store";
 import * as api from "../api";
 import { AuditEntry, JobDetail, JobInfo } from "../api";
 import { SeriesResponse, getSeries } from "../api-series";
+import { HealthRolesResponse, getHealthRoles } from "../api-fleet";
+import { HygieneCard, listHygiene } from "../api-hygiene";
+import { formatInterval } from "../lib/hygiene";
+import { paths } from "../paths";
 import { usePolling } from "../hooks";
+import { useJobsEvents } from "../hooks/useJobsEvents";
 import {
   isTerminalJobState,
   jobProgress,
@@ -20,10 +27,10 @@ import {
   verifyVerdict,
 } from "../lib/bulkjob";
 import { burnDownProjection, projectionSentence, sliceLastSeconds } from "../lib/series";
-import { toErrorString, uuidPrefix } from "../utils";
+import { timeAgo, toErrorString, uuidPrefix } from "../utils";
 import { cn } from "../lib/utils";
 import { BurnDown } from "../components/charts";
-import PageShell from "../components/PageShell";
+import PageShell, { panelClass, theadClass } from "../components/PageShell";
 import { Button } from "../components/ui/button";
 import { Alert, AlertDescription, AlertTitle } from "../components/ui/alert";
 import {
@@ -150,6 +157,140 @@ function VerifyBurnDown({ job }: { job: JobInfo }) {
   );
 }
 
+/**************************************************************
+          System activity (§3.12 roles + §3.10 hygiene last-runs)
+ **************************************************************/
+
+// Same fixed cadence as Settings › Fleet Console Health: a diagnostics
+// readout, independent of the global poll slider.
+const SYSTEM_ACTIVITY_REFRESH_MS = 15000;
+
+// SystemActivityPanel is the read-only "where does the console's own
+// background work show" answer on Operations: the §5.13 singleton role
+// leases (stats/errsig/hygiene sweepers) and each hygiene report's last run.
+// Renders nothing when neither endpoint answers (backend predates the
+// roles/hygiene phases, or is down) — absent, never faked.
+function SystemActivityPanel() {
+  const [health, setHealth] = useState<HealthRolesResponse | null>(null);
+  const [hygiene, setHygiene] = useState<HygieneCard[] | null>(null);
+
+  const load = useCallback(() => {
+    getHealthRoles()
+      .then(setHealth)
+      .catch(() => setHealth(null));
+    listHygiene()
+      .then((r) => setHygiene(r.reports))
+      .catch(() => setHygiene(null));
+  }, []);
+
+  useEffect(() => {
+    load();
+    const id = setInterval(load, SYSTEM_ACTIVITY_REFRESH_MS);
+    return () => clearInterval(id);
+  }, [load]);
+
+  if (health === null && hygiene === null) return null;
+
+  const sweep = health?.stats?.last_sweep_local;
+
+  return (
+    <section className={panelClass} data-testid="system-activity">
+      <div className="flex flex-wrap items-baseline gap-2 border-b border-[var(--fc-line2)] px-4 py-2">
+        <span className="text-sm font-semibold">System activity</span>
+        <span className="text-[10.5px] text-[var(--fc-ink3)]">
+          Background maintenance run by the console itself — not operator jobs.
+        </span>
+      </div>
+      <div className="grid gap-4 p-4 md:grid-cols-2">
+        {/* (a) Singleton role leases (§5.13) */}
+        {health && (
+          <div>
+            <div className="mb-1.5 text-[10px] uppercase tracking-[0.1em] text-[var(--fc-ink3)]">
+              background roles — lease holders
+            </div>
+            <div className="overflow-x-auto rounded-md border border-[var(--fc-line)]">
+              <table className="w-full border-collapse text-left">
+                <thead>
+                  <tr>
+                    <th className={theadClass}>Role</th>
+                    <th className={theadClass}>Holder</th>
+                    <th className={theadClass}>Fence</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {health.roles.map((r) => (
+                    <tr key={r.role} className="border-b border-[var(--fc-line2)] last:border-b-0">
+                      <td className="px-2.5 py-1.5 text-xs text-[var(--fc-ink)]">{r.title}</td>
+                      <td className="px-2.5 py-1.5">
+                        {r.holder ? (
+                          <span className="font-mono text-[11px] text-[var(--fc-ink2)]">
+                            {r.holder}
+                            {r.held_by_this_replica && (
+                              <span className="ml-1.5 rounded-[4px] bg-[var(--fc-good-bg)] px-1 py-px font-sans text-[10.5px] font-semibold text-[var(--fc-good)]">
+                                this replica
+                              </span>
+                            )}
+                          </span>
+                        ) : (
+                          <span className="text-[11px] text-[var(--fc-crit)]">unheld</span>
+                        )}
+                      </td>
+                      <td className="px-2.5 py-1.5 font-mono text-[11px] tabular-nums text-[var(--fc-ink2)]">
+                        #{r.fence}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            {sweep && (
+              <p className="mt-2 text-[11px] text-[var(--fc-ink2)]">
+                Last sweep (this replica):{" "}
+                <span className="font-mono tabular-nums text-[var(--fc-ink)]">
+                  {sweep.read_cmds} reads · {sweep.write_cmds} writes · {sweep.duration_ms}ms ·{" "}
+                  {sweep.refreshed}/{sweep.queues} queues refreshed
+                </span>
+              </p>
+            )}
+          </div>
+        )}
+
+        {/* (b) Hygiene report last-runs (§3.10) */}
+        {hygiene && (
+          <div>
+            <div className="mb-1.5 flex items-baseline gap-2 text-[10px] uppercase tracking-[0.1em] text-[var(--fc-ink3)]">
+              <span>hygiene reports — last runs</span>
+              <span className="flex-1" />
+              <Link
+                to={paths().HYGIENE}
+                className="text-[11px] normal-case tracking-normal text-[var(--fc-acc)] hover:underline"
+              >
+                Hygiene →
+              </Link>
+            </div>
+            <div className="rounded-md border border-[var(--fc-line)]">
+              {hygiene.map((c) => (
+                <div
+                  key={c.kind}
+                  className="flex flex-wrap items-baseline gap-x-2 border-b border-[var(--fc-line2)] px-2.5 py-1.5 text-xs last:border-b-0"
+                >
+                  <span className="font-medium text-[var(--fc-ink)]">{c.title}</span>
+                  <span className="text-[var(--fc-ink3)]">
+                    {c.enabled ? formatInterval(c.interval_seconds) : "disabled"}
+                  </span>
+                  <span className="ml-auto font-mono text-[10.5px] tabular-nums text-[var(--fc-ink3)]">
+                    {c.last_generated_at ? timeAgo(c.last_generated_at) : "never"}
+                  </span>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+      </div>
+    </section>
+  );
+}
+
 export default function OpsView() {
   const pollInterval = useSelector((s: AppState) => s.settings.pollInterval);
   const [jobs, setJobs] = useState<JobInfo[]>([]);
@@ -174,14 +315,35 @@ export default function OpsView() {
 
   usePolling(fetchAll, pollInterval, []);
 
+  // Live row progress: the `jobs` SSE events (on-connect snapshot + per-job
+  // ticks). Merged OVER the polled list, never regressing a terminal row;
+  // jobs born after the last poll are prepended so they appear instantly.
+  const { jobs: liveJobs, source: liveSource } = useJobsEvents(true);
+  const rows = useMemo(() => {
+    const liveList = Object.values(liveJobs);
+    if (liveList.length === 0) return jobs;
+    const known = new Set(jobs.map((j) => j.id));
+    const merged = jobs.map((j) => {
+      const live = liveJobs[j.id];
+      if (!live) return j;
+      if (isTerminalJobState(j.state) && !isTerminalJobState(live.state)) return j;
+      return live;
+    });
+    const fresh = liveList
+      .filter((j) => !known.has(j.id))
+      .sort((a, b) => (a.created_at < b.created_at ? 1 : -1));
+    return [...fresh, ...merged];
+  }, [jobs, liveJobs]);
+
   // §3.9: poll tightly while any job is non-terminal so progress bars and
-  // the operations-in-flight picture stay live.
-  const hasActive = jobs.some((j) => !isTerminalJobState(j.state));
+  // the operations-in-flight picture stay live — but only as the FALLBACK:
+  // while the SSE stream is delivering, the ticks are the transport.
+  const hasActive = rows.some((j) => !isTerminalJobState(j.state));
   useEffect(() => {
-    if (!hasActive) return;
+    if (!hasActive || liveSource === "sse") return;
     const id = setInterval(fetchAll, 2000);
     return () => clearInterval(id);
-  }, [hasActive, fetchAll]);
+  }, [hasActive, liveSource, fetchAll]);
 
   const fetchDetail = useCallback(async (jobId: string) => {
     try {
@@ -191,7 +353,9 @@ export default function OpsView() {
     }
   }, []);
 
-  // Keep the expanded row's detail fresh while it is non-terminal.
+  // Keep the expanded row's detail fresh while it is non-terminal. This poll
+  // stays even when SSE is live: the failure report and sample it fetches
+  // are not part of the jobs events.
   useEffect(() => {
     if (!expanded) {
       setDetail(null);
@@ -199,13 +363,13 @@ export default function OpsView() {
       return;
     }
     fetchDetail(expanded);
-    const row = jobs.find((j) => j.id === expanded);
+    const row = rows.find((j) => j.id === expanded);
     if (row && !isTerminalJobState(row.state)) {
       const id = setInterval(() => fetchDetail(expanded), 2000);
       return () => clearInterval(id);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [expanded, jobs.find((j) => j.id === expanded)?.state]);
+  }, [expanded, rows.find((j) => j.id === expanded)?.state]);
 
   // Verify panel (§3.9): re-run the scope against the live search endpoint
   // and compare with the job's final counts.
@@ -233,12 +397,12 @@ export default function OpsView() {
   // Auto-verify when a done job is expanded.
   useEffect(() => {
     if (!expanded) return;
-    const row = jobs.find((j) => j.id === expanded);
+    const row = rows.find((j) => j.id === expanded);
     if (row && row.state === "done" && verify === null) {
       runVerify(row);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [expanded, jobs]);
+  }, [expanded, rows]);
 
   const ctl = async (fn: (id: string) => Promise<unknown>, id: string) => {
     try {
@@ -266,8 +430,12 @@ export default function OpsView() {
 
       {/* Jobs table */}
       <div className="overflow-x-auto rounded-lg border border-[var(--fc-line)] bg-[var(--fc-panel)]">
-        <div className="border-b border-[var(--fc-line2)] px-4 py-2 text-sm font-semibold">
+        <div className="flex items-baseline gap-2 border-b border-[var(--fc-line2)] px-4 py-2 text-sm font-semibold">
           Bulk jobs
+          {/* Transport indicator — same vocabulary as Fleet's coverage line */}
+          <span className="text-[10.5px] font-normal text-[var(--fc-ink3)]">
+            {liveSource === "sse" ? "live stream" : "polling"}
+          </span>
         </div>
         <Table>
           <TableHeader>
@@ -288,7 +456,7 @@ export default function OpsView() {
             </TableRow>
           </TableHeader>
           <TableBody>
-            {jobs.length === 0 ? (
+            {rows.length === 0 ? (
               <TableRow>
                 <TableCell
                   colSpan={window.READ_ONLY ? 12 : 13}
@@ -300,7 +468,7 @@ export default function OpsView() {
                 </TableCell>
               </TableRow>
             ) : (
-              jobs.map((j) => {
+              rows.map((j) => {
                 const progress = jobProgress(j.counts);
                 const isOpen = expanded === j.id;
                 return (
@@ -582,6 +750,9 @@ export default function OpsView() {
           )}
         </div>
       </div>
+
+      {/* System activity — the console's own background maintenance */}
+      <SystemActivityPanel />
     </PageShell>
   );
 }

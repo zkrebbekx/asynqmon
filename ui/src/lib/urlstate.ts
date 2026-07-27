@@ -227,6 +227,35 @@ export function serializeDirectoryState(
 }
 
 /**************************************************************
+              Scan-to-completion job (`scanjob` param)
+ **************************************************************/
+
+// The id of the running scan-to-completion preview job lives in the URL so a
+// reload (or a shared link) re-attaches the live meter to the job instead of
+// losing the thread. NOT a console-owned param (CONSOLE_PARAMS): query edits
+// serialize around it, exactly like `peek`.
+export const SCANJOB_PARAM = "scanjob";
+
+// parseScanJob reads the tracked scan-job id ("" and absent both mean none).
+export function parseScanJob(params: URLSearchParams): string | null {
+  const raw = params.get(SCANJOB_PARAM);
+  return raw ? raw : null;
+}
+
+// withScanJob returns a copy of the params with the scan-job id set (or
+// cleared with null), preserving every other param — the base-preserving
+// pattern all url-state writers follow.
+export function withScanJob(
+  params: URLSearchParams,
+  id: string | null
+): URLSearchParams {
+  const next = new URLSearchParams(params);
+  if (id) next.set(SCANJOB_PARAM, id);
+  else next.delete(SCANJOB_PARAM);
+  return next;
+}
+
+/**************************************************************
                     Task drawer (`peek` param)
  **************************************************************/
 

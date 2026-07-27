@@ -7,6 +7,8 @@ import {
   parsePeek,
   serializePeek,
   serializeMetaPair,
+  parseScanJob,
+  withScanJob,
   DirectoryState,
   DEFAULT_DIRECTORY_STATE,
   parseDirectoryState,
@@ -203,5 +205,39 @@ describe("peek param", () => {
     expect(parsePeek("noslash")).toBeNull();
     expect(parsePeek("/id-only")).toBeNull();
     expect(parsePeek("queue-only/")).toBeNull();
+  });
+});
+
+describe("scanjob param", () => {
+  it("round-trips the tracked job id", () => {
+    const params = withScanJob(new URLSearchParams(), "jb_1753500000000_ab12cd34");
+    expect(parseScanJob(params)).toBe("jb_1753500000000_ab12cd34");
+  });
+
+  it("clears with null and treats absent/empty as none", () => {
+    const params = withScanJob(new URLSearchParams("scanjob=jb_x"), null);
+    expect(parseScanJob(params)).toBeNull();
+    expect(parseScanJob(new URLSearchParams())).toBeNull();
+    expect(parseScanJob(new URLSearchParams("scanjob="))).toBeNull();
+  });
+
+  it("preserves every other param (base-preserving pattern)", () => {
+    const base = new URLSearchParams("q=state%3Dpending+boom&peek=email/8f3a");
+    const withJob = withScanJob(base, "jb_1");
+    expect(withJob.get("q")).toBe("state=pending boom");
+    expect(withJob.get("peek")).toBe("email/8f3a");
+    expect(withJob.get("scanjob")).toBe("jb_1");
+    // The original params object is never mutated.
+    expect(base.get("scanjob")).toBeNull();
+  });
+
+  it("survives console-state serialization (reload re-attach contract)", () => {
+    const base = withScanJob(new URLSearchParams("q=state%3Dretry"), "jb_1");
+    const params = serializeConsoleState(
+      { ...DEFAULT_CONSOLE_STATE, q: "state=retry gateway", page: 2 },
+      base
+    );
+    expect(parseScanJob(params)).toBe("jb_1");
+    expect(params.get("q")).toBe("state=retry gateway");
   });
 });
