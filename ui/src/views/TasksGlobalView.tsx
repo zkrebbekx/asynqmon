@@ -34,7 +34,7 @@ import {
 } from "../lib/aql";
 import { TIME_CHIPS, TimeChip, applyTimeChip, isTimeChipActive, timeChipClause } from "../lib/timechips";
 import { cn, clickableRowClass, clickableRowProps } from "../lib/utils";
-import { usePolling } from "../hooks";
+import { useLatestOnly, usePolling } from "../hooks";
 import { useKeymap } from "../hooks/useKeymap";
 import { useFrozenData } from "../hooks/useFrozenData";
 import { useJobProgress } from "../hooks/useJobProgress";
@@ -311,19 +311,24 @@ export default function TasksGlobalView() {
     setJobVanished(0);
     setJobPage(0);
   }, [scanJobId]);
+  const beginJobResultsFetch = useLatestOnly();
   const fetchJobResults = useCallback(async () => {
     if (!jobResultsMode || !scanJobId) return;
+    const isCurrent = beginJobResultsFetch();
     setLoading(true);
     try {
       const resp = await api.getJobResults(scanJobId, jobPage * view.size, view.size);
+      if (!isCurrent()) return;
       setJobTasks(resp.tasks ?? []);
       setJobTotal(resp.total_candidates);
       setJobVanished(resp.vanished);
       setError("");
     } catch (e) {
+      if (!isCurrent()) return;
       setError(toErrorString(e));
     }
     setLoading(false);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [jobResultsMode, scanJobId, jobPage, view.size]);
   useEffect(() => {
     fetchJobResults();
@@ -341,10 +346,12 @@ export default function TasksGlobalView() {
 
   const filterKey = `${view.q}|${view.state}|${view.queue}|${view.size}`;
 
+  const beginTasksFetch = useLatestOnly();
   const fetchTasks = useCallback(async () => {
     // Job-results mode serves the completed job's own enumerated list —
     // never re-run the live budgeted scan under it.
     if (jobResultsMode) return;
+    const isCurrent = beginTasksFetch();
     try {
       const resp = await api.searchTasks({
         queue: view.queue,
@@ -354,6 +361,11 @@ export default function TasksGlobalView() {
         size: view.size,
         cursor: currentCursor || undefined,
       });
+      // An in-flight response for an old filter must never overwrite a
+      // newer one: the table would show the previous query's rows/total/
+      // cursor under the new pill (and the whole-scope bulk bar would
+      // advertise the stale total) until the next poll tick.
+      if (!isCurrent()) return;
       const rows = resp.tasks ?? [];
       setTasks(rows);
       setTotal(resp.total);
@@ -376,6 +388,7 @@ export default function TasksGlobalView() {
         }
       }
     } catch (e) {
+      if (!isCurrent()) return;
       const data = (e as { response?: { status?: number; data?: unknown } })?.response;
       if (data?.status === 400 && isAqlRejection(data.data)) {
         setRejection({ ...data.data, query: view.q });
@@ -394,28 +407,37 @@ export default function TasksGlobalView() {
   usePolling(fetchTasks, pollInterval, [view.queue, view.state, view.q, view.page, view.size, currentCursor, jobResultsMode]);
 
   // All-seven state pill counts: one pipelined pass server-side, polled.
+  const beginCountsFetch = useLatestOnly();
   const fetchCounts = useCallback(async () => {
+    const isCurrent = beginCountsFetch();
     try {
       const resp = await api.taskStateCounts(view.queue);
+      if (!isCurrent()) return;
       setStateCounts(resp.counts);
     } catch {
       /* keep the last counts — pills degrade to stale, not empty */
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [view.queue]);
   usePolling(fetchCounts, pollInterval, [view.queue]);
 
   // Global metadata facets (across the whole filtered set, not just this page).
+  const beginFacetsFetch = useLatestOnly();
   const fetchFacets = useCallback(async () => {
+    const isCurrent = beginFacetsFetch();
     try {
       const resp = await api.taskMetadata({
         queue: view.queue,
         state: view.state,
         q: view.q,
       });
+      if (!isCurrent()) return;
       setFacets(resp.facets);
     } catch {
+      if (!isCurrent()) return;
       setFacets([]);
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [view.queue, view.state, view.q]);
 
   useEffect(() => {
@@ -426,24 +448,29 @@ export default function TasksGlobalView() {
   // group result mode the groups ARE the result set, so fetch more of them.
   const isFailureState = view.state === "retry" || view.state === "archived";
   const isGroupMode = isFailureState && view.mode !== "rows";
+  const beginAnalyticsFetch = useLatestOnly();
   const fetchAnalytics = useCallback(async () => {
     if (!isFailureState) {
       setErrorGroups([]);
       setTypeGroups([]);
       return;
     }
+    const isCurrent = beginAnalyticsFetch();
     const limit = isGroupMode ? 50 : 8;
     try {
       const [byError, byType] = await Promise.all([
         api.taskAggregate({ queue: view.queue, state: view.state, q: view.q, by: "error", limit }),
         api.taskAggregate({ queue: view.queue, state: view.state, q: view.q, by: "type", limit }),
       ]);
+      if (!isCurrent()) return;
       setErrorGroups(byError.groups);
       setTypeGroups(byType.groups);
     } catch {
+      if (!isCurrent()) return;
       setErrorGroups([]);
       setTypeGroups([]);
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isFailureState, isGroupMode, view.queue, view.state, view.q]);
 
   useEffect(() => {

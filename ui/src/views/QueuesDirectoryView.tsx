@@ -16,7 +16,7 @@ import { useSelector } from "react-redux";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { BookmarkPlus, X } from "lucide-react";
 import { AppState } from "../store";
-import { usePolling } from "../hooks";
+import { useLatestOnly, usePolling } from "../hooks";
 import { useFrozenData } from "../hooks/useFrozenData";
 import { listFleetQueues, FleetQueuesResponse, FleetQueueRow } from "../api-fleet";
 import { SeriesResponse, SeriesSpec, getSeriesBatch } from "../api-series";
@@ -242,7 +242,9 @@ export default function QueuesDirectoryView() {
     return () => clearInterval(id);
   }, []);
 
+  const beginQueuesFetch = useLatestOnly();
   const fetchQueues = useCallback(async () => {
+    const isCurrent = beginQueuesFetch();
     try {
       const r = await listFleetQueues({
         sort: view.sort,
@@ -251,14 +253,19 @@ export default function QueuesDirectoryView() {
         cursor: view.cursor || undefined,
         limit: view.limit,
       });
+      // Discard out-of-order responses: a slow reply for an old
+      // sort/filter/cursor must not overwrite the newer window.
+      if (!isCurrent()) return;
       setResp(r);
       setError("");
       setNow(Date.now());
     } catch (e) {
+      if (!isCurrent()) return;
       setError(toErrorString(e as Parameters<typeof toErrorString>[0]));
     } finally {
       setLoading(false);
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [view.sort, view.dir, view.f, view.cursor, view.limit]);
 
   usePolling(fetchQueues, pollInterval, [view.sort, view.dir, view.f, view.cursor, view.limit]);
