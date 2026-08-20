@@ -22,7 +22,6 @@ import { Loader2, Play } from "lucide-react";
 import {
   DeadLetterAction,
   HygieneCard,
-  HygieneKind,
   HygieneReport,
   getHygieneReport,
   listHygiene,
@@ -33,7 +32,6 @@ import { usePolling } from "../hooks";
 import {
   HYGIENE_KINDS,
   KIND_QUESTIONS,
-  KIND_TITLES,
   activitySourceLabel,
   deadLetterActionScope,
   formatBytes,
