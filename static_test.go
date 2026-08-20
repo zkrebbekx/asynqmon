@@ -131,3 +131,50 @@ func TestServeHTTPAPINotFound(t *testing.T) {
 		})
 	})
 }
+
+func TestIndexAssetURLsHonorRootPath(t *testing.T) {
+	Convey("Given the embedded index rendered under a RootPath", t, func() {
+		h := &uiAssetsHandler{
+			rootPath:      "/monitoring",
+			contents:      staticContents,
+			staticDirPath: "ui/build",
+			indexFileName: "index.html",
+		}
+		rec := httptest.NewRecorder()
+		So(h.renderIndexFile(rec), ShouldBeNil)
+		body := rec.Body.String()
+
+		Convey("Then every asset URL is prefixed with the root path", func() {
+			// The Vite migration once hardcoded /assets/... here, which made
+			// library embedding (README RootPath examples) render a blank
+			// page: assets resolved outside the PathPrefix router.
+			So(body, ShouldContainSubstring, `src="/monitoring/assets/`)
+			So(body, ShouldContainSubstring, `href="/monitoring/assets/`)
+			So(body, ShouldContainSubstring, `href="/monitoring/favicon.svg"`)
+			So(body, ShouldNotContainSubstring, `src="/assets/`)
+			So(body, ShouldNotContainSubstring, `href="/assets/`)
+			// html/template's JS-string context escapes "/" as "\/".
+			So(body, ShouldContainSubstring, `window.ROOT_PATH = "\/monitoring"`)
+		})
+	})
+
+	Convey("Given the embedded index rendered with no RootPath", t, func() {
+		h := &uiAssetsHandler{
+			rootPath:      "",
+			contents:      staticContents,
+			staticDirPath: "ui/build",
+			indexFileName: "index.html",
+		}
+		rec := httptest.NewRecorder()
+		So(h.renderIndexFile(rec), ShouldBeNil)
+		body := rec.Body.String()
+
+		Convey("Then asset URLs are root-relative with no template residue", func() {
+			So(body, ShouldContainSubstring, `src="/assets/`)
+			// The dev-fallback guard legitimately contains the literal
+			// includes("[[") probe; unrendered actions would carry the
+			// full delimiter+field form.
+			So(body, ShouldNotContainSubstring, `[[.RootPath`)
+		})
+	})
+}
