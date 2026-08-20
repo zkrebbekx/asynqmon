@@ -688,6 +688,9 @@ const (
 	AuditJobCreated   = "job_created"
 	AuditJobFinished  = "job_finished"  // done, failed, or canceled — final counts attached
 	AuditTaskEnqueued = "task_enqueued" // §5.10 single-task enqueue; TaskID set, Acted = 1
+	// AuditBatchFiltered is the synchronous POST /api/tasks:batch_filtered
+	// path (selection-sized bulk actions applied inline, not as a job).
+	AuditBatchFiltered = "batch_filtered"
 
 	// Hygiene events (§3.10). Verb carries the report kind. Run triggers are
 	// logged even in read-only mode (report generation is a read of asynq

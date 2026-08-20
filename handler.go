@@ -541,8 +541,10 @@ func muxRouter(opts Options, rc redis.UniversalClient, inspector *asynq.Inspecto
 	api.HandleFunc("/task_metadata", newTaskMetadataHandlerFunc(inspector, rc, payloadFmt)).Methods("GET")
 	// Failure/usage analytics: group the filtered set by type/error/queue.
 	api.HandleFunc("/task_aggregate", newTaskAggregateHandlerFunc(inspector, rc, payloadFmt)).Methods("GET")
-	// Apply an action to every task matching a filter (not just the current page).
-	api.HandleFunc("/tasks:batch_filtered", newBulkFilteredTasksHandlerFunc(inspector, rc, payloadFmt)).Methods("POST")
+	// Apply an action to every task matching a filter (not just the current
+	// page). Audited via the jobs store like every other mutation path.
+	jobsStore := jobs.NewStore(rc)
+	api.HandleFunc("/tasks:batch_filtered", newBulkFilteredTasksHandlerFunc(inspector, rc, payloadFmt, jobsStore)).Methods("POST")
 
 	// Groups endponts
 	api.HandleFunc("/queues/{qname}/groups", newListGroupsHandlerFunc(inspector)).Methods("GET")
@@ -602,7 +604,6 @@ func muxRouter(opts Options, rc redis.UniversalClient, inspector *asynq.Inspecto
 	// read-only mode's method filter below blocks them.
 	// ------------------------------------------------------------------
 	api.Use(newActorMiddleware(opts))
-	jobsStore := jobs.NewStore(rc)
 	api.HandleFunc("/jobs", newCreateJobHandlerFunc(jobsStore)).Methods("POST")
 	api.HandleFunc("/jobs", newListJobsHandlerFunc(jobsStore)).Methods("GET")
 	api.HandleFunc("/jobs/{job_id}", newGetJobHandlerFunc(jobsStore)).Methods("GET")

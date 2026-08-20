@@ -1,6 +1,7 @@
 package asynqmon
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -14,6 +15,7 @@ import (
 	"github.com/redis/go-redis/v9"
 
 	"github.com/hibiken/asynqmon/aql"
+	"github.com/hibiken/asynqmon/jobs"
 	"github.com/hibiken/asynqmon/stats"
 )
 
@@ -935,6 +937,9 @@ type bulkFilteredRequest struct {
 	Meta    []string `json:"meta"`
 	Action  string   `json:"action"` // delete | run | archive | cancel
 	MaxScan int      `json:"max_scan"`
+	// Reason is an optional operator-provided note recorded in the audit
+	// entry, mirroring the jobs API's audited reason.
+	Reason string `json:"reason"`
 }
 
 type bulkFilteredResponse struct {
@@ -950,8 +955,8 @@ type bulkFilteredResponse struct {
 // GET /api/tasks (phase 6). §4.3 note: the jobs API is the first-class bulk
 // primitive; this endpoint remains for selection-sized scopes.
 //
-//	POST /api/tasks:batch_filtered  {queue,state,q,meta,action,max_scan}
-func newBulkFilteredTasksHandlerFunc(inspector *asynq.Inspector, rc redis.UniversalClient, pf PayloadFormatter) http.HandlerFunc {
+//	POST /api/tasks:batch_filtered  {queue,state,q,meta,action,max_scan,reason}
+func newBulkFilteredTasksHandlerFunc(inspector *asynq.Inspector, rc redis.UniversalClient, pf PayloadFormatter, audit *jobs.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodySize)
 		dec := json.NewDecoder(r.Body)
@@ -1005,8 +1010,24 @@ func newBulkFilteredTasksHandlerFunc(inspector *asynq.Inspector, rc redis.Univer
 			}
 		}
 
+		// Throttled at the jobs runner's maximum rate so a filter matching
+		// tens of thousands of tasks cannot hammer Redis with an unbounded
+		// burst; larger scopes belong on the jobs API, which previews,
+		// audits, and throttles as a background job.
+		const actionsPerSecond = 1000
+		limiter := time.NewTicker(time.Second / actionsPerSecond)
+		defer limiter.Stop()
 		processed, errCount := 0, 0
+		canceled := false
 		for _, t := range matches {
+			select {
+			case <-r.Context().Done():
+				canceled = true
+			case <-limiter.C:
+			}
+			if canceled {
+				break // client gone; still audit what was applied so far
+			}
 			var actErr error
 			switch req.Action {
 			case "delete":
@@ -1023,6 +1044,26 @@ func newBulkFilteredTasksHandlerFunc(inspector *asynq.Inspector, rc redis.Univer
 			} else {
 				processed++
 			}
+		}
+
+		// Audit like every other mutation path (§5.11). Uses a background
+		// context so a client disconnect cannot erase the trace of actions
+		// already applied.
+		actor := actorFromContext(r.Context())
+		auditCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := audit.AppendAudit(auditCtx, jobs.AuditEntry{
+			Event:  jobs.AuditBatchFiltered,
+			Actor:  actor.Name,
+			Verb:   req.Action,
+			Scope:  jobs.Scope{Queue: req.Queue, State: req.State, Q: req.Q, Meta: req.Meta},
+			Reason: strings.TrimSpace(req.Reason),
+			Acted:  int64(processed),
+			Failed: int64(errCount),
+		}); err != nil {
+			writeErrorMsg(w, http.StatusInternalServerError,
+				fmt.Sprintf("%d task(s) were %sd, but the audit write failed: %v", processed, req.Action, err))
+			return
 		}
 
 		writeResponseJSON(w, bulkFilteredResponse{
