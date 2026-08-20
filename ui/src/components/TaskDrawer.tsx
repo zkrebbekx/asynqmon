@@ -13,7 +13,7 @@ import {
   deletePendingTaskAsync, deleteCompletedTaskAsync,
   cancelActiveTaskAsync,
 } from "../actions/tasksActions";
-import { usePolling } from "../hooks";
+import { useOverlayMute, usePolling } from "../hooks";
 import {
   useCorrelationKeys, useEnqueueEnabled, usePayloadDetailLimit,
 } from "../hooks/useFeatures";
@@ -247,6 +247,11 @@ export default function TaskDrawer({ peek, resultList, onClose, onPeek, onPivot 
   // Latest handlers in refs so the document-level key listener binds once.
   const handlersRef = useRef({ onClose, prevTask, nextTask, onPeek, confirmDelete, cloneOpen });
   handlersRef.current = { onClose, prevTask, nextTask, onPeek, confirmDelete, cloneOpen };
+
+  // The drawer is aria-modal: page-level bindings (j/k/x/#/e/r…) must not
+  // fire on the hidden selection behind it. Its own keys below use a raw
+  // listener, so the mute doesn't silence them.
+  useOverlayMute();
 
   // Keyboard: Esc closes, [ and ] move through the result list.
   useEffect(() => {

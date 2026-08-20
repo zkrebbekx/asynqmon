@@ -1,6 +1,8 @@
+import * as React from "react";
 import * as DialogPrimitive from "@radix-ui/react-dialog";
 import { X } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { acquireOverlayMute } from "@/lib/keymap";
 
 export const Dialog = DialogPrimitive.Root;
 export const DialogTrigger = DialogPrimitive.Trigger;
@@ -17,6 +19,10 @@ export function DialogOverlay({ className, ...props }: React.ComponentPropsWitho
 }
 
 export function DialogContent({ className, children, ...props }: React.ComponentPropsWithoutRef<typeof DialogPrimitive.Content>) {
+  // Radix only mounts content while the dialog is open, so a mount-scoped
+  // mute silences page-level shortcuts (j/k/x/#/…) behind every dialog —
+  // they used to keep firing on the hidden selection under confirm dialogs.
+  React.useEffect(() => acquireOverlayMute(), []);
   return (
     <DialogPortal>
       <DialogOverlay />

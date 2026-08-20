@@ -21,9 +21,8 @@ import { AppState } from "./store";
 import { paths } from "./paths";
 import { toggleDrawer } from "./actions/settingsActions";
 import { closeSnackbar } from "./actions/snackbarActions";
-import { useIsDark } from "./hooks";
+import { useIsDark, useOverlayMute } from "./hooks";
 import { useKeymap } from "./hooks/useKeymap";
-import { OVERLAY_ATTR } from "./lib/keymap";
 import { cn } from "./lib/utils";
 import HeaderBar from "./components/HeaderBar";
 import CommandPalette from "./components/CommandPalette";
@@ -112,12 +111,9 @@ function AppContent() {
   });
 
   // While an overlay is open, page-level bindings (j/k/x…) go quiet — the
-  // body attribute is the guard lib/keymap's dispatcher checks.
-  useEffect(() => {
-    const open = paletteOpen || cheatOpen;
-    document.body.toggleAttribute(OVERLAY_ATTR, open);
-    return () => document.body.removeAttribute(OVERLAY_ATTR);
-  }, [paletteOpen, cheatOpen]);
+  // body attribute is the guard lib/keymap's dispatcher checks. Refcounted
+  // via the shared mute so dialogs/drawers elsewhere compose with it.
+  useOverlayMute(paletteOpen || cheatOpen);
 
   // Apply dark class to root
   useEffect(() => {

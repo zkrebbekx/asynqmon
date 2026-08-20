@@ -1328,28 +1328,28 @@ export default function TasksGlobalView() {
                           <div className="flex items-center justify-center gap-1">
                             {acts.run && (
                               <Tooltip><TooltipTrigger asChild>
-                                <Button size="icon" variant="ghost" className="h-7 w-7" onClick={() => runAction(acts.run!, t.queue, t.id)}>
+                                <Button size="icon" variant="ghost" className="h-7 w-7" onClick={() => runAction(acts.run!, t.queue, t.id)} aria-label={`Run task ${t.id}`}>
                                   <Play size={13} />
                                 </Button>
                               </TooltipTrigger><TooltipContent>Run now</TooltipContent></Tooltip>
                             )}
                             {acts.cancel && (
                               <Tooltip><TooltipTrigger asChild>
-                                <Button size="icon" variant="ghost" className="h-7 w-7" onClick={() => runAction(acts.cancel!, t.queue, t.id)}>
+                                <Button size="icon" variant="ghost" className="h-7 w-7" onClick={() => runAction(acts.cancel!, t.queue, t.id)} aria-label={`Cancel task ${t.id}`}>
                                   <X size={13} />
                                 </Button>
                               </TooltipTrigger><TooltipContent>Cancel</TooltipContent></Tooltip>
                             )}
                             {acts.archive && (
                               <Tooltip><TooltipTrigger asChild>
-                                <Button size="icon" variant="ghost" className="h-7 w-7" onClick={() => runAction(acts.archive!, t.queue, t.id)}>
+                                <Button size="icon" variant="ghost" className="h-7 w-7" onClick={() => runAction(acts.archive!, t.queue, t.id)} aria-label={`Archive task ${t.id}`}>
                                   <Archive size={13} />
                                 </Button>
                               </TooltipTrigger><TooltipContent>Archive</TooltipContent></Tooltip>
                             )}
                             {acts.delete && (
                               <Tooltip><TooltipTrigger asChild>
-                                <Button size="icon" variant="ghost" className="h-7 w-7 text-[var(--fc-crit)]" onClick={() => setConfirmDelete(t)}>
+                                <Button size="icon" variant="ghost" className="h-7 w-7 text-[var(--fc-crit)]" onClick={() => setConfirmDelete(t)} aria-label={`Delete task ${t.id}`}>
                                   <Trash2 size={13} />
                                 </Button>
                               </TooltipTrigger><TooltipContent>Delete</TooltipContent></Tooltip>
@@ -1428,6 +1428,7 @@ export default function TasksGlobalView() {
                   className="h-7 w-7"
                   disabled={cursorStack.length === 0}
                   onClick={() => setCursorStack((s) => s.slice(0, -1))}
+                  aria-label="Previous window"
                 >
                   <ChevronLeft size={14} />
                 </Button>
@@ -1437,6 +1438,7 @@ export default function TasksGlobalView() {
                   className="h-7 w-7"
                   disabled={meta.cursor === ""}
                   onClick={() => setCursorStack((s) => [...s, meta.cursor])}
+                  aria-label="Next window"
                 >
                   <ChevronRight size={14} />
                 </Button>
@@ -1463,10 +1465,10 @@ export default function TasksGlobalView() {
                   </select>
                 </div>
                 <div className="flex items-center gap-1">
-                  <Button size="icon" variant="ghost" className="h-7 w-7" disabled={view.page === 0} onClick={() => updateView({ page: view.page - 1 })}>
+                  <Button size="icon" variant="ghost" className="h-7 w-7" disabled={view.page === 0} onClick={() => updateView({ page: view.page - 1 })} aria-label="Previous page">
                     <ChevronLeft size={14} />
                   </Button>
-                  <Button size="icon" variant="ghost" className="h-7 w-7" disabled={view.page >= totalPages - 1} onClick={() => updateView({ page: view.page + 1 })}>
+                  <Button size="icon" variant="ghost" className="h-7 w-7" disabled={view.page >= totalPages - 1} onClick={() => updateView({ page: view.page + 1 })} aria-label="Next page">
                     <ChevronRight size={14} />
                   </Button>
                 </div>

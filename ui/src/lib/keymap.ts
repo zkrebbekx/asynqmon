@@ -50,9 +50,33 @@ export interface KeyBinding {
 
 export type Keymap = Record<string, KeyBinding | ((e: KeyboardEvent) => void)>;
 
-/** The overlay marker GlobalShortcuts stamps on <body> while the palette or
- * cheat-sheet is open, so page-level bindings go quiet underneath. */
+/** The overlay marker stamped on <body> while any modal surface (palette,
+ * cheat-sheet, dialogs, the task drawer) is open, so page-level bindings go
+ * quiet underneath. */
 export const OVERLAY_ATTR = "data-fc-overlay-open";
+
+// Refcounted so overlapping overlays (a confirm dialog above the task
+// drawer) don't clear each other's mute: destructive page bindings
+// (x/#/e/r) must never fire behind an aria-modal surface.
+let overlayMuteCount = 0;
+
+/** acquireOverlayMute stamps OVERLAY_ATTR and returns a release function.
+ * Safe to call from any modal component's mount effect; releases are
+ * idempotent. */
+export function acquireOverlayMute(): () => void {
+  overlayMuteCount++;
+  document.body.setAttribute(OVERLAY_ATTR, "");
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    overlayMuteCount--;
+    if (overlayMuteCount <= 0) {
+      overlayMuteCount = 0;
+      document.body.removeAttribute(OVERLAY_ATTR);
+    }
+  };
+}
 
 function normalize(b: KeyBinding | ((e: KeyboardEvent) => void)): KeyBinding {
   return typeof b === "function" ? { onTrigger: b } : b;

@@ -4,6 +4,7 @@ import { useDispatch, useSelector } from "react-redux";
 import { AppState } from "../store";
 import { pollTick } from "../actions/settingsActions";
 import { ThemePreference } from "../reducers/settingsReducer";
+import { acquireOverlayMute } from "../lib/keymap";
 
 export function usePolling(
   doFn: () => void,
@@ -113,4 +114,14 @@ export function useLatestOnly(): () => () => boolean {
     const mine = ++seq.current;
     return () => mine === seq.current;
   }).current;
+}
+
+// useOverlayMute stamps the keymap's overlay marker while `active` so
+// page-level shortcuts (j/k/x/#/…) never fire behind a modal surface.
+// Refcounted in lib/keymap so stacked overlays compose.
+export function useOverlayMute(active: boolean = true) {
+  useEffect(() => {
+    if (!active) return;
+    return acquireOverlayMute();
+  }, [active]);
 }
