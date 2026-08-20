@@ -9,6 +9,28 @@ frontend (ui/src), product/UX, and build/CI/packaging.
 > the tracker. Each entry below is written to be lifted verbatim into an issue.
 >
 > Status legend: `[ ]` open · `[x]` fixed in this review branch · `[~]` partially fixed.
+>
+> **Status as of the end of the review session** — what remains open:
+>
+> - **P1-10 [~]**: pause/resume/delete shipped in the queue workspace header;
+>   Queues-directory row actions are still a nice-to-have.
+> - **P2-2 [~]**: loud startup warning shipped + README trust-model docs;
+>   consider hard-refusing `RequireIdentity` without `TrustedProxies` in a
+>   breaking release.
+> - **P2-3 [~]**: series/scheduler/errsig writes are fenced and tail paging is
+>   trim-safe; the errsig indexer still has **no command budget/tiering** at
+>   tier-2/3 fleet sizes (largest remaining scale-engineering item).
+> - **P2-8 [~]**: liveness probe + rs/cors + go.mod + dependabot shipped;
+>   cutting an actual tagged release (chart appVersion, CHANGELOG release)
+>   is a process step for the maintainer.
+> - **P2-9 [~]**: fleet-stream watchdog + candidates cap shipped; useJobsEvents
+>   still opens one EventSource per consumer (HTTP/1.1 6-per-host pressure).
+> - **P3-1 [~]**: fleet/§-jargon strings fixed; unifying the four names for
+>   failure grouping (Errors / signatures / clusters / top errors) is a
+>   product-naming decision left open.
+> - **P3-3 [~]**: index TTL, hot-set slots, live consumer counts, observe key
+>   collision shipped; `counterDelta`'s UTC-midnight tail loss remains (needs
+>   an extra per-queue read at rollover, to be budgeted).
 
 Baseline at review time: `go build`, `go vet`, full Go test suite (9 packages)
 and all 505 UI tests pass; embedded `ui/build` is in sync with `ui/src` at HEAD.
@@ -17,7 +39,7 @@ and all 505 UI tests pass; embedded `ui/build` is in sync with `ui/src` at HEAD.
 
 ## P1 — fix first
 
-### P1-1 · Remotely-triggerable panic: unclamped `page` in /api/tasks; negative `failures_offset` reaches LRANGE
+### [x] P1-1 · Remotely-triggerable panic: unclamped `page` in /api/tasks; negative `failures_offset` reaches LRANGE
 
 **Area:** backend · **Type:** bug/security
 
@@ -50,7 +72,7 @@ a nonsense response window.
 **Fix:** clamp `start < 0 → 0` (or cap `page`) in both paging paths; clamp
 `failures_offset < 0 → 0`; add hostile-input regression tests.
 
-### P1-2 · Legacy task search: scan budget multiplies per queue and the match set is unbounded — one request can OOM the server
+### [x] P1-2 · Legacy task search: scan budget multiplies per queue and the match set is unbounded — one request can OOM the server
 
 **Area:** backend · **Type:** bug/security
 
@@ -71,7 +93,7 @@ fleet OOMs the replica.
 the collected match set (report `truncated` — the response shape already
 carries it).
 
-### P1-3 · `POST /api/tasks:batch_filtered` bypasses the audit log and throttling for mass mutations
+### [x] P1-3 · `POST /api/tasks:batch_filtered` bypasses the audit log and throttling for mass mutations
 
 **Area:** backend · **Type:** bug/security
 
@@ -88,7 +110,7 @@ safeguard.
 a modest rate limit / hard cap; long term, steer the UI fully onto the jobs
 API.
 
-### P1-4 · Jobs runner: paused jobs resume scanning when re-claimed; stale `cursor_groups` applied across queue boundaries; paused jobs pin concurrency slots
+### [x] P1-4 · Jobs runner: paused jobs resume scanning when re-claimed; stale `cursor_groups` applied across queue boundaries; paused jobs pin concurrency slots
 
 **Area:** backend (jobs) · **Type:** bug
 
@@ -125,7 +147,7 @@ clear/re-key `cursor_groups` on queue advance; release the slot while paused
 (or skip paused jobs in `claimTick` and re-claim on resume); make control
 transitions compare-and-set.
 
-### P1-5 · No CI runs tests or lint; embedded ui/build drift is unchecked
+### [x] P1-5 · No CI runs tests or lint; embedded ui/build drift is unchecked
 
 **Area:** build/CI · **Type:** gap
 
@@ -141,7 +163,7 @@ npm run lint && npm test`, and an embedded-build drift check (rebuild and
 diff, or hash manifest). Lint config should also exclude `ui/build` (oxlint
 currently warns on the bundled dayjs).
 
-### P1-6 · `scratch` Docker image has no CA certificates — documented TLS features fail; runs as root; EOL unpinned base images
+### [x] P1-6 · `scratch` Docker image has no CA certificates — documented TLS features fail; runs as root; EOL unpinned base images
 
 **Area:** build/packaging · **Type:** bug
 
@@ -161,7 +183,7 @@ currently warns on the bundled dayjs).
   same dir — stale content-hashed chunks survive and get embedded via
   `//go:embed`. `.dockerignore` should exclude `ui/build`.
 
-### P1-7 · Vite migration broke `RootPath` sub-path embedding for library users
+### [x] P1-7 · Vite migration broke `RootPath` sub-path embedding for library users
 
 **Area:** build/backend · **Type:** bug
 
@@ -179,7 +201,7 @@ that config every asset request goes to `/assets/...`, outside the
 or `experimental.renderBuiltUrl`), and add a `rootPath: "/monitoring"` case to
 `static_test.go` asserting asset URLs are prefixed.
 
-### P1-8 · Metrics view defaults to a 60-second window and a blank duration selector
+### [x] P1-8 · Metrics view defaults to a 60-second window and a blank duration selector
 
 **Area:** frontend · **Type:** bug
 
@@ -195,7 +217,7 @@ visit to `/q/metrics` fetches a 1-minute window, and `MetricsFetchControls`'
 side: `/api/metrics` should also 400 on non-positive `duration`/bad `endtime`
 instead of proxying an invalid range to Prometheus (returns a 502 today).
 
-### P1-9 · Tasks console: a stale in-flight response can overwrite a newer filter's results
+### [x] P1-9 · Tasks console: a stale in-flight response can overwrite a newer filter's results
 
 **Area:** frontend · **Type:** bug
 
@@ -212,7 +234,7 @@ and `QueuesDirectoryView.fetchQueues` (lower impact).
 **Fix:** sequence number or AbortController per filter key; discard
 non-current responses.
 
-### P1-10 · Queue pause / resume / delete have no UI entry point
+### [~] P1-10 · Queue pause / resume / delete have no UI entry point
 
 **Area:** product/frontend · **Type:** gap
 
@@ -234,7 +256,7 @@ honoring read-only mode.
 
 ## P2 — important
 
-### P2-1 · Release workflow uses deprecated/dead actions; Windows artifact is broken; no darwin/arm64; no checksums
+### [x] P2-1 · Release workflow uses deprecated/dead actions; Windows artifact is broken; no darwin/arm64; no checksums
 
 **Area:** build/CI · **Type:** bug
 
@@ -250,7 +272,7 @@ docker tag rules have never fired (see P2-8).
 **Fix:** modernize (checkout@v4 + `softprops/action-gh-release` or goreleaser),
 add `.exe` + zip for Windows, darwin/arm64, and a SHA256SUMS file.
 
-### P2-2 · Identity: `AuthHeader` is trusted from any peer when `TrustedProxies` is empty — `RequireIdentity` satisfiable by a spoofed header
+### [~] P2-2 · Identity: `AuthHeader` is trusted from any peer when `TrustedProxies` is empty — `RequireIdentity` satisfiable by a spoofed header
 
 **Area:** backend · **Type:** security
 
@@ -267,7 +289,7 @@ operator cares about attribution.
 `RequireIdentity: true` without `TrustedProxies`. Document the trust model in
 the README flag table (see P2-6).
 
-### P2-3 · Fencing gaps outside the stats cache; errsig indexer has no command budget and a paging skip bug
+### [~] P2-3 · Fencing gaps outside the stats cache; errsig indexer has no command budget and a paging skip bug
 
 **Area:** backend (stats/errsig) · **Type:** bug
 
@@ -298,7 +320,7 @@ the README flag table (see P2-6).
    entries are skipped and lost behind the advanced cursor — precisely on
    at-cap queues. Advance `Min` per page instead of using offsets.
 
-### P2-4 · Modal overlays don't mute the console keymap — destructive shortcuts fire behind the drawer
+### [x] P2-4 · Modal overlays don't mute the console keymap — destructive shortcuts fire behind the drawer
 
 **Area:** frontend/a11y · **Type:** bug
 
@@ -315,7 +337,7 @@ names — screen readers announce "button".
 **Fix:** stamp `OVERLAY_ATTR` (or disable the keymap) while peek/confirm
 dialogs are open; add `aria-label`s.
 
-### P2-5 · Ops view correctness: stale verify verdict on newly expanded job; keyless list fragments; "count" scan jobs recorded as DELETE in the audit log
+### [x] P2-5 · Ops view correctness: stale verify verdict on newly expanded job; keyless list fragments; "count" scan jobs recorded as DELETE in the audit log
 
 **Area:** frontend/product · **Type:** bug
 
@@ -334,7 +356,7 @@ dialogs are open; add `aria-label`s.
    operators learn to ignore delete entries. A dedicated `count`/`preview`
    verb would be honest.
 
-### P2-6 · README documents almost none of the shipped product; five operational flags missing from the flag table
+### [x] P2-6 · README documents almost none of the shipped product; five operational flags missing from the flag table
 
 **Area:** docs/product · **Type:** gap
 
@@ -350,7 +372,7 @@ streaming, deploy markers. And `cmd/asynqmon/main.go:122-126` defines
 is unattributed without `--auth-header` (and spoofable without
 `--trusted-proxies`, see P2-2).
 
-### P2-7 · API robustness batch: unbounded bodies, bare-text read-only 405s, Close aborts early, empty type to ResultFormatter, cancel_all pagination, legacy queue-endpoint Redis storms
+### [x] P2-7 · API robustness batch: unbounded bodies, bare-text read-only 405s, Close aborts early, empty type to ResultFormatter, cancel_all pagination, legacy queue-endpoint Redis storms
 
 **Area:** backend · **Type:** bug
 
@@ -385,7 +407,7 @@ is unattributed without `--auth-header` (and spoofable without
    formatter *output* so `q=non-printable` matches every binary payload
    (`task_search_handlers.go:134`).
 
-### P2-8 · Deployment/versioning: Helm liveness probe restarts pods on Redis outage; `appVersion: latest`; stale deps (rs/cors CVE); go.mod says go 1.16; Dependabot misses gomod/actions
+### [~] P2-8 · Deployment/versioning: Helm liveness probe restarts pods on Redis outage; `appVersion: latest`; stale deps (rs/cors CVE); go.mod says go 1.16; Dependabot misses gomod/actions
 
 **Area:** build/deploy · **Type:** bug
 
@@ -406,7 +428,7 @@ is unattributed without `--auth-header` (and spoofable without
    language semantics and misadvertises support). `.github/dependabot.yml`
    covers only npm — add `gomod` + `github-actions` ecosystems.
 
-### P2-9 · Frontend resilience batch: sticky SSE health flag defeats poll fallback; per-consumer EventSources; partial fleet fetch clears errors; jobs candidates list unbounded
+### [~] P2-9 · Frontend resilience batch: sticky SSE health flag defeats poll fallback; per-consumer EventSources; partial fleet fetch clears errors; jobs candidates list unbounded
 
 **Area:** frontend/backend · **Type:** bug
 
@@ -433,7 +455,7 @@ is unattributed without `--auth-header` (and spoofable without
 
 ## P3 — polish / follow-ups
 
-### P3-1 · Terminology and copy cleanup: "fleet" leftovers, internal spec jargon, four names for failure grouping
+### [~] P3-1 · Terminology and copy cleanup: "fleet" leftovers, internal spec jargon, four names for failure grouping
 
 **Area:** product · **Type:** polish
 
@@ -451,7 +473,7 @@ is unattributed without `--auth-header` (and spoofable without
   clusters" — with subtly different semantics (`error~"prefix"` vs indexed
   signature), so counts can't be sanity-checked against each other.
 
-### P3-2 · Discoverability: keyboard model invisible; flag-gated features vanish without a trace; saved views unmanageable; empty first-run gives no onboarding path
+### [x] P3-2 · Discoverability: keyboard model invisible; flag-gated features vanish without a trace; saved views unmanageable; empty first-run gives no onboarding path
 
 **Area:** product · **Type:** gap
 
@@ -473,7 +495,7 @@ is unattributed without `--auth-header` (and spoofable without
   explanation (deliberate, `handler.go:695-696`); `/api/queue_stats` has no
   UI caller left (dead surface).
 
-### P3-3 · Subsystem data-honesty batch (stats/observe)
+### [~] P3-3 · Subsystem data-honesty batch (stats/observe)
 
 **Area:** backend · **Type:** polish
 
@@ -492,7 +514,7 @@ is unattributed without `--auth-header` (and spoofable without
   with the summary-HASH namespace (`asynqmon:obs:sum:<id>`) → WRONGTYPE,
   records for both tasks silently dropped.
 
-### P3-4 · Frontend polish batch
+### [x] P3-4 · Frontend polish batch
 
 **Area:** frontend · **Type:** polish
 
@@ -515,7 +537,7 @@ is unattributed without `--auth-header` (and spoofable without
 - `TaskDrawer.tsx:346-356`: copy-feedback `setTimeout`s lack cleanup; can
   flash the previous task's "copied" state after switching tasks.
 
-### P3-5 · Metrics/validation odds and ends
+### [x] P3-5 · Metrics/validation odds and ends
 
 **Area:** backend · **Type:** polish
 
