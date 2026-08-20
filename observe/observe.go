@@ -35,7 +35,7 @@
 //
 // Records live in asynqmon-owned keys, sized and expiring by design:
 //
-//	asynqmon:obs:<queue>:<task_id>      LIST of per-attempt JSON records,
+//	asynqmon:obs:att:<queue>:<task_id>  LIST of per-attempt JSON records,
 //	                                    newest first, LTRIMmed to the
 //	                                    attempt cap (default 30)
 //	asynqmon:obs:sum:<queue>:<task_id>  HASH summary: first_seen,
@@ -69,7 +69,7 @@ import (
 
 const (
 	// DefaultKeyPrefix is the key namespace the bundled asynqmon dashboard
-	// reads. All observe keys live under it: "<prefix><queue>:<task_id>"
+	// reads. All observe keys live under it: "<prefix>att:<queue>:<task_id>"
 	// (attempts) and "<prefix>sum:<queue>:<task_id>" (summary).
 	DefaultKeyPrefix = "asynqmon:obs:"
 
@@ -104,8 +104,13 @@ type AttemptRecord struct {
 }
 
 // AttemptsKey returns the Redis LIST key holding a task's attempt records.
+// A fixed "att" discriminator segment keeps the namespace disjoint from
+// SummaryKey's "sum" segment: attempts used to live directly under the
+// prefix, so a queue literally named "sum" (with a custom task id) could
+// collide an attempt LIST with a summary HASH — WRONGTYPE on the write
+// pipeline, both tasks' records silently dropped.
 func AttemptsKey(prefix, queue, taskID string) string {
-	return prefix + queue + ":" + taskID
+	return prefix + "att:" + queue + ":" + taskID
 }
 
 // SummaryKey returns the Redis HASH key holding a task's run summary.

@@ -416,7 +416,7 @@ worker `host:pid`, and the task's queue/id/type. A small summary hash tracks
 `first_seen`, `total_attempts`, `last_duration_ms` and `total_busy_ms`.
 
 **Bounds.** Records live in asynqmon-owned keys
-(`asynqmon:obs:<queue>:<task_id>`), trimmed to the last 30 attempts and
+(`asynqmon:obs:att:<queue>:<task_id>`), trimmed to the last 30 attempts and
 expiring 7 days after the last write — tune with `observe.WithAttemptCap`,
 `observe.WithTTL` and `observe.WithKeyPrefix`. Writes are best-effort: a
 recording failure never fails or delays the task (dropped writes are counted;

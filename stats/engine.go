@@ -712,7 +712,20 @@ func (e *Engine) sweep(ctx context.Context) error {
 			if s, ok := snaps[q]; ok {
 				merged[q] = s
 			} else if p, ok := prev[q]; ok {
-				merged[q] = p
+				if p.Consumers != consumers[q] {
+					// Consumer counts are rebuilt from Servers() every sweep
+					// at zero extra Redis cost, so carried-forward rows get
+					// the live count: leaving the stale one made sev-5
+					// NO_CONSUMERS onset/clear lag a full rotation for cold
+					// queues (minutes at tier 3) during total worker outages
+					// and recoveries alike. Copy-on-write: prev rows are
+					// shared with the last published snapshot.
+					cp := *p
+					cp.Consumers = consumers[q]
+					merged[q] = &cp
+				} else {
+					merged[q] = p
+				}
 			}
 		}
 	}
