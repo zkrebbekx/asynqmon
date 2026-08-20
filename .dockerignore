@@ -14,3 +14,7 @@ LICENSE
 .git/
 .github/
 **/node_modules/
+# The committed embedded UI (for go:embed outside Docker): the image builds
+# its own fresh bundle, and COPY merging directories would let stale
+# content-hashed chunks from a drifted commit survive into the binary.
+ui/build/

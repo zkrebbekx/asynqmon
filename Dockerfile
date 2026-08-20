@@ -1,5 +1,5 @@
 #
-# First stage: 
+# First stage:
 # Building a frontend.
 #
 
@@ -15,15 +15,24 @@ WORKDIR /static
 # Copy only ./ui folder to the working directory.
 COPY ui .
 
+# The committed ui/build (embedded by the Go binary for non-Docker builds) is
+# excluded via .dockerignore; a directory COPY *merges*, so letting it in
+# would leave stale content-hashed chunks alongside the fresh bundle below.
 # Install dependencies from the lockfile and build the Vite bundle (-> ./build).
 RUN npm ci && npm run build
 
 #
-# Second stage: 
+# Second stage:
 # Building a backend.
 #
 
-FROM --platform=$BUILDPLATFORM golang:1.21-alpine AS backend
+FROM --platform=$BUILDPLATFORM golang:1.25-alpine AS backend
+
+# CA bundle for the final scratch image: the binary dials TLS Redis
+# (--redis-tls / rediss:// URLs) and HTTPS Prometheus (--prometheus-addr),
+# and scratch ships no root CAs — without this every documented TLS feature
+# fails x509 verification and pushes users toward --redis-insecure-tls.
+RUN apk add --no-cache ca-certificates
 
 # Move to a working directory (/build).
 WORKDIR /build
@@ -52,14 +61,21 @@ ENV CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH}
 RUN go build -ldflags="-s -w" -o asynqmon ./cmd/asynqmon
 
 #
-# Third stage: 
+# Third stage:
 # Creating and running a new scratch container with the backend binary.
 #
 
 FROM scratch
 
+# Root CAs so TLS Redis / HTTPS Prometheus verification works (see above).
+COPY --from=backend ["/etc/ssl/certs/ca-certificates.crt", "/etc/ssl/certs/ca-certificates.crt"]
+
 # Copy binary from /build to the root folder of the scratch container.
 COPY --from=backend ["/build/asynqmon", "/"]
+
+# Run unprivileged (matches the Helm chart's runAsUser; plain `docker run`
+# used to get uid 0). 65534 = nobody.
+USER 65534:65534
 
 # Command to run when starting the container.
 ENTRYPOINT ["/asynqmon"]
