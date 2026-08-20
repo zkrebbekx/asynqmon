@@ -24,7 +24,7 @@ import {
   getErrorSignature,
   listErrorSignatures,
 } from "../api-errors";
-import { JobVerb } from "../api";
+import { JobMutationVerb } from "../api";
 import { paths } from "../paths";
 import { timeAgo, toErrorString } from "../utils";
 import {
@@ -146,7 +146,7 @@ function SignatureDetail({
   onVerb,
 }: {
   detail: GetErrorSignatureResponse;
-  onVerb: (verb: JobVerb, scope: BulkJobScope) => void;
+  onVerb: (verb: JobMutationVerb, scope: BulkJobScope) => void;
 }) {
   const [scopeState, setScopeState] = useState<SigScopeState>("retry");
   const row = detail.signature;
@@ -353,7 +353,7 @@ export default function ErrorsView() {
   const [loading, setLoading] = useState(true);
 
   // Bulk-verb modal state (§4.3 flow, shared machinery).
-  const [job, setJob] = useState<{ verb: JobVerb; scope: BulkJobScope } | null>(null);
+  const [job, setJob] = useState<{ verb: JobMutationVerb; scope: BulkJobScope } | null>(null);
 
   const fetchList = useCallback(async () => {
     try {

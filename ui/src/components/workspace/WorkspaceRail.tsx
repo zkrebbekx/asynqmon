@@ -8,7 +8,7 @@
 import { ReactNode } from "react";
 import { Link } from "react-router-dom";
 import prettyBytes from "pretty-bytes";
-import type { JobVerb } from "../../api";
+import type { JobMutationVerb } from "../../api";
 import type {
   CoverageRow,
   PendingWaitSampleResponse,
@@ -41,7 +41,7 @@ interface Props {
   retryHist: RetryHistogramResponse | null;
   waitSample: PendingWaitSampleResponse | null;
   memory: MemorySample;
-  onClusterVerb: (verb: JobVerb, state: "retry" | "archived", signature: string) => void;
+  onClusterVerb: (verb: JobMutationVerb, state: "retry" | "archived", signature: string) => void;
 }
 
 function Panel({ title, chip, children }: { title: ReactNode; chip?: ReactNode; children: ReactNode }) {

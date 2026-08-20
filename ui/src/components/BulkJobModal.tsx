@@ -11,7 +11,7 @@ import { Link } from "react-router-dom";
 import { toast } from "sonner";
 import { AlertTriangle } from "lucide-react";
 import * as api from "../api";
-import { JobDetail, JobInfo, JobVerb } from "../api";
+import { JobDetail, JobInfo, JobMutationVerb } from "../api";
 import { paths } from "../paths";
 import {
   DEFAULT_THROTTLE,
@@ -45,21 +45,21 @@ export interface BulkJobScope {
 
 interface Props {
   open: boolean;
-  verb: JobVerb;
+  verb: JobMutationVerb;
   scope: BulkJobScope;
   onClose: () => void;
   // Called after execution is accepted (job handed to the runner).
   onStarted?: (jobId: string) => void;
 }
 
-const verbTitles: Record<JobVerb, string> = {
+const verbTitles: Record<JobMutationVerb, string> = {
   run: "Bulk run — paced re-drain",
   archive: "Bulk archive — recoverable",
   delete: "Bulk delete — gone forever, not recoverable",
   cancel: "Bulk cancel — cooperative signal",
 };
 
-const verbChipClass: Record<JobVerb, string> = {
+const verbChipClass: Record<JobMutationVerb, string> = {
   run: "bg-[var(--fc-acc-bg)] text-[var(--fc-acc)]",
   archive: "bg-[var(--fc-acc-bg)] text-[var(--fc-acc)]",
   delete: "bg-[var(--fc-crit-bg)] text-[var(--fc-crit)]",

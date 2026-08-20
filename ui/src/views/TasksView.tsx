@@ -16,7 +16,7 @@ import { useLocation, useNavigate, useParams } from "react-router-dom";
 import { Search, AlertTriangle } from "lucide-react";
 import { AppState } from "../store";
 import * as api from "../api";
-import { DailyStat, JobVerb, TaskInfo } from "../api";
+import { DailyStat, JobMutationVerb, TaskInfo } from "../api";
 import {
   CoverageRow,
   FleetQueueRow,
@@ -73,7 +73,7 @@ const TAB_LABELS: Record<WorkspaceTab, string> = {
 };
 
 interface BulkTarget {
-  verb: JobVerb;
+  verb: JobMutationVerb;
   state: string;
   aql?: string;
 }
@@ -271,7 +271,7 @@ export default function TasksView() {
 
   // ---------- bulk-job modal (§4.3, pre-scoped to this queue) ----------
   const [bulk, setBulk] = useState<BulkTarget | null>(null);
-  const onClusterVerb = (verb: JobVerb, state: "retry" | "archived", signature: string) =>
+  const onClusterVerb = (verb: JobMutationVerb, state: "retry" | "archived", signature: string) =>
     setBulk({ verb, state, aql: `error~${quoteAqlValue(signature)}` });
 
   const countLabel = (t: WorkspaceTab): string => {
