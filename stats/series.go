@@ -355,14 +355,26 @@ type queueDeltas struct {
 //   - same UTC date: delta = cur − prev; a negative diff (counter deleted /
 //     restarted) degrades to cur — the counter counts from zero again.
 //   - date rolled over: delta = cur (today's counter starts at zero at UTC
-//     midnight, so cur IS the movement since the roll).
-func counterDelta(prevDate string, prev int64, today string, cur int64) int64 {
+//     midnight, so cur IS the movement since the roll) — PLUS the recovered
+//     tail of the previous date when the caller could read that day's final
+//     counter value (final − prev): without it, everything a cold queue
+//     processed between its last pre-midnight visit and midnight was
+//     attributed to neither day, so fleet delta series systematically
+//     under-reported around 00:00 UTC.
+func counterDelta(prevDate string, prev int64, today string, cur int64, prevFinal int64, haveFinal bool) int64 {
 	if prevDate == today {
 		d := cur - prev
 		if d < 0 {
 			return cur
 		}
 		return d
+	}
+	if haveFinal {
+		tail := prevFinal - prev
+		if tail < 0 {
+			tail = 0 // counter deleted/restarted on the old day
+		}
+		return tail + cur
 	}
 	return cur
 }
@@ -461,14 +473,21 @@ func newSeriesSampler(rc redis.UniversalClient, queueCeiling, flushCap int) *ser
 // slot should accumulate. universe is the full current fleet: only queues
 // gone from the fleet are pruned from the counter memory (pruning by snaps
 // would wipe every cold queue's memory every tick).
-func (s *seriesSampler) computeDeltas(now time.Time, snaps map[string]*QueueSnapshot, universe map[string]bool) map[string]queueDeltas {
+// finals carries the previous date's FINAL counter values for queues whose
+// observation is rolling over, keyed by queue: [processed, failed]. Read by
+// the caller (2 GETs per rolling queue, amortized to once per queue per
+// day); absent entries degrade to the no-recovery behavior. Only the prev
+// observation's own date is recovered — full days between visits (multi-day
+// gaps) stay unattributed.
+func (s *seriesSampler) computeDeltas(now time.Time, snaps map[string]*QueueSnapshot, universe map[string]bool, finals map[string][2]int64) map[string]queueDeltas {
 	today := now.UTC().Format("2006-01-02")
 	out := make(map[string]queueDeltas, len(snaps))
 	for q, snap := range snaps {
 		if p, seen := s.prev[q]; seen {
+			fin, haveFin := finals[q]
 			out[q] = queueDeltas{
-				processed: counterDelta(p.date, p.processed, today, snap.ProcessedToday),
-				failed:    counterDelta(p.date, p.failed, today, snap.FailedToday),
+				processed: counterDelta(p.date, p.processed, today, snap.ProcessedToday, fin[0], haveFin),
+				failed:    counterDelta(p.date, p.failed, today, snap.FailedToday, fin[1], haveFin),
 				ok:        true,
 			}
 		}
@@ -606,7 +625,53 @@ func (s *seriesSampler) sample(ctx context.Context, now time.Time, snaps map[str
 		s.sinceSet = true
 	}
 
-	deltas := s.computeDeltas(now, snaps, universe)
+	// Rollover tail recovery: queues whose previous counter observation is
+	// from an earlier UTC date get the OLD date's final counter values read
+	// back so the midnight-crossing delta includes the tail (2 GETs per
+	// rolling queue, amortized to once per queue per day — the reads count
+	// against the sweep budget like everything else).
+	today := now.UTC().Format("2006-01-02")
+	var rollQ []string
+	for q := range snaps {
+		if p, seen := s.prev[q]; seen && p.date != today {
+			rollQ = append(rollQ, q)
+		}
+	}
+	finals := make(map[string][2]int64, len(rollQ))
+	if len(rollQ) > 0 {
+		sort.Strings(rollQ)
+		pipe := s.rc.Pipeline()
+		type finCmds struct{ p, f *redis.StringCmd }
+		cmds := make([]finCmds, len(rollQ))
+		for i, q := range rollQ {
+			d := s.prev[q].date
+			cmds[i] = finCmds{
+				p: pipe.Get(ctx, counterKeyForDate(q, "processed", d)),
+				f: pipe.Get(ctx, counterKeyForDate(q, "failed", d)),
+			}
+			reads += 2
+		}
+		if _, err := pipe.Exec(ctx); err == nil || err == redis.Nil {
+			for i, q := range rollQ {
+				var fin [2]int64
+				have := false
+				if v, err := cmds[i].p.Result(); err == nil {
+					fin[0], _ = strconv.ParseInt(v, 10, 64)
+					have = true
+				}
+				if v, err := cmds[i].f.Result(); err == nil {
+					fin[1], _ = strconv.ParseInt(v, 10, 64)
+					have = true
+				}
+				if have {
+					finals[q] = fin
+				}
+			}
+		}
+		// A failed read degrades to the old no-recovery behavior.
+	}
+
+	deltas := s.computeDeltas(now, snaps, universe, finals)
 	samples := s.buildSamples(snaps, deltas, fleet, servers, tick)
 
 	var flushes []flushOp

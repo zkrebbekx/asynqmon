@@ -268,16 +268,22 @@ func TestSeriesDayMerge(t *testing.T) {
 func TestCounterDeltaRules(t *testing.T) {
 	Convey("Given the §5.8 delta rules over daily counters", t, func() {
 		Convey("Then a same-day increase is the difference", func() {
-			So(counterDelta("2026-07-25", 100, "2026-07-25", 130), ShouldEqual, 30)
+			So(counterDelta("2026-07-25", 100, "2026-07-25", 130, 0, false), ShouldEqual, 30)
 		})
 		Convey("Then a same-day zero movement is zero (a real sample, distinct from no-sample)", func() {
-			So(counterDelta("2026-07-25", 100, "2026-07-25", 100), ShouldEqual, 0)
+			So(counterDelta("2026-07-25", 100, "2026-07-25", 100, 0, false), ShouldEqual, 0)
 		})
 		Convey("Then a same-day negative diff degrades to the current value (counter deleted/reset)", func() {
-			So(counterDelta("2026-07-25", 100, "2026-07-25", 8), ShouldEqual, 8)
+			So(counterDelta("2026-07-25", 100, "2026-07-25", 8, 0, false), ShouldEqual, 8)
 		})
 		Convey("Then a UTC-midnight rollover reports today's counter verbatim", func() {
-			So(counterDelta("2026-07-24", 5000, "2026-07-25", 12), ShouldEqual, 12)
+			So(counterDelta("2026-07-24", 5000, "2026-07-25", 12, 0, false), ShouldEqual, 12)
+		})
+		Convey("A rollover with the old day's final counter recovers the tail", func() {
+			// prev=5000 at last visit, day ended at 5040: 40 lost + 12 today.
+			So(counterDelta("2026-07-24", 5000, "2026-07-25", 12, 5040, true), ShouldEqual, 52)
+			// Counter restarted on the old day: tail clamps to zero.
+			So(counterDelta("2026-07-24", 5000, "2026-07-25", 12, 3, true), ShouldEqual, 12)
 		})
 	})
 }
@@ -294,18 +300,18 @@ func TestSamplerDeltaLifecycle(t *testing.T) {
 		}
 
 		Convey("Then the FIRST observation yields no delta — no-sample, never zero", func() {
-			d := s.computeDeltas(day1, snaps(100, 10), map[string]bool{"q1": true})
+			d := s.computeDeltas(day1, snaps(100, 10), map[string]bool{"q1": true}, nil)
 			So(d, ShouldBeEmpty)
 
 			Convey("And the second observation yields the movement", func() {
-				d := s.computeDeltas(day1.Add(5*time.Second), snaps(130, 12), map[string]bool{"q1": true})
+				d := s.computeDeltas(day1.Add(5*time.Second), snaps(130, 12), map[string]bool{"q1": true}, nil)
 				So(d["q1"].ok, ShouldBeTrue)
 				So(d["q1"].processed, ShouldEqual, 30)
 				So(d["q1"].failed, ShouldEqual, 2)
 
 				Convey("And a sweep across UTC midnight uses the fresh counter verbatim", func() {
 					day2 := time.Date(2026, 7, 25, 0, 0, 5, 0, time.UTC)
-					d := s.computeDeltas(day2, snaps(7, 3), map[string]bool{"q1": true})
+					d := s.computeDeltas(day2, snaps(7, 3), map[string]bool{"q1": true}, nil)
 					So(d["q1"].ok, ShouldBeTrue)
 					So(d["q1"].processed, ShouldEqual, 7)
 					So(d["q1"].failed, ShouldEqual, 3)
@@ -314,8 +320,8 @@ func TestSamplerDeltaLifecycle(t *testing.T) {
 		})
 
 		Convey("Then a deleted queue's previous counters are pruned (no ghost deltas)", func() {
-			s.computeDeltas(day1, snaps(100, 10), map[string]bool{"q1": true})
-			s.computeDeltas(day1.Add(5*time.Second), map[string]*QueueSnapshot{}, map[string]bool{})
+			s.computeDeltas(day1, snaps(100, 10), map[string]bool{"q1": true}, nil)
+			s.computeDeltas(day1.Add(5*time.Second), map[string]*QueueSnapshot{}, map[string]bool{}, nil)
 			So(s.prev, ShouldBeEmpty)
 		})
 	})

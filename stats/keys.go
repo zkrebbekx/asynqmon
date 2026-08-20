@@ -156,3 +156,11 @@ func schedSnapshotKey(stableKey string) string { return schedSnapshotPrefix + st
 
 // queueCacheKey returns the cache HASH key for the given queue.
 func queueCacheKey(qname string) string { return queueCachePrefix + qname }
+
+// counterKeyForDate builds a daily counter key ("processed"/"failed") for an
+// already-formatted UTC date string — used by the series sampler's midnight
+// rollover recovery, where the date comes from a stored observation rather
+// than a time.Time.
+func counterKeyForDate(qname, kind, date string) string {
+	return fmt.Sprintf("%s%s:%s", queueKeyPrefix(qname), kind, date)
+}
