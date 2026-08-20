@@ -417,10 +417,12 @@ func (s *Store) RequestCancel(ctx context.Context, id string) (*Job, error) {
 	if j.State.IsTerminal() {
 		return nil, fmt.Errorf("%w: state=%s", ErrWrongState, j.State)
 	}
-	if j.State == StatePreviewReady && j.Phase == PhasePreview {
-		// No runner is working a preview_ready job — finalize here.
+	if (j.State == StatePreviewReady && j.Phase == PhasePreview) || j.State == StatePaused {
+		// No runner is working a preview_ready or paused job (paused jobs are
+		// unclaimed — see claimableState) — finalize here so the cancel does
+		// not wait for a claimer that will never come.
 		if err := s.rc.HSet(ctx, jobKey(id),
-			"state", string(StateCanceled), "finished_at", fmtTime(time.Now())).Err(); err != nil {
+			"state", string(StateCanceled), "finished_at", fmtTime(time.Now()), "ctl", "").Err(); err != nil {
 			return nil, err
 		}
 		return s.getAndPublish(ctx, id)

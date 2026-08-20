@@ -649,3 +649,100 @@ func TestJobJSONContract(t *testing.T) {
 		})
 	})
 }
+
+// ----------------------------------------------------------------------------
+// Pause semantics (review P1-4): a paused job is parked UNCLAIMED — no
+// replica may keep enumerating it — resume continues from the cursor, and
+// cancel-while-paused finalizes without waiting for a claimer.
+// ----------------------------------------------------------------------------
+
+func TestBulkJobPauseParksUnclaimed(t *testing.T) {
+	env := newJobsTestEnv(t)
+	// Deliberately slow preview (1 task per page) so the pause lands mid-scan.
+	runner := jobs.NewRunner(jobs.Config{
+		RedisClient:  env.rc,
+		Inspector:    env.insp,
+		PollInterval: 25 * time.Millisecond,
+		PreviewBatch: 1,
+		PreviewSleep: 20 * time.Millisecond,
+		Logf:         t.Logf,
+	})
+	runner.Start(context.Background())
+	t.Cleanup(runner.Stop)
+	router := env.newRouter(Options{})
+
+	seedPending(t, env, "pausectl", "x", `{}`, 50)
+
+	var created struct {
+		ID string `json:"id"`
+	}
+	doJSON(t, router, "POST", "/api/jobs", map[string]interface{}{
+		"verb":   "archive",
+		"scope":  map[string]interface{}{"queue": "pausectl", "state": "pending"},
+		"reason": "pause parking test",
+	}, &created)
+	awaitJob(t, env.store, created.ID, "previewing with progress",
+		func(j *jobs.Job) bool { return j.State == jobs.StatePreviewing && j.Counts.Scanned > 0 })
+
+	wPause := doJSON(t, router, "POST", "/api/jobs/"+created.ID+"/pause", nil, nil)
+	paused := awaitJob(t, env.store, created.ID, "paused",
+		func(j *jobs.Job) bool { return j.State == jobs.StatePaused })
+	scannedAtPause := paused.Counts.Scanned
+
+	// Give the claim loop several ticks: a regression re-claims the paused
+	// job and keeps scanning while the UI says "paused".
+	time.Sleep(300 * time.Millisecond)
+	after, err := env.store.Get(context.Background(), created.ID)
+	if err != nil {
+		t.Fatalf("re-reading paused job: %v", err)
+	}
+
+	wResume := doJSON(t, router, "POST", "/api/jobs/"+created.ID+"/resume", nil, nil)
+	finished := awaitJob(t, env.store, created.ID, "preview complete after resume",
+		func(j *jobs.Job) bool { return j.PreviewComplete })
+
+	Convey("Given a previewing job that was paused mid-scan", t, func() {
+		Convey("The pause was accepted and honored", func() {
+			So(wPause.Code, ShouldEqual, http.StatusOK)
+			So(paused.State, ShouldEqual, jobs.StatePaused)
+		})
+		Convey("While paused, no replica keeps enumerating it", func() {
+			So(after.State, ShouldEqual, jobs.StatePaused)
+			So(after.Counts.Scanned, ShouldEqual, scannedAtPause)
+		})
+		Convey("Resume continues from the cursor to a complete preview", func() {
+			So(wResume.Code, ShouldEqual, http.StatusOK)
+			So(finished.Counts.Scanned, ShouldEqual, int64(50))
+			So(finished.Counts.Candidates, ShouldEqual, int64(50))
+		})
+	})
+
+	// Cancel-while-paused: paused jobs are unclaimed, so the cancel must
+	// finalize store-side instead of waiting for a claimer that never comes.
+	var created2 struct {
+		ID string `json:"id"`
+	}
+	doJSON(t, router, "POST", "/api/jobs", map[string]interface{}{
+		"verb":   "archive",
+		"scope":  map[string]interface{}{"queue": "pausectl", "state": "pending"},
+		"reason": "cancel while paused",
+	}, &created2)
+	awaitJob(t, env.store, created2.ID, "previewing with progress",
+		func(j *jobs.Job) bool { return j.State == jobs.StatePreviewing && j.Counts.Scanned > 0 })
+	doJSON(t, router, "POST", "/api/jobs/"+created2.ID+"/pause", nil, nil)
+	awaitJob(t, env.store, created2.ID, "paused",
+		func(j *jobs.Job) bool { return j.State == jobs.StatePaused })
+	var canceled2 struct {
+		State      string `json:"state"`
+		FinishedAt string `json:"finished_at"`
+	}
+	wCancel2 := doJSON(t, router, "POST", "/api/jobs/"+created2.ID+"/cancel", nil, &canceled2)
+
+	Convey("Given a paused (unclaimed) job that is canceled", t, func() {
+		Convey("It finalizes immediately with a finish time", func() {
+			So(wCancel2.Code, ShouldEqual, http.StatusOK)
+			So(canceled2.State, ShouldEqual, "canceled")
+			So(canceled2.FinishedAt, ShouldNotBeEmpty)
+		})
+	})
+}
