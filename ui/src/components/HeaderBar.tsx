@@ -40,9 +40,11 @@ function useBreadcrumbs(): Crumb[] {
   const sections: Array<[string, string]> = [
     [p.QUEUES, "Queues"],
     [p.TASKS, "Tasks"],
+    [p.ERRORS, "Errors"],
     [p.SERVERS, "Workers"],
     [p.SCHEDULERS, "Schedulers"],
     [p.OPS, "Operations"],
+    [p.HYGIENE, "Hygiene"],
     [p.REDIS, "Redis"],
     [p.SETTINGS, "Settings"],
     [p.QUEUE_METRICS, "Metrics"],

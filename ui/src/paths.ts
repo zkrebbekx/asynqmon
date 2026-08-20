@@ -19,7 +19,10 @@ export const paths = () => ({
  **************************************************************/
 
 export function queueDetailsPath(qname: string, taskStatus?: string): string {
-  const path = paths().QUEUE_DETAILS.replace(":qname", qname);
+  // Encode: queue names may contain slashes/percent signs (urlstate.ts
+  // deliberately supports them); unencoded they can't match the
+  // single-segment :qname route and 404 from directory row clicks.
+  const path = paths().QUEUE_DETAILS.replace(":qname", encodeURIComponent(qname));
   if (taskStatus) {
     return `${path}?status=${taskStatus}`;
   }

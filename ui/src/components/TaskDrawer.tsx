@@ -348,16 +348,30 @@ export default function TaskDrawer({ peek, resultList, onClose, onPeek, onPivot 
     };
   }, [tab, corr, flow, flowLoading]);
 
+  // Timer refs so the "copied ✓" flash is cleared on unmount and never
+  // carries over to the next task after a fast [ / ] pivot.
+  const copyTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const payloadCopyTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => {
+    setCopied(false);
+    setPayloadCopied(false);
+    return () => {
+      if (copyTimer.current !== null) clearTimeout(copyTimer.current);
+      if (payloadCopyTimer.current !== null) clearTimeout(payloadCopyTimer.current);
+    };
+  }, [peekKey]);
   const copyId = () => {
     navigator.clipboard?.writeText(peek.id);
     setCopied(true);
-    setTimeout(() => setCopied(false), 1500);
+    if (copyTimer.current !== null) clearTimeout(copyTimer.current);
+    copyTimer.current = setTimeout(() => setCopied(false), 1500);
   };
   const copyPayload = () => {
     if (!task?.payload) return;
     navigator.clipboard?.writeText(task.payload);
     setPayloadCopied(true);
-    setTimeout(() => setPayloadCopied(false), 1500);
+    if (payloadCopyTimer.current !== null) clearTimeout(payloadCopyTimer.current);
+    payloadCopyTimer.current = setTimeout(() => setPayloadCopied(false), 1500);
   };
 
   // Server-side detail truncation note (upstream hibiken/asynqmon#301): the

@@ -461,8 +461,9 @@ export default function QueuesDirectoryView() {
               Queues directory unavailable
             </div>
             <p className="mx-auto mt-2 max-w-md text-xs text-[var(--fc-ink2)]">
-              The fleet stats endpoints are not answering ({error}). The stats engine
-              may not be deployed on this server yet.
+              The console's stats endpoints are not answering ({error}). The
+              background stats sweeper may be disabled on this server
+              (--disable-stats) or still starting up.
             </p>
           </div>
         ) : rows.length === 0 ? (

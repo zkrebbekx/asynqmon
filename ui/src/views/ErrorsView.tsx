@@ -177,8 +177,8 @@ function SignatureDetail({
         {/* Left: magnitude cross-check (count-over-time is phase 10) */}
         <div className="px-3.5 py-3">
           <MicroLabel className="mb-1.5">
-            occurrences — count-over-time arrives with ring buffers (phase 10); until then, the
-            counter cross-check:
+            occurrences — two independent counts of the same failures, so
+            you can sanity-check one against the other:
           </MicroLabel>
           <div className="space-y-1 text-xs">
             <div className="flex items-baseline gap-2">

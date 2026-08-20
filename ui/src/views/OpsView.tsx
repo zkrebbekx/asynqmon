@@ -424,7 +424,7 @@ export default function OpsView() {
     <PageShell
       className="space-y-4"
       title="Operations"
-      sub="every bulk verb is a reviewable, query-scoped background job — §4.3"
+      sub="every bulk verb is a reviewable, query-scoped background job: preview, execute, verify"
     >
       {error && (
         <Alert variant="destructive">
