@@ -142,3 +142,39 @@ func TestParseMetaFilters(t *testing.T) {
 		})
 	})
 }
+
+func TestPageBounds(t *testing.T) {
+	Convey("Given a result window", t, func() {
+		Convey("Normal pages slice as expected", func() {
+			s, e := pageBounds(50, 1, 20)
+			So(s, ShouldEqual, 0)
+			So(e, ShouldEqual, 20)
+			s, e = pageBounds(50, 3, 20)
+			So(s, ShouldEqual, 40)
+			So(e, ShouldEqual, 50)
+		})
+		Convey("Pages past the end clamp to an empty tail window", func() {
+			s, e := pageBounds(50, 4, 20)
+			So(s, ShouldEqual, 50)
+			So(e, ShouldEqual, 50)
+		})
+		Convey("Hostile page values cannot overflow into a negative start", func() {
+			// (page-1)*size would wrap negative with naive arithmetic and
+			// panic the slice expression (issue P1-1 in docs/review).
+			s, e := pageBounds(50, 4611686018427387904, 20)
+			So(s, ShouldEqual, 50)
+			So(e, ShouldEqual, 50)
+			s, e = pageBounds(0, 1<<62, 1<<62)
+			So(s, ShouldEqual, 0)
+			So(e, ShouldEqual, 0)
+		})
+		Convey("Degenerate inputs stay in range", func() {
+			s, e := pageBounds(5, 0, 20)
+			So(s, ShouldEqual, 0)
+			So(e, ShouldEqual, 5)
+			s, e = pageBounds(5, 1, 0)
+			So(s, ShouldEqual, 5)
+			So(e, ShouldEqual, 5)
+		})
+	})
+}

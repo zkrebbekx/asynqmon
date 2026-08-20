@@ -53,6 +53,24 @@ func clampMaxScan(n int) int {
 	return n
 }
 
+// pageBounds returns the [start, end) window for one result page, clamped to
+// [0, total]. The multiplication (page-1)*size can overflow for hostile page
+// values, so it only runs once page-1 is known to fit inside total/size.
+func pageBounds(total, page, size int) (int, int) {
+	if page < 1 {
+		page = 1
+	}
+	start := total
+	if size > 0 && page-1 <= total/size {
+		start = (page - 1) * size
+	}
+	end := start + size
+	if end > total || end < start {
+		end = total
+	}
+	return start, end
+}
+
 // searchableStates are the task states accepted by the search/facet/aggregate/
 // bulk-filtered endpoints.
 var searchableStates = map[string]bool{
@@ -375,14 +393,7 @@ func newSearchTasksHandlerFunc(inspector *asynq.Inspector, rc redis.UniversalCli
 		}
 
 		total := len(matches)
-		start := (page - 1) * size
-		if start > total {
-			start = total
-		}
-		end := start + size
-		if end > total {
-			end = total
-		}
+		start, end := pageBounds(total, page, size)
 		pageTasks := matches[start:end]
 		if pageTasks == nil {
 			pageTasks = make([]*searchTask, 0)
@@ -502,14 +513,7 @@ func serveAqlSearch(w http.ResponseWriter, r *http.Request, inspector *asynq.Ins
 	matches := out.matches
 	var pageTasks []*searchTask
 	if scanCursor == "" {
-		start := (page - 1) * size
-		if start > len(matches) {
-			start = len(matches)
-		}
-		end := start + size
-		if end > len(matches) {
-			end = len(matches)
-		}
+		start, end := pageBounds(len(matches), page, size)
 		pageTasks = matches[start:end]
 	} else {
 		pageTasks = matches
