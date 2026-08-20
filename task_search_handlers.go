@@ -151,8 +151,22 @@ func toSearchTask(ti *asynq.TaskInfo, pf PayloadFormatter) *searchTask {
 		NextProcessAt: fmtTime(ti.NextProcessAt),
 		LastFailedAt:  fmtTime(ti.LastFailedAt),
 		CompletedAt:   fmtTime(ti.CompletedAt),
-		rawPayload:    DefaultPayloadFormatter.FormatPayload(ti.Type, ti.Payload),
+		rawPayload:    searchablePayload(ti.Type, ti.Payload),
 	}
+}
+
+// searchablePayload is the text free-text/meta matching runs against: the
+// default formatter's output for printable payloads, but the raw bytes for
+// binary ones — the formatter's "non-printable bytes" placeholder used to be
+// matched instead, so q=non-printable matched every binary task and no real
+// byte content was searchable (the AQL path matches raw bytes; the two query
+// paths now agree).
+func searchablePayload(taskType string, payload []byte) string {
+	formatted := DefaultPayloadFormatter.FormatPayload(taskType, payload)
+	if formatted == "non-printable bytes" {
+		return string(payload)
+	}
+	return formatted
 }
 
 // taskMatchesSearch reports whether the task matches the free-text query
@@ -569,6 +583,13 @@ func newStateCountsHandlerFunc(inspector *asynq.Inspector, rc redis.UniversalCli
 	return func(w http.ResponseWriter, r *http.Request) {
 		qname := r.URL.Query().Get("queue")
 		if qname != "" && qname != "all" {
+			// LLEN/ZCARD on missing keys answer 0, so without this check a
+			// typoed ?queue= silently reported an all-zero state instead of
+			// the 404 every other per-queue endpoint returns.
+			if exists, err := rc.SIsMember(r.Context(), "asynq:queues", qname).Result(); err == nil && !exists {
+				writeErrorMsg(w, http.StatusNotFound, fmt.Sprintf("queue %q does not exist", qname))
+				return
+			}
 			counts, err := stateCountsForQueues(r.Context(), rc, inspector, []string{qname})
 			if err != nil {
 				writeError(w, errorStatus(err), err)

@@ -168,6 +168,7 @@ func newPutHygieneConfigHandlerFunc(rc redis.UniversalClient, store *jobs.Store)
 			return
 		}
 		var req putHygieneConfigRequest
+		r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodySize)
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			writeErrorMsg(w, http.StatusBadRequest, "invalid json: "+err.Error())
 			return

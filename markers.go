@@ -147,6 +147,7 @@ type createMarkerRequest struct {
 func newCreateMarkerHandlerFunc(store markerStore, audit *jobs.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req createMarkerRequest
+		r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodySize)
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			writeErrorMsg(w, http.StatusBadRequest, "invalid JSON body (want {\"label\": \"…\"})")
 			return

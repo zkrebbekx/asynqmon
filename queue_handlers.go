@@ -16,6 +16,11 @@ import (
 //   - http.Handler(s) for queue related endpoints
 // ****************************************************************************
 
+// queueInfoConcurrency bounds per-request fan-out on the legacy queue
+// endpoints (GetQueueInfo / History per queue) so a large fleet cannot turn
+// one dashboard poll into thousands of simultaneous Redis command bursts.
+const queueInfoConcurrency = 16
+
 func newListQueuesHandlerFunc(inspector *asynq.Inspector) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		qnames, err := inspector.Queues()
@@ -28,17 +33,22 @@ func newListQueuesHandlerFunc(inspector *asynq.Inspector) http.HandlerFunc {
 		// stable order across polls instead of reshuffling.
 		sort.Strings(qnames)
 		// GetQueueInfo does several redis calls (incl. MEMORY USAGE sampling) per
-		// queue; fetch queues concurrently so the homepage stays fast with many queues.
+		// queue; fetch queues concurrently so the homepage stays fast with many
+		// queues — but bounded: unbounded fan-out meant one homepage poll on a
+		// 2000-queue fleet fired 2000 simultaneous multi-command bursts.
 		snapshots := make([]*queueStateSnapshot, len(qnames))
 		var (
 			wg       sync.WaitGroup
 			mu       sync.Mutex
 			firstErr error
 		)
+		sem := make(chan struct{}, queueInfoConcurrency)
 		for i, qname := range qnames {
 			wg.Add(1)
 			go func(i int, qname string) {
 				defer wg.Done()
+				sem <- struct{}{}
+				defer func() { <-sem }()
 				qinfo, err := inspector.GetQueueInfo(qname)
 				if err != nil {
 					// A queue deleted mid-request is not an error for the listing.
@@ -147,16 +157,42 @@ func newListQueueStatsHandlerFunc(inspector *asynq.Inspector) http.HandlerFunc {
 		}
 		resp := listQueueStatsResponse{Stats: make(map[string][]*dailyStats)}
 		const numdays = 90 // Get stats for the last 90 days.
+		// History is ~numdays reads per queue; run queues concurrently but
+		// bounded (this endpoint used to issue O(queues × 90) reads strictly
+		// serially, and unbounded fan-out would be the opposite mistake).
+		var (
+			wg       sync.WaitGroup
+			mu       sync.Mutex
+			firstErr error
+		)
+		sem := make(chan struct{}, queueInfoConcurrency)
 		for _, qname := range qnames {
-			stats, err := inspector.History(qname, numdays)
-			if err != nil {
-				if errors.Is(err, asynq.ErrQueueNotFound) {
-					continue // queue deleted mid-request
+			wg.Add(1)
+			go func(qname string) {
+				defer wg.Done()
+				sem <- struct{}{}
+				defer func() { <-sem }()
+				stats, err := inspector.History(qname, numdays)
+				if err != nil {
+					if errors.Is(err, asynq.ErrQueueNotFound) {
+						return // queue deleted mid-request
+					}
+					mu.Lock()
+					if firstErr == nil {
+						firstErr = err
+					}
+					mu.Unlock()
+					return
 				}
-				writeError(w, errorStatus(err), err)
-				return
-			}
-			resp.Stats[qname] = toDailyStatsList(stats)
+				mu.Lock()
+				resp.Stats[qname] = toDailyStatsList(stats)
+				mu.Unlock()
+			}(qname)
+		}
+		wg.Wait()
+		if firstErr != nil {
+			writeError(w, errorStatus(firstErr), firstErr)
+			return
 		}
 		writeResponseJSON(w, resp)
 	}

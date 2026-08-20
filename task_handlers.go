@@ -89,24 +89,30 @@ func newCancelActiveTaskHandlerFunc(inspector *asynq.Inspector) http.HandlerFunc
 func newCancelAllActiveTasksHandlerFunc(inspector *asynq.Inspector) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		const batchSize = 100
-		page := 1
 		qname := mux.Vars(r)["qname"]
-		for {
+		// Snapshot every active task id FIRST, then cancel: paginating
+		// forward while cancels (and natural completions) shrink the list
+		// shifted later tasks into already-visited pages, so "cancel all"
+		// quietly missed a slice of a busy queue.
+		var ids []string
+		for page := 1; ; page++ {
 			tasks, err := inspector.ListActiveTasks(qname, asynq.Page(page), asynq.PageSize(batchSize))
 			if err != nil {
 				writeError(w, errorStatus(err), err)
 				return
 			}
 			for _, t := range tasks {
-				if err := inspector.CancelProcessing(t.ID); err != nil {
-					writeError(w, errorStatus(err), err)
-					return
-				}
+				ids = append(ids, t.ID)
 			}
 			if len(tasks) < batchSize {
 				break
 			}
-			page++
+		}
+		for _, id := range ids {
+			if err := inspector.CancelProcessing(id); err != nil {
+				writeError(w, errorStatus(err), err)
+				return
+			}
 		}
 		w.WriteHeader(http.StatusNoContent)
 	}

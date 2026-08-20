@@ -229,7 +229,7 @@ func toTaskInfo(info *asynq.TaskInfo, pf PayloadFormatter, rf ResultFormatter) *
 		Deadline:      formatTimeInRFC3339(info.Deadline),
 		NextProcessAt: formatTimeInRFC3339(info.NextProcessAt),
 		CompletedAt:   formatTimeInRFC3339(info.CompletedAt),
-		Result:        rf.FormatResult("", info.Result),
+		Result:        rf.FormatResult(info.Type, info.Result),
 		TTL:           int64(taskTTL(info).Seconds()),
 	}
 }
