@@ -54,12 +54,12 @@ func TestSeriesFlushSpread(t *testing.T) {
 		snaps := auxSnaps(4, t0)
 		tick := seriesTick{tier: 2, fleetSize: 100, hot: auxUniverse(snaps)}
 
-		_, _, err := s.sample(ctx, t0, snaps, auxUniverse(snaps), tick, fleet, nil)
+		_, _, err := s.sample(ctx, t0, snaps, auxUniverse(snaps), tick, fleet, nil, newSweeperFence(rc), 0)
 		So(err, ShouldBeNil)
 		So(s.pending, ShouldBeEmpty) // first observation only accumulates
 
 		Convey("When the sweep clock crosses a hot-ring slot boundary", func() {
-			_, _, err := s.sample(ctx, t0.Add(30*time.Second), snaps, auxUniverse(snaps), tick, fleet, nil)
+			_, _, err := s.sample(ctx, t0.Add(30*time.Second), snaps, auxUniverse(snaps), tick, fleet, nil, newSweeperFence(rc), 0)
 			So(err, ShouldBeNil)
 
 			// 7 fleet gauges + 4 queues × 5 gauges = 27 hot-ring keys flushed
@@ -73,7 +73,7 @@ func TestSeriesFlushSpread(t *testing.T) {
 				lens := []int{len(s.pending)}
 				for i := 0; i < 12 && len(s.pending) > 0; i++ {
 					at := t0.Add(30*time.Second + time.Duration(i+1)*time.Second)
-					_, _, err := s.sample(ctx, at, snaps, auxUniverse(snaps), tick, fleet, nil)
+					_, _, err := s.sample(ctx, at, snaps, auxUniverse(snaps), tick, fleet, nil, newSweeperFence(rc), 0)
 					So(err, ShouldBeNil)
 					lens = append(lens, len(s.pending))
 				}
@@ -115,16 +115,16 @@ func TestSeriesFlushSpread(t *testing.T) {
 		// fleetSize 1 keeps the valve tiny: max(8×cap, 8×fleetSize) = 16.
 		tick := seriesTick{tier: 2, fleetSize: 1, hot: auxUniverse(snaps)}
 
-		_, _, err := s.sample(ctx, t0, snaps, auxUniverse(snaps), tick, fleet, nil)
+		_, _, err := s.sample(ctx, t0, snaps, auxUniverse(snaps), tick, fleet, nil, newSweeperFence(rc), 0)
 		So(err, ShouldBeNil)
 
 		Convey("When the boundary queues 27 flushes against a 16-op valve", func() {
-			_, _, err := s.sample(ctx, t0.Add(30*time.Second), snaps, auxUniverse(snaps), tick, fleet, nil)
+			_, _, err := s.sample(ctx, t0.Add(30*time.Second), snaps, auxUniverse(snaps), tick, fleet, nil, newSweeperFence(rc), 0)
 			So(err, ShouldBeNil)
 
 			Convey("Then the excess past the valve drains immediately, the rest at the cap", func() {
 				So(len(s.pending), ShouldEqual, 16) // drained 27-16=11 > cap
-				_, _, err := s.sample(ctx, t0.Add(31*time.Second), snaps, auxUniverse(snaps), tick, fleet, nil)
+				_, _, err := s.sample(ctx, t0.Add(31*time.Second), snaps, auxUniverse(snaps), tick, fleet, nil, newSweeperFence(rc), 0)
 				So(err, ShouldBeNil)
 				So(len(s.pending), ShouldEqual, 14) // back to flat-cap pace
 			})
@@ -141,19 +141,19 @@ func TestSeriesFlushSpread(t *testing.T) {
 		snaps := auxSnaps(6, t0)
 		tick := seriesTick{tier: 2, fleetSize: 5000, hot: map[string]bool{}} // all cold → rollup-only
 
-		_, _, err := s.sample(ctx, t0, snaps, auxUniverse(snaps), tick, fleet, nil)
+		_, _, err := s.sample(ctx, t0, snaps, auxUniverse(snaps), tick, fleet, nil, newSweeperFence(rc), 0)
 		So(err, ShouldBeNil)
 		So(s.pending, ShouldBeEmpty)
 
 		Convey("When the queues are next visited after the hour rolls over", func() {
-			_, _, err := s.sample(ctx, t0.Add(time.Hour), snaps, auxUniverse(snaps), tick, fleet, nil)
+			_, _, err := s.sample(ctx, t0.Add(time.Hour), snaps, auxUniverse(snaps), tick, fleet, nil, newSweeperFence(rc), 0)
 			So(err, ShouldBeNil)
 
 			Convey("Then the wave queues up and drains at the flat cap per tick", func() {
 				So(len(s.pending), ShouldBeGreaterThan, 0)
 				prev := len(s.pending)
 				for i := 0; i < 20 && len(s.pending) > 0; i++ {
-					_, _, err := s.sample(ctx, t0.Add(time.Hour+time.Duration(i+1)*time.Second), snaps, auxUniverse(snaps), tick, fleet, nil)
+					_, _, err := s.sample(ctx, t0.Add(time.Hour+time.Duration(i+1)*time.Second), snaps, auxUniverse(snaps), tick, fleet, nil, newSweeperFence(rc), 0)
 					So(err, ShouldBeNil)
 					So(prev-len(s.pending), ShouldBeLessThanOrEqualTo, 3)
 					prev = len(s.pending)
@@ -185,11 +185,11 @@ func TestSeriesFlushSpread(t *testing.T) {
 		snaps := auxSnaps(4, t0)
 		tick := seriesTick{tier: 1, fleetSize: 4}
 
-		_, _, err := s.sample(ctx, t0, snaps, auxUniverse(snaps), tick, fleet, nil)
+		_, _, err := s.sample(ctx, t0, snaps, auxUniverse(snaps), tick, fleet, nil, newSweeperFence(rc), 0)
 		So(err, ShouldBeNil)
 
 		Convey("When the slot boundary crosses in tier 1", func() {
-			_, _, err := s.sample(ctx, t0.Add(30*time.Second), snaps, auxUniverse(snaps), tick, fleet, nil)
+			_, _, err := s.sample(ctx, t0.Add(30*time.Second), snaps, auxUniverse(snaps), tick, fleet, nil, newSweeperFence(rc), 0)
 			So(err, ShouldBeNil)
 
 			Convey("Then everything flushes immediately — the budget does not govern tier 1", func() {

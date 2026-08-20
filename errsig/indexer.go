@@ -354,6 +354,14 @@ type tailAccum struct {
 // off-lease only costs duplicate reads and idempotent merges).
 func (ix *Indexer) SweepTailNow(ctx context.Context) error {
 	now := time.Now()
+	// Capture the fencing token ONCE, up front. A lease lost mid-sweep zeroes
+	// ix.token, and reading it at write time would silently convert the
+	// fenced merge into an unfenced one — the exact stale-holder overwrite
+	// the fence exists to stop. With the captured token the CAS in
+	// leasefence.Exec rejects a superseded holder instead. An explicitly
+	// off-lease call (token 0 from the start — tests/tooling) keeps the
+	// documented unfenced *Now semantics.
+	token := ix.currentToken()
 
 	qnames, err := ix.rc.SMembers(ctx, allQueuesKey).Result()
 	if err != nil && !errors.Is(err, redis.Nil) {
@@ -406,7 +414,7 @@ func (ix *Indexer) SweepTailNow(ctx context.Context) error {
 		}
 	}
 
-	if err := ix.mergeAndWrite(ctx, now, agg, failedTotal, trimmed, newCursors); err != nil {
+	if err := ix.mergeAndWrite(ctx, now, token, agg, failedTotal, trimmed, newCursors); err != nil {
 		return err
 	}
 	return nil
@@ -491,7 +499,7 @@ func (ix *Indexer) tailQueue(ctx context.Context, q string, cur tailCursor, agg 
 // archived observations, rolls every signature's trend snapshot (untouched
 // signatures must still roll toward a flat delta, or a dead signature would
 // read "growing" forever), and writes back only what changed.
-func (ix *Indexer) mergeAndWrite(ctx context.Context, now time.Time, agg map[string]*tailAccum, failedTotal int64, trimmed []string, newCursors map[string]string) error {
+func (ix *Indexer) mergeAndWrite(ctx context.Context, now time.Time, token int64, agg map[string]*tailAccum, failedTotal int64, trimmed []string, newCursors map[string]string) error {
 	indexSigs, err := ix.rc.ZRange(ctx, indexKey, 0, -1).Result()
 	if err != nil && !errors.Is(err, redis.Nil) {
 		return fmt.Errorf("reading signature index: %w", err)
@@ -530,9 +538,9 @@ func (ix *Indexer) mergeAndWrite(ctx context.Context, now time.Time, agg map[str
 	}
 
 	// Fence-guarded batch (§5.13, phase 12): a superseded ex-holder's merge
-	// must never land over a newer holder's index. Token 0 (off-lease
+	// must never land over a newer holder's index — the token was captured
+	// at sweep start (see SweepTailNow). Token 0 (explicitly off-lease
 	// SweepTailNow — tests/tooling) writes unfenced by design.
-	token := ix.currentToken()
 	ttlMs := indexTTL.Milliseconds()
 	cmds := make([]leasefence.Cmd, 0, 6*len(writeSet)+8)
 	for sig := range writeSet {
@@ -639,6 +647,9 @@ type retryAccum struct {
 // which has no archived observations) is removed entirely.
 func (ix *Indexer) SampleRetryNow(ctx context.Context) error {
 	now := time.Now()
+	// Captured up front for the same reason as SweepTailNow: a lease lost
+	// mid-run must fail the fence CAS, not silently write unfenced.
+	token := ix.currentToken()
 
 	qnames, err := ix.rc.SMembers(ctx, allQueuesKey).Result()
 	if err != nil && !errors.Is(err, redis.Nil) {
@@ -713,9 +724,8 @@ func (ix *Indexer) SampleRetryNow(ctx context.Context) error {
 		return fmt.Errorf("reading signature hashes: %w", err)
 	}
 
-	// Fence-guarded batch (§5.13, phase 12); token 0 = off-lease
-	// SampleRetryNow, unfenced by design.
-	token := ix.currentToken()
+	// Fence-guarded batch (§5.13, phase 12); token captured at run start;
+	// token 0 = explicitly off-lease SampleRetryNow, unfenced by design.
 	ttlMs := indexTTL.Milliseconds()
 	cmds := make([]leasefence.Cmd, 0, 6*len(sigsList)+6)
 	var stillSampled []interface{}

@@ -6,11 +6,14 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/hibiken/asynq"
 	"github.com/redis/go-redis/v9"
+
+	"github.com/hibiken/asynqmon/internal/leasefence"
 )
 
 // ****************************************************************************
@@ -157,7 +160,7 @@ func StableKeyForAsynqEntry(e *asynq.SchedulerEntry) string {
 // GONE list plus the Redis command counts (SchedulerEntries goes through the
 // Inspector's own client and is not counted, matching how Servers() is
 // treated in the sweep budget).
-func (e *Engine) sweepSchedulers(ctx context.Context, now time.Time) (gone []SchedulerGoneObs, reads, writes int, err error) {
+func (e *Engine) sweepSchedulers(ctx context.Context, now time.Time, token int64) (gone []SchedulerGoneObs, reads, writes int, err error) {
 	live, err := e.insp.SchedulerEntries()
 	if err != nil {
 		return nil, reads, writes, err
@@ -179,7 +182,10 @@ func (e *Engine) sweepSchedulers(ctx context.Context, now time.Time) (gone []Sch
 		liveByKey[StableKeyForAsynqEntry(le)] = le
 	}
 
-	pipe := e.rc.Pipeline()
+	// Fence-guarded (§5.13): the upsert is a read-modify-write (FirstSeen /
+	// EntryIDs merge over the hashes read above), so a superseded ex-holder
+	// flushing a stale merge must be rejected, not silently accepted.
+	var cmds []leasefence.Cmd
 	for key, le := range liveByKey {
 		data := SchedulerEntryDataFromAsynq(le)
 		firstSeen := now
@@ -202,8 +208,8 @@ func (e *Engine) sweepSchedulers(ctx context.Context, now time.Time) (gone []Sch
 		if err != nil {
 			return nil, reads, writes, err
 		}
-		pipe.HSet(ctx, schedSnapshotKey(key), fields)
-		pipe.ZAdd(ctx, schedIndexKey, redis.Z{Score: float64(now.Unix()), Member: key})
+		cmds = append(cmds, hashArgs(schedSnapshotKey(key), fields))
+		cmds = append(cmds, leasefence.Cmd{"ZADD", schedIndexKey, strconv.FormatInt(now.Unix(), 10), key})
 		writes += 2
 	}
 
@@ -215,8 +221,8 @@ func (e *Engine) sweepSchedulers(ctx context.Context, now time.Time) (gone []Sch
 		age := now.Sub(snap.LastSeen)
 		switch {
 		case age > schedulerSnapshotHorizon:
-			pipe.Del(ctx, schedSnapshotKey(key))
-			pipe.ZRem(ctx, schedIndexKey, key)
+			cmds = append(cmds, leasefence.Cmd{"DEL", schedSnapshotKey(key)})
+			cmds = append(cmds, leasefence.Cmd{"ZREM", schedIndexKey, key})
 			writes += 2
 		case age > goneAfter:
 			gone = append(gone, SchedulerGoneObs{
@@ -227,9 +233,13 @@ func (e *Engine) sweepSchedulers(ctx context.Context, now time.Time) (gone []Sch
 			})
 		}
 	}
-	if writes > 0 {
-		if _, err := pipe.Exec(ctx); err != nil {
+	if len(cmds) > 0 {
+		ok, err := e.fence.Exec(ctx, token, cmds)
+		if err != nil {
 			return nil, reads, writes, err
+		}
+		if !ok {
+			return nil, reads, writes, ErrSuperseded
 		}
 	}
 

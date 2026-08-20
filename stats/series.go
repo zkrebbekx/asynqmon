@@ -5,11 +5,14 @@ import (
 	"encoding/binary"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/hibiken/asynq"
 	"github.com/redis/go-redis/v9"
+
+	"github.com/hibiken/asynqmon/internal/leasefence"
 )
 
 // ****************************************************************************
@@ -593,7 +596,7 @@ func (s *seriesSampler) feed(spec ringSpec, key, queue string, kind metricKind, 
 // queues at both resolutions, cold queues rollup-only (one flush per rotation
 // visit at most) — the old pre-governor note about tier-1-at-the-ceiling
 // exceeding the budget is resolved by the rotation itself.
-func (s *seriesSampler) sample(ctx context.Context, now time.Time, snaps map[string]*QueueSnapshot, universe map[string]bool, tick seriesTick, fleet *FleetSnapshot, servers []*asynq.ServerInfo) (reads, writes int, err error) {
+func (s *seriesSampler) sample(ctx context.Context, now time.Time, snaps map[string]*QueueSnapshot, universe map[string]bool, tick seriesTick, fleet *FleetSnapshot, servers []*asynq.ServerInfo, fence *leasefence.Fence, token int64) (reads, writes int, err error) {
 	// Anchor the learning clock exactly once (survives restarts/handovers).
 	if !s.sinceSet {
 		if err := s.rc.SetNX(ctx, seriesSinceKey, now.Unix(), 0).Err(); err != nil {
@@ -712,16 +715,22 @@ func (s *seriesSampler) sample(ctx context.Context, now time.Time, snaps map[str
 		}
 	}
 
-	pipe := s.rc.Pipeline()
+	// Fence-guarded (§5.13): these writes used to go through a plain
+	// pipeline guarded only by the in-process header cache, so a stalled
+	// ex-holder waking after a failover could rewind a ring's header
+	// (hiding the new holder's freshest slots) and stomp real slots with
+	// gap sentinels computed from its stale cache. The fence CAS rejects a
+	// superseded holder before any of that lands.
+	var cmds []leasefence.Cmd
 	for _, f := range batch {
 		h := s.headers[f.key]
 		switch {
 		case !h.ok:
 			// New key: one full-buffer SETRANGE (header + sentinels + value).
-			pipe.SetRange(ctx, f.key, 0, string(buildSeriesInit(f.spec, f.period, f.value)))
+			cmds = append(cmds, leasefence.Cmd{"SETRANGE", f.key, "0", string(buildSeriesInit(f.spec, f.period, f.value))})
 			writes++
 			s.headers[f.key] = seriesHeader{ok: true, first: f.period, last: f.period}
-			pipe.PExpire(ctx, f.key, f.spec.ttl)
+			cmds = append(cmds, leasefence.Cmd{"PEXPIRE", f.key, f.spec.ttl.Milliseconds()})
 			writes++
 			s.ttlAt[f.key] = now
 		case f.period <= h.last:
@@ -730,27 +739,34 @@ func (s *seriesSampler) sample(ctx context.Context, now time.Time, snaps map[str
 			continue
 		default:
 			for _, gr := range seriesGapRanges(f.spec, h.last, f.period) {
-				pipe.SetRange(ctx, f.key, gr.offset, string(sentinelBytes(gr.length)))
+				cmds = append(cmds, leasefence.Cmd{"SETRANGE", f.key, strconv.FormatInt(gr.offset, 10), string(sentinelBytes(gr.length))})
 				writes++
 			}
-			pipe.SetRange(ctx, f.key, 8, string(encodeLastPeriod(f.period)))
-			pipe.SetRange(ctx, f.key, seriesSlotOffset(seriesSlot(f.period, f.spec.slots)), string(encodeSlotValue(f.value)))
+			cmds = append(cmds, leasefence.Cmd{"SETRANGE", f.key, "8", string(encodeLastPeriod(f.period))})
+			cmds = append(cmds, leasefence.Cmd{"SETRANGE", f.key, strconv.FormatInt(seriesSlotOffset(seriesSlot(f.period, f.spec.slots)), 10), string(encodeSlotValue(f.value))})
 			writes += 2
 			s.headers[f.key] = seriesHeader{ok: true, first: h.first, last: f.period}
 			if now.Sub(s.ttlAt[f.key]) > f.spec.ttl/4 {
-				pipe.PExpire(ctx, f.key, f.spec.ttl)
+				cmds = append(cmds, leasefence.Cmd{"PEXPIRE", f.key, f.spec.ttl.Milliseconds()})
 				writes++
 				s.ttlAt[f.key] = now
 			}
 		}
 	}
-	if _, err := pipe.Exec(ctx); err != nil {
+	ok, err := fence.Exec(ctx, token, cmds)
+	if err != nil {
 		// Forget assumed headers so the next sweep re-probes instead of
 		// trusting writes that may not have landed.
 		for _, f := range batch {
 			delete(s.headers, f.key)
 		}
 		return reads, writes, fmt.Errorf("writing series flushes: %w", err)
+	}
+	if !ok {
+		for _, f := range batch {
+			delete(s.headers, f.key)
+		}
+		return reads, writes, ErrSuperseded
 	}
 	return reads, writes, nil
 }
