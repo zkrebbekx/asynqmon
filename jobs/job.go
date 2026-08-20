@@ -33,6 +33,12 @@ const (
 	VerbArchive Verb = "archive"
 	VerbDelete  Verb = "delete"
 	VerbCancel  Verb = "cancel"
+	// VerbCount is preview-only: the job enumerates its scope to a complete,
+	// exact count and can never be executed (RequestExecute refuses it).
+	// Exists so scan-to-completion counting is honest in the Operations
+	// screen and the audit log, instead of masquerading as the least
+	// destructive mutation the state happens to support.
+	VerbCount Verb = "count"
 )
 
 // Phase is which half of the §4.3 flow the job is in. Every job is created in
@@ -131,13 +137,13 @@ var scopeStates = map[string]bool{
 // verbCaps is the per-state verb capability matrix (same rules the console's
 // bulk bar exposes; mirrors what the Inspector verbs actually support).
 var verbCaps = map[string]map[Verb]bool{
-	"active":      {VerbCancel: true},
-	"pending":     {VerbArchive: true, VerbDelete: true},
-	"aggregating": {VerbRun: true, VerbArchive: true, VerbDelete: true},
-	"scheduled":   {VerbRun: true, VerbArchive: true, VerbDelete: true},
-	"retry":       {VerbRun: true, VerbArchive: true, VerbDelete: true},
-	"archived":    {VerbRun: true, VerbDelete: true},
-	"completed":   {VerbDelete: true},
+	"active":      {VerbCancel: true, VerbCount: true},
+	"pending":     {VerbArchive: true, VerbDelete: true, VerbCount: true},
+	"aggregating": {VerbRun: true, VerbArchive: true, VerbDelete: true, VerbCount: true},
+	"scheduled":   {VerbRun: true, VerbArchive: true, VerbDelete: true, VerbCount: true},
+	"retry":       {VerbRun: true, VerbArchive: true, VerbDelete: true, VerbCount: true},
+	"archived":    {VerbRun: true, VerbDelete: true, VerbCount: true},
+	"completed":   {VerbDelete: true, VerbCount: true},
 }
 
 // ValidateScopeVerb checks the scope's state and the verb against the

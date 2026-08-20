@@ -83,17 +83,19 @@ const actionFns: Record<State, { run?: ActionFn; archive?: ActionFn; delete?: Ac
 // Shared with the ⌘K palette's verb entries (lib/palette).
 const bulkCaps = STATE_BULK_VERBS;
 
-// Verb used for "Scan-to-completion as job": the LEAST destructive verb the
-// state supports — the point is the completed preview enumeration (exact
-// count on the Operations screen), never an execution.
+// "Scan-to-completion as job" uses the dedicated preview-only count verb:
+// the point is the completed preview enumeration (exact count on the
+// Operations screen), and the audit log now says so honestly — these used
+// to be recorded as the least destructive mutation the state supported
+// (delete, for completed), training admins to ignore delete entries.
 const scanJobVerb: Record<State, api.JobVerb> = {
-  active: "cancel",
-  pending: "archive",
-  aggregating: "archive",
-  scheduled: "archive",
-  retry: "archive",
-  archived: "run",
-  completed: "delete",
+  active: "count",
+  pending: "count",
+  aggregating: "count",
+  scheduled: "count",
+  retry: "count",
+  archived: "count",
+  completed: "count",
 };
 
 // AQL wire fields of one search response the console renders from.

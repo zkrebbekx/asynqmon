@@ -369,6 +369,9 @@ func (s *Store) RequestExecute(ctx context.Context, id string, proceedOnPartial 
 	if j.Phase != PhasePreview || (j.State != StatePreviewing && j.State != StatePreviewReady) {
 		return nil, fmt.Errorf("%w: phase=%s state=%s", ErrWrongState, j.Phase, j.State)
 	}
+	if j.Verb == VerbCount {
+		return nil, fmt.Errorf("%w: count jobs are preview-only and cannot be executed", ErrWrongState)
+	}
 	if !j.PreviewComplete {
 		if j.Verb == VerbDelete {
 			return nil, ErrPreviewIncomplete

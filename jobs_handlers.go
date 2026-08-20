@@ -75,9 +75,9 @@ func newCreateJobHandlerFunc(store *jobs.Store) http.HandlerFunc {
 		}
 		verb := jobs.Verb(req.Verb)
 		switch verb {
-		case jobs.VerbRun, jobs.VerbArchive, jobs.VerbDelete, jobs.VerbCancel:
+		case jobs.VerbRun, jobs.VerbArchive, jobs.VerbDelete, jobs.VerbCancel, jobs.VerbCount:
 		default:
-			writeErrorMsg(w, http.StatusBadRequest, "invalid verb (want run|archive|delete|cancel)")
+			writeErrorMsg(w, http.StatusBadRequest, "invalid verb (want run|archive|delete|cancel|count)")
 			return
 		}
 		if reason := jobs.ValidateScopeVerb(req.Scope, verb); reason != "" {

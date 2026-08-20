@@ -6,7 +6,7 @@
 // SSE events when the stream is up; the tight 2s poll remains the fallback
 // while any job is non-terminal.
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useState } from "react";
 import { AlertCircle, ChevronDown, ChevronRight, Pause, Play, X } from "lucide-react";
 import { useSelector } from "react-redux";
 import { Link } from "react-router-dom";
@@ -57,6 +57,8 @@ const verbChip: Record<string, string> = {
   archive: "bg-[var(--fc-acc-bg)] text-[var(--fc-acc)]",
   delete: "bg-[var(--fc-crit-bg)] text-[var(--fc-crit)]",
   cancel: "bg-[var(--fc-warn-bg)] text-[var(--fc-warn)]",
+  // Preview-only enumeration — deliberately muted, never alarming.
+  count: "bg-[var(--fc-raise)] text-[var(--fc-ink2)]",
 };
 
 function fmtWhen(iso: string): string {
@@ -357,9 +359,13 @@ export default function OpsView() {
   // stays even when SSE is live: the failure report and sample it fetches
   // are not part of the jobs events.
   useEffect(() => {
+    // Clear on every change, not just on collapse: clicking row B while A
+    // is expanded used to show A's verify verdict (and flash A's failure
+    // report) attributed to B — the auto-verify effect only fires on
+    // verify === null.
+    setDetail(null);
+    setVerify(null);
     if (!expanded) {
-      setDetail(null);
-      setVerify(null);
       return;
     }
     fetchDetail(expanded);
@@ -472,9 +478,12 @@ export default function OpsView() {
                 const progress = jobProgress(j.counts);
                 const isOpen = expanded === j.id;
                 return (
-                  <>
+                  // The FRAGMENT is the list child, so it must carry the key
+                  // (keys on the inner rows don't count) — fresh SSE jobs are
+                  // prepended, and positional reconciliation shifted every
+                  // existing row's identity on each arrival.
+                  <Fragment key={j.id}>
                     <TableRow
-                      key={j.id}
                       className="cursor-pointer hover:bg-[var(--fc-raise)]/50"
                       onClick={() => setExpanded(isOpen ? null : j.id)}
                     >
@@ -705,7 +714,7 @@ export default function OpsView() {
                         </TableCell>
                       </TableRow>
                     )}
-                  </>
+                  </Fragment>
                 );
               })
             )}

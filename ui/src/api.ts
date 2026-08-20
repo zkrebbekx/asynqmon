@@ -1369,7 +1369,9 @@ export async function getMetrics(
     (jobs_handlers.go jobJSON / getJobResponse / AuditEntry).
  **************************************************************/
 
-export type JobVerb = "run" | "archive" | "delete" | "cancel";
+// "count" is preview-only: it enumerates the scope to an exact count and
+// can never be executed (the backend's execute gate refuses it).
+export type JobVerb = "run" | "archive" | "delete" | "cancel" | "count";
 
 export interface JobScope {
   queue: string;
