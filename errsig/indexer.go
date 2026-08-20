@@ -426,9 +426,18 @@ func (ix *Indexer) SweepTailNow(ctx context.Context) error {
 // the ZRANGE and the fetch — advances the cursor, so a poisoned or trimmed
 // range can never wedge the tail.
 func (ix *Indexer) tailQueue(ctx context.Context, q string, cur tailCursor, agg map[string]*tailAccum) (tailCursor, error) {
+	// Paging strategy: advance the score window (Min) to the ROLLING cursor
+	// after every page, with an offset used only to step through runs of
+	// equal scores. A fixed Min with a globally growing offset was not
+	// trim-safe: asynq's archive trim removes the lowest-scored members, and
+	// every removal between two pages shifted the offset window left — so
+	// entries were skipped and lost forever behind the advanced cursor,
+	// precisely on at-cap queues where trimming is constant. With Min pinned
+	// to the cursor's score, trims strictly below the cursor cannot shift
+	// the window at all; the residual exposure is one tie run at the trim
+	// boundary, further guarded by the id filter below.
 	minStr := "-inf"
-	resuming := cur.valid
-	if resuming {
+	if cur.valid {
 		minStr = strconv.FormatInt(cur.score, 10) // inclusive; ties filtered below
 	}
 	newCur := cur
@@ -451,8 +460,8 @@ func (ix *Indexer) tailQueue(ctx context.Context, q string, cur tailCursor, agg 
 			}
 			id, _ := e.Member.(string)
 			score := int64(e.Score)
-			if resuming && score == cur.score && id <= cur.id {
-				continue // tie already served by a previous sweep
+			if newCur.valid && (score < newCur.score || (score == newCur.score && id <= newCur.id)) {
+				continue // tie already served (this sweep or a previous one)
 			}
 			examined++
 			newCur = tailCursor{score: score, id: id, valid: true}
@@ -486,9 +495,32 @@ func (ix *Indexer) tailQueue(ctx context.Context, q string, cur tailCursor, agg 
 				a.refs = append(a.refs, redis.Z{Score: float64(score), Member: TaskRef{Queue: q, ID: id}.member()})
 			}
 		}
-		offset += int64(len(entries))
 		if len(entries) < tailBatchSize {
 			break
+		}
+		// Re-anchor the window on the rolling cursor. Entries are
+		// score-ordered, so the ones sharing the cursor's score are a
+		// suffix of this page — that suffix size is the offset into the
+		// next page's tie run. If the whole page was ties at the cursor
+		// score (offset unchanged would refetch it forever), extend the
+		// offset instead; either way each page strictly advances.
+		if newCur.valid {
+			anchored := strconv.FormatInt(newCur.score, 10)
+			var sameScore int64
+			for i := len(entries) - 1; i >= 0; i-- {
+				if int64(entries[i].Score) != newCur.score {
+					break
+				}
+				sameScore++
+			}
+			if anchored == minStr && sameScore == int64(len(entries)) {
+				offset += int64(len(entries))
+			} else {
+				minStr = anchored
+				offset = sameScore
+			}
+		} else {
+			offset += int64(len(entries))
 		}
 	}
 	return newCur, nil
