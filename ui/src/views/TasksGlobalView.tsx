@@ -1285,7 +1285,19 @@ export default function TasksGlobalView() {
               ) : rows.length === 0 ? (
                 <TableRow>
                   <TableCell colSpan={window.READ_ONLY ? 4 : 6} className="text-center py-8 text-[var(--fc-ink3)]">
-                    No tasks
+                    No tasks match this filter.
+                    <div className="mt-1 text-[11px]">
+                      Nothing enqueued yet? Connect an{" "}
+                      <a
+                        href="https://github.com/hibiken/asynq"
+                        target="_blank"
+                        rel="noreferrer"
+                        className="text-[var(--fc-acc)] hover:underline"
+                      >
+                        asynq client
+                      </a>{" "}
+                      to this Redis and enqueue a first task — it shows up here live.
+                    </div>
                   </TableCell>
                 </TableRow>
               ) : (

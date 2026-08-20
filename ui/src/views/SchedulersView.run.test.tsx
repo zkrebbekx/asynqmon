@@ -101,12 +101,18 @@ describe("SchedulersView run-now gating (#337 × §5.10)", () => {
     expect(buttons).toHaveLength(2); // one per row, including the gone one
   });
 
-  it("hides the action entirely when the deployment has enqueue off", async () => {
+  it("shows the action disabled, naming the flag, when enqueue is off", async () => {
+    // Deliberate discoverability contract (review P3-2): the column stays,
+    // buttons disable with a tooltip naming --enable-enqueue.
     mockApi(false);
     renderView();
     expect(await screen.findByText("report:build")).toBeInTheDocument();
-    expect(screen.queryByText("Run now")).not.toBeInTheDocument();
-    expect(screen.queryByText("Actions")).not.toBeInTheDocument();
+    const buttons = await screen.findAllByText("Run now");
+    for (const b of buttons) {
+      const el = b.closest("button")!;
+      expect(el).toBeDisabled();
+      expect(el.title).toMatch(/--enable-enqueue/);
+    }
   });
 });
 

@@ -60,9 +60,10 @@ const IS_MAC = /Mac|iP(hone|ad|od)/.test(navigator.platform);
 
 interface Props {
   onOpenPalette?: () => void;
+  onOpenCheatsheet?: () => void;
 }
 
-export default function HeaderBar({ onOpenPalette }: Props) {
+export default function HeaderBar({ onOpenPalette, onOpenCheatsheet }: Props) {
   const dispatch = useDispatch();
   const { pollingActive, lastUpdatedAt, pollInterval } = useSelector(
     (s: AppState) => s.settings
@@ -113,6 +114,20 @@ export default function HeaderBar({ onOpenPalette }: Props) {
           Search or jump…
           <kbd className="rounded border border-b-2 border-[var(--fc-line)] bg-[var(--fc-panel)] px-[5px] font-sans text-[10.5px] text-[var(--fc-ink2)]">
             {IS_MAC ? "⌘K" : "Ctrl K"}
+          </kbd>
+        </button>
+      )}
+      {/* "?" cheatsheet hint: the rich keymap was effectively secret —
+          nothing on screen revealed that "?" exists. */}
+      {onOpenCheatsheet && (
+        <button
+          onClick={onOpenCheatsheet}
+          aria-label="Keyboard shortcuts"
+          title="Keyboard shortcuts"
+          className="ml-1.5 flex items-center rounded-md border border-[var(--fc-line)] bg-[var(--fc-raise)] px-2 py-1 text-xs text-[var(--fc-ink3)] hover:border-[var(--fc-ink3)] hover:text-[var(--fc-ink2)]"
+        >
+          <kbd className="rounded border border-b-2 border-[var(--fc-line)] bg-[var(--fc-panel)] px-[5px] font-sans text-[10.5px] text-[var(--fc-ink2)]">
+            ?
           </kbd>
         </button>
       )}

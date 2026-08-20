@@ -159,7 +159,7 @@ function OutcomeTrace({ stableKey }: { stableKey: string }) {
 // fresh enqueue of the entry's type/payload, NOT a scheduler tick. Success
 // lands a toast linking to the created task's drawer; options the server
 // skipped (schedule opts, unparsables) are listed right in the toast.
-function RunNowButton({ row }: { row: SchedulerRow }) {
+function RunNowButton({ row, enabled }: { row: SchedulerRow; enabled: boolean }) {
   const navigate = useNavigate();
   const [confirming, setConfirming] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -238,9 +238,14 @@ function RunNowButton({ row }: { row: SchedulerRow }) {
   return (
     <span {...stop}>
       <button
-        onClick={() => setConfirming(true)}
-        title="Enqueue this entry's task immediately (not a scheduler tick)"
-        className="inline-flex items-center gap-1 whitespace-nowrap rounded-md border border-[var(--fc-line)] bg-[var(--fc-raise)] px-2 py-0.5 text-[11px] font-semibold text-[var(--fc-ink)] transition-colors hover:border-[var(--fc-acc)] hover:text-[var(--fc-acc)]"
+        onClick={() => enabled && setConfirming(true)}
+        disabled={!enabled}
+        title={
+          enabled
+            ? "Enqueue this entry's task immediately (not a scheduler tick)"
+            : "Enqueueing from the UI is disabled — start asynqmon with --enable-enqueue"
+        }
+        className="inline-flex items-center gap-1 whitespace-nowrap rounded-md border border-[var(--fc-line)] bg-[var(--fc-raise)] px-2 py-0.5 text-[11px] font-semibold text-[var(--fc-ink)] transition-colors hover:border-[var(--fc-acc)] hover:text-[var(--fc-acc)] disabled:cursor-not-allowed disabled:opacity-45 disabled:hover:border-[var(--fc-line)] disabled:hover:text-[var(--fc-ink)]"
       >
         <Play size={11} /> Run now
       </button>
@@ -258,6 +263,7 @@ function SchedulerEntryRow({
   onToggle,
   nowMs,
   canRunNow,
+  enqueueEnabled,
 }: {
   row: SchedulerRow;
   isOpen: boolean;
@@ -265,6 +271,7 @@ function SchedulerEntryRow({
   nowMs: number;
   // The §5.10 enqueue capability gates the #337 Run-now column entirely.
   canRunNow: boolean;
+  enqueueEnabled: boolean;
 }) {
   const gone = isGone(row);
   const queue = queueFromOptions(row.entry.options);
@@ -339,7 +346,7 @@ function SchedulerEntryRow({
         </td>
         {canRunNow && (
           <td className={cn(cellClass, "text-right")}>
-            <RunNowButton row={row} />
+            <RunNowButton row={row} enabled={enqueueEnabled} />
           </td>
         )}
       </tr>
@@ -367,9 +374,12 @@ function SchedulerEntryRow({
 export default function SchedulersView() {
   const pollInterval = useSelector((s: AppState) => s.settings.pollInterval);
   const query = useQuery();
-  // Run-now (#337) rides on the §5.10 enqueue capability: the column hides
-  // entirely when the deployment has enqueue off (or is read-only).
-  const canRunNow = useEnqueueEnabled();
+  // Run-now (#337) rides on the §5.10 enqueue capability. The column shows
+  // whenever it COULD work (not read-only); with enqueue off the buttons
+  // are disabled with a tooltip naming --enable-enqueue, instead of the
+  // feature silently not existing.
+  const enqueueEnabled = useEnqueueEnabled();
+  const canRunNow = !window.READ_ONLY;
 
   const [rows, setRows] = useState<SchedulerRow[] | null>(null);
   const [error, setError] = useState("");
@@ -463,6 +473,7 @@ export default function SchedulersView() {
                   onToggle={() => toggle(row.stable_key)}
                   nowMs={nowMs}
                   canRunNow={canRunNow}
+                  enqueueEnabled={enqueueEnabled}
                 />
               ))}
             </tbody>

@@ -393,7 +393,11 @@ export default function TaskDrawer({ peek, resultList, onClose, onPeek, onPivot 
   // never mutates this one — but only when the deployment enables enqueue
   // (§5.10); the action hides entirely otherwise.
   const enqueueEnabled = useEnqueueEnabled();
-  const canClone = enqueueEnabled && !window.READ_ONLY && !!task;
+  // Visible whenever it COULD work (not read-only): a deployment with
+  // enqueue off gets a disabled button naming the flag instead of the
+  // feature silently not existing.
+  const cloneVisible = !window.READ_ONLY && !!task;
+  const canClone = enqueueEnabled && cloneVisible;
 
   // Actions re-check the guard (`task` is null unless it matches the peek
   // param) and refetch so the drawer reflects the task's new state.
@@ -884,10 +888,15 @@ export default function TaskDrawer({ peek, resultList, onClose, onPeek, onPivot 
                       <Archive size={12} /> Archive
                     </DrawerButton>
                   )}
-                  {canClone && (
+                  {cloneVisible && (
                     <DrawerButton
-                      onClick={() => setCloneOpen(true)}
-                      title="Create a new task from this one"
+                      onClick={() => canClone && setCloneOpen(true)}
+                      disabled={!canClone}
+                      title={
+                        canClone
+                          ? "Create a new task from this one"
+                          : "Enqueueing from the UI is disabled — start asynqmon with --enable-enqueue"
+                      }
                     >
                       <CopyPlus size={12} /> Clone &amp; edit…
                     </DrawerButton>

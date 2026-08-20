@@ -137,7 +137,10 @@ function AppContent() {
         collapsed ? "grid-cols-[56px_1fr]" : "grid-cols-[200px_1fr]"
       )}
     >
-      <HeaderBar onOpenPalette={() => setPaletteOpen(true)} />
+      <HeaderBar
+        onOpenPalette={() => setPaletteOpen(true)}
+        onOpenCheatsheet={() => setCheatOpen(true)}
+      />
 
       {/* Grouped nav (build contract §2 IA). */}
       <aside className="flex flex-col overflow-y-auto border-r border-[var(--fc-line)] bg-[var(--fc-panel)] px-2 py-2">

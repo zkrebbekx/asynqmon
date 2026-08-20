@@ -69,13 +69,16 @@ describe("TaskDrawer clone-and-edit gating (§5.10)", () => {
     expect(await screen.findByText(/Clone & edit/)).toBeInTheDocument();
   });
 
-  it("hides the action entirely when enqueue is disabled", async () => {
+  it("shows the action disabled, naming the flag, when enqueue is off", async () => {
+    // Deliberate discoverability contract (review P3-2): flag-gated features
+    // render disabled with a tooltip naming --enable-enqueue instead of
+    // silently not existing.
     mockApi(false);
     renderDrawer();
-    // The drawer is fully loaded (actions row rendered for a retry task)…
-    expect(await screen.findByText(/Run now/)).toBeInTheDocument();
-    // …but the clone action is nowhere.
-    expect(screen.queryByText(/Clone & edit/)).not.toBeInTheDocument();
+    const clone = await screen.findByText(/Clone & edit/);
+    const button = clone.closest("button")!;
+    expect(button).toBeDisabled();
+    expect(button.title).toMatch(/--enable-enqueue/);
   });
 
   it("hides the action in a read-only build even when the backend reports enqueue on", async () => {
