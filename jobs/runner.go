@@ -42,6 +42,15 @@ const (
 	// claimable work. Older-than-that unfinished jobs are effectively
 	// abandoned; the index cap and TTL age them out.
 	claimScanLimit = 200
+
+	// maxCandidates caps a preview's persisted candidate list. Refs are
+	// ~40-60 bytes each, so the cap bounds a job's Redis footprint at tens
+	// of MB; without it a fleet-wide preview near asynq's archive caps
+	// could persist tens of millions of refs — gigabytes on the production
+	// Redis — for the full jobTTL even if the preview was abandoned. A job
+	// that exceeds it fails with instructions to narrow the scope (an
+	// honest failure beats a silently truncated 'exact' count).
+	maxCandidates = 1_000_000
 )
 
 // asynq's pending/active LIST keys, mirrored (same version-pinned rationale
@@ -601,6 +610,15 @@ func (r *Runner) enumerate(ctx context.Context, j *Job, token int64, cs *claimSe
 				}
 				if !ok {
 					r.logf("asynqmon: jobs: %s: fencing token superseded during preview; standing down", j.ID)
+					return false
+				}
+				if j.Counts.Candidates > maxCandidates {
+					r.finalize(ctx, j, token, StateFailed, fmt.Sprintf(
+						"scope too large: preview exceeded %d candidates — narrow the scope (queue, state, or an AQL clause) and retry",
+						maxCandidates))
+					// Free the refs immediately instead of holding tens of
+					// MB for the full jobTTL. Best-effort.
+					_ = r.store.DropCandidates(ctx, j.ID)
 					return false
 				}
 

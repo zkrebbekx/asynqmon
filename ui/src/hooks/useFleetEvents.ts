@@ -61,6 +61,7 @@ export function useFleetEvents(): FleetEventsSnapshot {
     let pollTimer: ReturnType<typeof setInterval> | null = null;
     let backoff = INITIAL_BACKOFF_MS;
     let sseHealthy = false;
+    let lastEventAt = 0;
 
     // Successful data receipt: stamp freshness locally and in settings so the
     // chrome's "updated Ns ago" pill stays truthful on either transport.
@@ -87,14 +88,20 @@ export function useFleetEvents(): FleetEventsSnapshot {
       }
       if (ok) {
         touch();
-      } else if (ov.status === "rejected") {
-        setError(errMessage(ov.reason));
       }
+      // A partially failing fetch still surfaces its error: "one endpoint
+      // healthy" used to report fresh-and-fine while the other half of the
+      // page silently froze.
+      const errs: string[] = [];
+      if (ov.status === "rejected") errs.push(`overview: ${errMessage(ov.reason)}`);
+      if (att.status === "rejected") errs.push(`attention: ${errMessage(att.reason)}`);
+      if (errs.length > 0) setError(errs.join(" · "));
     };
 
     const onEvent = (apply: (raw: string) => void) => (e: MessageEvent) => {
       if (disposed) return;
       sseHealthy = true;
+      lastEventAt = Date.now();
       backoff = INITIAL_BACKOFF_MS;
       setSource("sse");
       try {
@@ -134,11 +141,29 @@ export function useFleetEvents(): FleetEventsSnapshot {
     // window before the stream connects (or forever, if it never does).
     fetchNow();
 
+    // Watchdog bound: renders arrive every stats sweep while subscribed
+    // (seconds), so a minute of silence on a "healthy" stream means the
+    // connection half-opened — a killed server or misbehaving proxy fires no
+    // error event for many minutes of TCP timeout, and the sticky healthy
+    // flag used to disable the poll fallback for exactly that long.
+    const WATCHDOG_MS = 60_000;
+
     if (pollingActive) {
       openStream();
       pollTimer = setInterval(() => {
-        // Poll only while SSE isn't delivering; skip hidden tabs.
-        if (document.hidden || sseHealthy) return;
+        if (document.hidden) return;
+        if (sseHealthy && lastEventAt > 0 && Date.now() - lastEventAt > WATCHDOG_MS) {
+          // Silently dead stream: demote to polling and reconnect.
+          sseHealthy = false;
+          setSource("poll");
+          es?.close();
+          es = null;
+          if (reconnectTimer !== null) clearTimeout(reconnectTimer);
+          reconnectTimer = setTimeout(openStream, backoff);
+          backoff = Math.min(backoff * 2, MAX_BACKOFF_MS);
+        }
+        // Poll only while SSE isn't delivering.
+        if (sseHealthy) return;
         fetchNow();
       }, Math.max(1, pollInterval) * 1000);
     }

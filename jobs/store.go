@@ -766,3 +766,10 @@ func (s *Store) ReadAudit(ctx context.Context, limit int64) ([]AuditEntry, error
 	}
 	return out, nil
 }
+
+// DropCandidates deletes a job's candidate list immediately. Used when a
+// preview is abandoned for exceeding the candidate cap, so a fleet-wide
+// scope cannot pin gigabytes of refs in Redis for the full jobTTL.
+func (s *Store) DropCandidates(ctx context.Context, id string) error {
+	return s.rc.Del(ctx, candidatesKey(id)).Err()
+}
