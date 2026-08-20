@@ -35,8 +35,8 @@ import (
 // ****************************************************************************
 
 const (
-	defaultMaxScan   = 10000  // cap on tasks scanned per queue per request
-	maxScanCeiling   = 100000 // hard upper bound on the per-queue scan cap
+	defaultMaxScan   = 10000  // cap on tasks scanned per request, TOTAL across queues
+	maxScanCeiling   = 100000 // hard upper bound on the total scan cap
 	searchBatchSize  = 1000   // page size used while scanning the inspector
 	defaultSearchTop = 20     // default result page size
 )
@@ -265,9 +265,12 @@ func resolveQueues(inspector *asynq.Inspector, queueParam string) ([]string, err
 }
 
 // scanMatchingTasks scans the given queues/state in batches, applies the search
-// and metadata filters, and returns all matches found within the per-queue
-// max_scan cap (along with how many tasks were examined and whether the cap was
-// hit). Shared by the search and facet endpoints.
+// and metadata filters, and returns all matches found within the max_scan cap —
+// a TOTAL budget across all queues, like the AQL scan path (along with how many
+// tasks were examined and whether the cap was hit). A per-queue budget would
+// multiply by fleet size: queue=all on a large fleet could walk
+// max_scan × #queues tasks and buffer every match in memory for one request.
+// Shared by the search and facet endpoints.
 //
 // Queues removed mid-scan are skipped; any other error (e.g. a Redis outage)
 // aborts the request so the caller can surface it instead of silently
@@ -299,11 +302,10 @@ func scanMatchingTasks(
 			// Group listing is also SMEMBERS-backed; sort for stable pagination.
 			sort.Strings(groups)
 		}
-		qScanned := 0
 	queueScan:
 		for _, gname := range groups {
 			pageNum := 1
-			for qScanned < maxScan {
+			for scanned < maxScan {
 				batch, lerr := listTasksByState(inspector, qname, gname, state, pageNum, searchBatchSize)
 				if lerr != nil {
 					if errors.Is(lerr, asynq.ErrQueueNotFound) {
@@ -321,15 +323,15 @@ func scanMatchingTasks(
 					}
 				}
 				scanned += len(batch)
-				qScanned += len(batch)
 				if len(batch) < searchBatchSize {
 					break // reached the end of this queue/group/state
 				}
 				pageNum++
 			}
 		}
-		if qScanned >= maxScan {
+		if scanned >= maxScan {
 			truncated = true
+			break
 		}
 	}
 	return matches, scanned, truncated, nil
