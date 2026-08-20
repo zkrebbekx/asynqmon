@@ -393,8 +393,19 @@ func (s *Store) RequestExecute(ctx context.Context, id string, proceedOnPartial 
 	if reason != "" {
 		fields["reason"] = reason
 	}
-	if err := s.rc.HSet(ctx, jobKey(id), fields).Err(); err != nil {
+	ok, err := s.casState(ctx, id, string(StatePreviewing)+","+string(StatePreviewReady), fields)
+	if err != nil {
 		return nil, err
+	}
+	if !ok {
+		// The state moved between the gate check and the write (e.g. a
+		// racing cancel): never resurrect it into running.
+		fresh, _ := s.Get(ctx, id)
+		st := "unknown"
+		if fresh != nil {
+			st = string(fresh.State)
+		}
+		return nil, fmt.Errorf("%w: state=%s", ErrWrongState, st)
 	}
 	return s.getAndPublish(ctx, id)
 }
@@ -410,6 +421,37 @@ func (s *Store) getAndPublish(ctx context.Context, id string) (*Job, error) {
 	return j, nil
 }
 
+// casStateScript writes the given hash fields only while the job's state is
+// one of the expected values (comma-separated). Control-plane transitions
+// used to be plain check-then-write: a cancel of a preview_ready job could
+// be overwritten by a racing execute, resurrecting a canceled job into
+// running.
+var casStateScript = redis.NewScript(`
+local st = redis.call("HGET", KEYS[1], "state")
+for m in string.gmatch(ARGV[1], "[^,]+") do
+	if st == m then
+		for i = 2, #ARGV, 2 do
+			redis.call("HSET", KEYS[1], ARGV[i], ARGV[i+1])
+		end
+		return 1
+	end
+end
+return 0`)
+
+// casState runs casStateScript; ok=false means the state moved concurrently.
+func (s *Store) casState(ctx context.Context, id, expectedStates string, fields map[string]interface{}) (bool, error) {
+	args := make([]interface{}, 0, 1+2*len(fields))
+	args = append(args, expectedStates)
+	for f, v := range fields {
+		args = append(args, f, v)
+	}
+	n, err := casStateScript.Run(ctx, s.rc, []string{jobKey(id)}, args...).Int()
+	if err != nil {
+		return false, err
+	}
+	return n == 1, nil
+}
+
 // RequestCancel asks the claiming runner to stop after the current batch. A
 // dormant job (preview_ready, unclaimed) is finalized immediately.
 func (s *Store) RequestCancel(ctx context.Context, id string) (*Job, error) {
@@ -423,12 +465,20 @@ func (s *Store) RequestCancel(ctx context.Context, id string) (*Job, error) {
 	if (j.State == StatePreviewReady && j.Phase == PhasePreview) || j.State == StatePaused {
 		// No runner is working a preview_ready or paused job (paused jobs are
 		// unclaimed — see claimableState) — finalize here so the cancel does
-		// not wait for a claimer that will never come.
-		if err := s.rc.HSet(ctx, jobKey(id),
-			"state", string(StateCanceled), "finished_at", fmtTime(time.Now()), "ctl", "").Err(); err != nil {
+		// not wait for a claimer that will never come. CAS on the state so a
+		// racing execute/resume cannot be silently canceled from under a
+		// runner that just claimed it (it falls through to the ctl path).
+		ok, err := s.casState(ctx, id, string(StatePreviewReady)+","+string(StatePaused), map[string]interface{}{
+			"state": string(StateCanceled), "finished_at": fmtTime(time.Now()), "ctl": "",
+		})
+		if err != nil {
 			return nil, err
 		}
-		return s.getAndPublish(ctx, id)
+		if ok {
+			return s.getAndPublish(ctx, id)
+		}
+		// State moved (execute/resume won): deliver the cancel as a ctl
+		// request to whichever runner now works it.
 	}
 	if err := s.rc.HSet(ctx, jobKey(id), "ctl", CtlCancel).Err(); err != nil {
 		return nil, err
