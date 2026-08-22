@@ -2,7 +2,7 @@
 // paste-a-task-ID detector and the per-state bulk-verb capability matrix the
 // palette's "verb on current scope" entries derive from.
 
-import type { JobVerb } from "../api";
+import type { JobMutationVerb } from "../api";
 
 // asynq task IDs are UUIDs (any version).
 const UUID_RE =
@@ -34,7 +34,7 @@ export function parseTaskIdInput(
 
 // Bulk-on-filter capabilities per state — mirrors the backend job runner's
 // per-state verb support (§3.4 bulk bar / TasksGlobalView's matrix).
-export const STATE_BULK_VERBS: Record<string, JobVerb[]> = {
+export const STATE_BULK_VERBS: Record<string, JobMutationVerb[]> = {
   active: ["cancel"],
   pending: ["archive", "delete"],
   aggregating: ["run", "archive", "delete"],

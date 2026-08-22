@@ -4,7 +4,7 @@
 // acknowledgment). Pure functions so the gating is unit-testable without
 // rendering the modal.
 
-import { JobScope, JobVerb } from "../api";
+import { JobScope, JobMutationVerb, JobVerb } from "../api";
 
 export const THROTTLE_OPTIONS = [100, 200, 500, 1000] as const;
 export const DEFAULT_THROTTLE = 200;
@@ -36,7 +36,7 @@ export function scopeLabel(scope: {
 }
 
 // verbSemantics is the §4.3 step-4 explicit-semantics line per verb.
-export function verbSemantics(verb: JobVerb): string {
+export function verbSemantics(verb: JobMutationVerb): string {
   switch (verb) {
     case "archive":
       return "Archive moves tasks to the dead-letter set — recoverable.";

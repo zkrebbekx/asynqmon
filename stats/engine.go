@@ -712,7 +712,20 @@ func (e *Engine) sweep(ctx context.Context) error {
 			if s, ok := snaps[q]; ok {
 				merged[q] = s
 			} else if p, ok := prev[q]; ok {
-				merged[q] = p
+				if p.Consumers != consumers[q] {
+					// Consumer counts are rebuilt from Servers() every sweep
+					// at zero extra Redis cost, so carried-forward rows get
+					// the live count: leaving the stale one made sev-5
+					// NO_CONSUMERS onset/clear lag a full rotation for cold
+					// queues (minutes at tier 3) during total worker outages
+					// and recoveries alike. Copy-on-write: prev rows are
+					// shared with the last published snapshot.
+					cp := *p
+					cp.Consumers = consumers[q]
+					merged[q] = &cp
+				} else {
+					merged[q] = p
+				}
 			}
 		}
 	}
@@ -738,7 +751,7 @@ func (e *Engine) sweep(ctx context.Context) error {
 	// under its stable key and diff for GONE observations. One SchedulerEntries
 	// call (uncounted, Inspector's client — the Servers() precedent), 1 index
 	// read + 1 HGETALL per known snapshot, 2 writes per live entry.
-	schedGone, n, schedWrites, err := e.sweepSchedulers(ctx, now)
+	schedGone, n, schedWrites, err := e.sweepSchedulers(ctx, now, token)
 	reads += n
 	if err != nil {
 		return fmt.Errorf("sweeping scheduler entries: %w", err)
@@ -771,9 +784,15 @@ func (e *Engine) sweep(ctx context.Context) error {
 		tier:      plan.tier,
 		fleetSize: len(qnames),
 		hot:       hotLookup,
-	}, fleet, servers)
+	}, fleet, servers, e.fence, token)
 	reads += seriesReads
 	if err != nil {
+		if errors.Is(err, ErrSuperseded) {
+			atomic.StoreInt32(&e.holding, 0)
+			atomic.StoreInt64(&e.token, 0)
+			e.logf("asynqmon: stats: %v", ErrSuperseded)
+			return ErrSuperseded
+		}
 		return fmt.Errorf("sampling time series: %w", err)
 	}
 
@@ -819,6 +838,19 @@ func (e *Engine) sweep(ctx context.Context) error {
 		}
 	}
 	writes, fenceOK, werr := writeCache(ctx, e.fence, token, fleet, snaps, removed, attentionJSON, effTTL)
+	if werr == nil && !fenceOK {
+		// A newer claimant holds the role: stand down immediately instead of
+		// waiting for the lease loop to notice (§5.13) — and WITHOUT
+		// publishing this sweep locally or waking SSE listeners. Publishing
+		// first meant a superseded ex-holder served its uncoordinated sweep
+		// as fresh SourceLocal data (preferred over the new holder's cache)
+		// for up to localStaleAfter after a failover, so two replicas
+		// briefly answered with diverging fleets.
+		atomic.StoreInt32(&e.holding, 0)
+		atomic.StoreInt64(&e.token, 0)
+		e.logf("asynqmon: stats: %v", ErrSuperseded)
+		return ErrSuperseded
+	}
 	// Publish to memory even if the cache write failed: local data is good,
 	// and this replica keeps serving it while Redis recovers.
 	e.mem.replace(fleet, merged, report, SweepStats{
@@ -838,14 +870,6 @@ func (e *Engine) sweep(ctx context.Context) error {
 	e.notifySweeps()
 	if werr != nil {
 		return fmt.Errorf("writing cache: %w", werr)
-	}
-	if !fenceOK {
-		// A newer claimant holds the role: stand down immediately instead of
-		// waiting for the lease loop to notice (§5.13).
-		atomic.StoreInt32(&e.holding, 0)
-		atomic.StoreInt64(&e.token, 0)
-		e.logf("asynqmon: stats: %v", ErrSuperseded)
-		return ErrSuperseded
 	}
 	return nil
 }

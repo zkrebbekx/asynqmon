@@ -367,7 +367,7 @@ function FailurePulse({
       <div className="flex items-center gap-2 border-b border-[var(--fc-line2)] px-3 py-2 text-xs font-semibold text-[var(--fc-ink)]">
         Failure pulse — 24h
         <span className="font-normal text-[var(--fc-ink3)]">
-          fleet failures/hr from daily counters · signatures: archived tail exact, retry sampled
+          failures/hr across all queues from daily counters · signatures: archived tail exact, retry sampled
         </span>
         <span className="flex-1" />
         {trimmedCount > 0 && (
@@ -483,9 +483,10 @@ export default function FleetView() {
                 Overview data unavailable
               </div>
               <p className="mx-auto mt-2 max-w-md text-xs text-[var(--fc-ink2)]">
-                The fleet stats endpoints are not answering ({error}). The stats
-                engine may not be deployed on this server yet — queue and task
-                views in the nav keep working against the classic endpoints.
+                The console's stats endpoints are not answering ({error}). The
+                background stats sweeper may be disabled on this server
+                (--disable-stats) or still starting up — queue and task views
+                in the nav keep working against the classic endpoints.
               </p>
             </>
           ) : (

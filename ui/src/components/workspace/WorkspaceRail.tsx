@@ -1,5 +1,5 @@
 // Queue Workspace right rail (build contract §3.3(c)):
-//   (a) this queue's error clusters with per-cluster bulk verbs,
+//   (a) this queue's top errors (live error~ aggregation) with per-group bulk verbs,
 //   (b) consumers panel (coverage row: servers, weights, strict warning),
 //   (c) retry-ETA histogram (exact) + pending-wait histogram (sampled,
 //       head/tail-biased — labeled verbatim),
@@ -8,7 +8,7 @@
 import { ReactNode } from "react";
 import { Link } from "react-router-dom";
 import prettyBytes from "pretty-bytes";
-import type { JobVerb } from "../../api";
+import type { JobMutationVerb } from "../../api";
 import type {
   CoverageRow,
   PendingWaitSampleResponse,
@@ -41,7 +41,7 @@ interface Props {
   retryHist: RetryHistogramResponse | null;
   waitSample: PendingWaitSampleResponse | null;
   memory: MemorySample;
-  onClusterVerb: (verb: JobVerb, state: "retry" | "archived", signature: string) => void;
+  onClusterVerb: (verb: JobMutationVerb, state: "retry" | "archived", signature: string) => void;
 }
 
 function Panel({ title, chip, children }: { title: ReactNode; chip?: ReactNode; children: ReactNode }) {
@@ -105,9 +105,9 @@ export default function WorkspaceRail({
 
   return (
     <div className="flex flex-col gap-2.5">
-      {/* (a) Error clusters */}
+      {/* (a) Top errors — live aggregation, same name as the Tasks console analytics */}
       <Panel
-        title="Error clusters · this queue"
+        title="Top errors · this queue"
         chip={
           clustersTruncated ? (
             <FcChip tone="warn" title={`bounded scan stopped early after ${clustersScanned.toLocaleString()} tasks — counts are lower bounds`}>
@@ -117,7 +117,7 @@ export default function WorkspaceRail({
         }
       >
         {clustersUnavailable ? (
-          <Caption>error clusters unavailable — the aggregate endpoint did not answer.</Caption>
+          <Caption>top errors unavailable — the aggregate endpoint did not answer.</Caption>
         ) : clusters.length === 0 ? (
           <Caption>No errors in retry or archived. Quiet is good.</Caption>
         ) : (

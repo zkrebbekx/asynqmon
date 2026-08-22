@@ -135,6 +135,11 @@ _Note_: Use `--redis-url` to specify address, db-number, and password with one f
 | `--enable-enqueue`(bool)          | `ENABLE_ENQUEUE`          | enable creating tasks from the web UI (`POST /api/queues/{qname}/tasks`, powers clone-and-edit and the Schedulers screen's Run-now, upstream [#337](https://github.com/hibiken/asynqmon/issues/337)); always excluded in read-only mode | false            |
 | `--correlation-keys`(string)      | `CORRELATION_KEYS`        | comma separated list of payload keys the task drawer's Flow view recognizes as correlation ids, in priority order ([details](#flow-view--correlation-keys)) | "trace_id,correlation_id,request_id" |
 | `--cors-allowed-origins`(string)  | `CORS_ALLOWED_ORIGINS`    | comma separated list of origins allowed to make cross-origin requests (empty = same-origin only; cross-origin mutations are rejected) | ""               |
+| `--stats-interval`(duration)      | `STATS_INTERVAL`          | interval between background fleet stats sweeps (powers the Overview, Queues directory, sparklines and attention findings)     | 5s               |
+| `--disable-stats`(bool)           | `DISABLE_STATS`           | disable the background stats sweeper and the `/api/fleet` endpoints; the console degrades to the classic per-queue views      | false            |
+| `--auth-header`(string)           | `AUTH_HEADER`             | reverse-proxy header resolved as the acting user for the audit log (e.g. `X-Auth-Request-User`) — see [Identity & the audit log](#identity--the-audit-log) | "" |
+| `--trusted-proxies`(string)       | `TRUSTED_PROXIES`         | comma separated CIDRs the auth header is trusted from. **Empty means trusted from any peer** — set this whenever `--auth-header` is set, or any client that can reach the listener can forge the audit actor | "" |
+| `--require-identity`(bool)        | `REQUIRE_IDENTITY`        | refuse mutating requests (403 JSON) that carry no resolvable identity (auth header or basic-auth user). The binary refuses to start with `--require-identity` + `--auth-header` unless `--trusted-proxies` is also set — otherwise a spoofed header would satisfy the requirement | false            |
 
 ### Connecting to Redis
 
@@ -244,6 +249,101 @@ payload) to drill down with `key=value` filters.
 
 ![Web UI global Tasks view](./docs/screenshots/tasks-global.png)
 
+## The console
+
+This fork ships a substantially extended dashboard beyond upstream asynqmon.
+A quick map of what's there and how to find it:
+
+### Overview & Queues directory
+
+The **Overview** page is the landing screen: fleet-wide KPI tiles, a failure
+pulse, and an *attention* list of queues that need a human (no consumers with
+pending work, paused with backlog, past-due scheduled tasks, orphaned active
+tasks, error-rate spikes). It is powered by a background stats sweeper
+(`--stats-interval`, disable with `--disable-stats`) that budgets its own
+Redis traffic so the dashboard never hammers the queues it watches (see
+[docs/SCALE.md](docs/SCALE.md)).
+
+The **Queues** directory lists every queue with live sparklines and accepts a
+filter grammar in its search box — space-separated `field OP value` clauses
+that AND together:
+
+```
+consumers=0 pending>10000 name~email paused=true error_rate>0.05 latency>5m
+```
+
+Numeric fields (`pending`, `active`, `retry`, `archived`, `completed`,
+`groups`, `consumers`, `processed_today`, `failed_today`, `orphans`,
+`past_due`) take `= != > >= < <=`; `name~sub` is a substring match; age
+fields (`latency` / `oldest_pending_age`) accept durations. Clicking a queue
+opens its **workspace**: a health strip (with pause/resume/delete controls),
+an Attention tab, all seven state tabs, and an error-clusters rail.
+
+### Task search (AQL)
+
+The **Tasks** console searches across all queues without picking one first.
+Plain words are a case-insensitive substring search over id/type/queue/
+payload (same as upstream). Clause-shaped queries are parsed as **AQL** —
+`field OP value` clauses, space = AND:
+
+```
+queue=email state=retry retries>3 error~"connection refused"
+meta.user_id=1002 payload~timeout
+state=scheduled next_run<30m
+state=pending pending_age>1h
+state=active running>5m orphaned
+```
+
+Fields: `queue`, `type`, `id`, `payload`, `error`, `retries`, `meta.KEY`
+(top-level JSON payload keys), `state`, `group`, plus state-specific
+predicates — `pending_age`, `running`, `deadline_pct`, `orphaned` (active),
+`next_run`, `past_due` (scheduled), `failed_after`/`failed_before`, `died`
+(archived), `expires` (completed), `group_age` (aggregating). Operators are
+`=`, `~` (substring), and `> >= < <=` for numeric/time fields; durations use
+Go syntax plus a `d` day suffix (`90s`, `5m`, `1d12h`). A clause a state
+cannot answer is rejected with a caret and the nearest supported alternative
+— never silently dropped. Results beyond the scan budget continue with a
+resumable cursor, or can be handed to a background **count** job that scans
+to completion for an exact number.
+
+### Operations, bulk jobs & the audit log
+
+Every whole-scope verb (run/archive/delete/cancel "all matching") is a
+**bulk job**: streaming preview with exact counts, Redis cost disclosure,
+throttle selection, a mandatory audited reason, typed confirmation for large
+deletes, and a post-run verify panel. The **Operations** page lists jobs
+(pause/resume/cancel), their failure reports, and the audit log. Single-task
+enqueueing (clone & edit, Schedulers "Run now") is behind `--enable-enqueue`.
+
+### Errors, Hygiene, Workers, Schedulers
+
+- **Errors** groups failures into signatures (indexed, trend-annotated) and
+  pivots into the matching retry/archived tasks or a pre-scoped bulk job.
+- **Hygiene** runs scheduled inventory / dead-letter / scheduler-health
+  reports with configurable cadence and webhook notifications.
+- **Workers** shows servers and per-queue consumer coverage; **Schedulers**
+  adds run-outcome traces to the entry list.
+
+### Saved views, palette & keyboard
+
+`⌘K` opens the command palette (queues, views, verbs, navigation). Saved
+views capture a Tasks-console query as a shareable, server-stored view.
+Press `?` anywhere for the keyboard cheatsheet — the Tasks console supports
+`j/k` row navigation, `x`/`⇧x` selection, `r`un/`e`(archive)/`#`(delete),
+`p`eek drawer, `[`/`]` prev/next in the drawer, and `/` to focus the query
+bar.
+
+### Identity & the audit log
+
+Mutations are attributed in the audit log. Behind a reverse proxy that
+authenticates users, pass the identity header with `--auth-header` (e.g.
+`X-Auth-Request-User`) **and** restrict who may assert it with
+`--trusted-proxies=10.0.0.0/8` — with no CIDRs configured the header is
+trusted from every peer, so any client that can reach the listener directly
+could forge the audit actor. `--require-identity` refuses mutations with no
+resolvable identity; without any of this, actions are logged as
+`anonymous@<ip>`.
+
 ### Flow view & correlation keys
 
 When a task's JSON payload carries a recognized correlation id, the task
@@ -316,7 +416,7 @@ worker `host:pid`, and the task's queue/id/type. A small summary hash tracks
 `first_seen`, `total_attempts`, `last_duration_ms` and `total_busy_ms`.
 
 **Bounds.** Records live in asynqmon-owned keys
-(`asynqmon:obs:<queue>:<task_id>`), trimmed to the last 30 attempts and
+(`asynqmon:obs:att:<queue>:<task_id>`), trimmed to the last 30 attempts and
 expiring 7 days after the last write — tune with `observe.WithAttemptCap`,
 `observe.WithTTL` and `observe.WithKeyPrefix`. Writes are best-effort: a
 recording failure never fails or delays the task (dropped writes are counted;

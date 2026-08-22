@@ -162,14 +162,17 @@ func extractMetricsFetchOptions(r *http.Request) (*metricsFetchOptions, error) {
 	q := r.URL.Query()
 	if d := q.Get("duration"); d != "" {
 		val, err := strconv.Atoi(d)
-		if err != nil {
+		if err != nil || val <= 0 {
+			// Reject non-positive windows here with a 400: passed through,
+			// they build start > end query ranges that Prometheus rejects,
+			// surfacing as a misleading 502 "failed to fetch".
 			return nil, fmt.Errorf("invalid value provided for duration: %q", d)
 		}
 		opts.duration = time.Duration(val) * time.Second
 	}
 	if t := q.Get("endtime"); t != "" {
 		val, err := strconv.Atoi(t)
-		if err != nil {
+		if err != nil || val < 0 {
 			return nil, fmt.Errorf("invalid value provided for end_time: %q", t)
 		}
 		opts.endTime = time.Unix(int64(val), 0)

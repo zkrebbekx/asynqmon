@@ -29,7 +29,11 @@ export default function MetricsView() {
   // "now" inside the fetch instead of freezing the window at mount time
   // (recomputing it during render made every render refire the fetch effect).
   const endTimeParam = query.get("end_time");
-  const duration = parseInt(query.get("duration") || "60", 10);
+  // Default matches the server's own 60-minute window and is a real
+  // durationOptions value — the param is SECONDS, and a bare "60" used to
+  // fetch a 1-minute window with a blank duration selector (no option
+  // matched), making the charts look broken on first visit.
+  const duration = parseInt(query.get("duration") || "3600", 10);
   const [endTime, setEndTime] = useState(() =>
     endTimeParam ? parseInt(endTimeParam, 10) : currentUnixtime()
   );

@@ -416,6 +416,7 @@ export default function TasksTable(props: Props) {
               className="h-7 w-7"
               disabled={page === 0}
               onClick={() => goToPage(page - 1)}
+              aria-label="Previous page"
             >
               <ChevronLeft size={14} />
             </Button>
@@ -425,6 +426,7 @@ export default function TasksTable(props: Props) {
               className="h-7 w-7"
               disabled={page >= totalPages - 1}
               onClick={() => goToPage(page + 1)}
+              aria-label="Next page"
             >
               <ChevronRight size={14} />
             </Button>

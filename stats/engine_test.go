@@ -287,11 +287,12 @@ func TestSweepSeededFleet(t *testing.T) {
 			// + 2 GET DEPTH_ANOMALY rollup rings (hourly cadence)
 			// + 2 GET CONSUMERS_DROPPED hot-ring window seeds (once/holder)
 			So(cost.ReadCmds, ShouldEqual, 57)
-			// 2 queues x (HSET + PEXPIRE) + 1 SADD index + fleet HSET +
-			// PEXPIRE + 1 SET attention report = 8, + 1 SETNX series learning
-			// anchor (once per holder; §5.8 slot flushes happen only when the
-			// sweep clock crosses a 30s slot boundary — never on a first sweep)
-			So(cost.WriteCmds, ShouldEqual, 9)
+			// 2 queues x (HSET + PEXPIRE) + 1 SADD index + 1 PEXPIRE index
+			// (safety-net TTL) + fleet HSET + PEXPIRE + 1 SET attention
+			// report = 9, + 1 SETNX series learning anchor (once per holder;
+			// §5.8 slot flushes happen only when the sweep clock crosses a
+			// 30s slot boundary — never on a first sweep)
+			So(cost.WriteCmds, ShouldEqual, 10)
 			So(cost.Duration, ShouldBeGreaterThan, 0)
 		})
 

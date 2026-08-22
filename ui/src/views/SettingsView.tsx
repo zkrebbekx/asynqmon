@@ -7,6 +7,15 @@ import { Label } from "../components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../components/ui/select";
 import PageShell, { panelClass } from "../components/PageShell";
 import { getHealthRoles, HealthRolesResponse } from "../api-fleet";
+import { SavedView, deleteView, listViews, updateView } from "../api-views";
+import { paths } from "../paths";
+import { Link } from "react-router-dom";
+import { toast } from "sonner";
+import { Check, Pencil, Trash2, X } from "lucide-react";
+import { Button } from "../components/ui/button";
+import { Input } from "../components/ui/input";
+import ConfirmDialog from "../components/ConfirmDialog";
+import { toErrorString } from "../utils";
 
 // Settings › Health refresh cadence (independent of the global poll slider —
 // this is a diagnostics readout, not a data surface).
@@ -209,6 +218,165 @@ function FleetHealthSection() {
   );
 }
 
+// SavedViewsSection: the management surface saved views never had — they
+// could be created (Tasks/Queues consoles) but only ever LAUNCHED via the
+// palette, so a mistyped team-visible view was permanent clutter (review
+// P3-2). Rename + delete here; system views are server-seeded, undeletable.
+function SavedViewsSection() {
+  const [views, setViews] = useState<SavedView[] | null>(null);
+  const [error, setError] = useState("");
+  const [editing, setEditing] = useState<string | null>(null);
+  const [editName, setEditName] = useState("");
+  const [confirmDelete, setConfirmDelete] = useState<SavedView | null>(null);
+
+  const load = useCallback(async () => {
+    try {
+      const r = await listViews();
+      setViews(r.views ?? []);
+      setError("");
+    } catch (e) {
+      setError(toErrorString(e as Parameters<typeof toErrorString>[0]));
+    }
+  }, []);
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  const rename = async (v: SavedView) => {
+    const name = editName.trim();
+    setEditing(null);
+    if (name === "" || name === v.name) return;
+    try {
+      await updateView(v.id, { name });
+      toast.success(`View renamed to “${name}”.`);
+      load();
+    } catch (e) {
+      toast.error(`Rename failed: ${toErrorString(e as Parameters<typeof toErrorString>[0])}`);
+    }
+  };
+  const remove = async (v: SavedView) => {
+    setConfirmDelete(null);
+    try {
+      await deleteView(v.id);
+      toast.success(`View “${v.name}” deleted.`);
+      load();
+    } catch (e) {
+      toast.error(`Delete failed: ${toErrorString(e as Parameters<typeof toErrorString>[0])}`);
+    }
+  };
+  const openHref = (v: SavedView) => {
+    const base = v.target === "queues" ? paths().QUEUES : paths().TASKS;
+    const qs = new URLSearchParams(v.state).toString();
+    return qs ? `${base}?${qs}` : base;
+  };
+
+  return (
+    <section className={panelClass}>
+      <div className="border-b border-[var(--fc-line2)] px-3 py-2 text-xs font-semibold text-[var(--fc-ink)]">
+        Saved views{" "}
+        <span className="font-normal text-[var(--fc-ink3)]">
+          server-stored, visible to everyone using this dashboard
+        </span>
+      </div>
+      <div className="px-3 py-2">
+        {error !== "" ? (
+          <p className="py-2 text-xs text-[var(--fc-ink3)]">
+            Saved views unavailable ({error}).
+          </p>
+        ) : views === null ? (
+          <p className="py-2 text-xs text-[var(--fc-ink3)]">Loading…</p>
+        ) : views.length === 0 ? (
+          <p className="py-2 text-xs text-[var(--fc-ink3)]">
+            No saved views yet — save one from the Tasks or Queues console
+            (bookmark icon next to the query bar), then launch it from the ⌘K
+            palette.
+          </p>
+        ) : (
+          <ul className="divide-y divide-[var(--fc-line2)]">
+            {views.map((v) => (
+              <li key={v.id} className="flex items-center gap-2 py-1.5 text-sm">
+                {editing === v.id ? (
+                  <>
+                    <Input
+                      value={editName}
+                      onChange={(e) => setEditName(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") rename(v);
+                        if (e.key === "Escape") setEditing(null);
+                      }}
+                      autoFocus
+                      className="h-7 max-w-56 text-xs"
+                      aria-label={`New name for view ${v.name}`}
+                    />
+                    <Button size="icon" variant="ghost" className="h-6 w-6" onClick={() => rename(v)} aria-label="Save name">
+                      <Check size={13} />
+                    </Button>
+                    <Button size="icon" variant="ghost" className="h-6 w-6" onClick={() => setEditing(null)} aria-label="Cancel rename">
+                      <X size={13} />
+                    </Button>
+                  </>
+                ) : (
+                  <Link to={openHref(v)} className="truncate font-medium text-[var(--fc-acc)] hover:underline">
+                    {v.name}
+                  </Link>
+                )}
+                <span className="rounded bg-[var(--fc-raise)] px-1.5 py-0.5 font-mono text-[10px] uppercase text-[var(--fc-ink3)]">
+                  {v.target}
+                </span>
+                {v.system && (
+                  <span className="rounded bg-[var(--fc-raise)] px-1.5 py-0.5 text-[10px] uppercase text-[var(--fc-ink3)]" title="Seeded server-side; cannot be edited or deleted">
+                    system
+                  </span>
+                )}
+                <span className="flex-1" />
+                {!v.system && !window.READ_ONLY && editing !== v.id && (
+                  <>
+                    <Button
+                      size="icon"
+                      variant="ghost"
+                      className="h-6 w-6"
+                      onClick={() => {
+                        setEditing(v.id);
+                        setEditName(v.name);
+                      }}
+                      aria-label={`Rename view ${v.name}`}
+                    >
+                      <Pencil size={12} />
+                    </Button>
+                    <Button
+                      size="icon"
+                      variant="ghost"
+                      className="h-6 w-6 text-[var(--fc-crit)]"
+                      onClick={() => setConfirmDelete(v)}
+                      aria-label={`Delete view ${v.name}`}
+                    >
+                      <Trash2 size={12} />
+                    </Button>
+                  </>
+                )}
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+      <ConfirmDialog
+        open={confirmDelete !== null}
+        title="Delete saved view"
+        description={
+          <>
+            Delete the saved view <strong>{confirmDelete?.name}</strong>? It is
+            shared — everyone using this dashboard loses it. This cannot be
+            undone.
+          </>
+        }
+        confirmLabel="Delete view"
+        onConfirm={() => confirmDelete && remove(confirmDelete)}
+        onClose={() => setConfirmDelete(null)}
+      />
+    </section>
+  );
+}
+
 export default function SettingsView() {
   const dispatch = useDispatch();
   const { pollInterval, themePreference } = useSelector((s: AppState) => s.settings);
@@ -274,6 +442,8 @@ export default function SettingsView() {
             </div>
           </div>
         </section>
+
+        <SavedViewsSection />
 
         <FleetHealthSection />
       </div>

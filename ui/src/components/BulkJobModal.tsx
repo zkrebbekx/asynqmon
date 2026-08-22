@@ -7,11 +7,11 @@
 // is fine too; Operations has the job either way).
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Link } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 import { toast } from "sonner";
 import { AlertTriangle } from "lucide-react";
 import * as api from "../api";
-import { JobDetail, JobInfo, JobVerb } from "../api";
+import { JobDetail, JobInfo, JobMutationVerb } from "../api";
 import { paths } from "../paths";
 import {
   DEFAULT_THROTTLE,
@@ -45,21 +45,21 @@ export interface BulkJobScope {
 
 interface Props {
   open: boolean;
-  verb: JobVerb;
+  verb: JobMutationVerb;
   scope: BulkJobScope;
   onClose: () => void;
   // Called after execution is accepted (job handed to the runner).
   onStarted?: (jobId: string) => void;
 }
 
-const verbTitles: Record<JobVerb, string> = {
+const verbTitles: Record<JobMutationVerb, string> = {
   run: "Bulk run — paced re-drain",
   archive: "Bulk archive — recoverable",
   delete: "Bulk delete — gone forever, not recoverable",
   cancel: "Bulk cancel — cooperative signal",
 };
 
-const verbChipClass: Record<JobVerb, string> = {
+const verbChipClass: Record<JobMutationVerb, string> = {
   run: "bg-[var(--fc-acc-bg)] text-[var(--fc-acc)]",
   archive: "bg-[var(--fc-acc-bg)] text-[var(--fc-acc)]",
   delete: "bg-[var(--fc-crit-bg)] text-[var(--fc-crit)]",
@@ -67,6 +67,7 @@ const verbChipClass: Record<JobVerb, string> = {
 };
 
 export default function BulkJobModal({ open, verb, scope, onClose, onStarted }: Props) {
+  const navigate = useNavigate();
   const [job, setJob] = useState<JobDetail | null>(null);
   const [reason, setReason] = useState("");
   const [throttle, setThrottle] = useState<number>(DEFAULT_THROTTLE);
@@ -206,7 +207,9 @@ export default function BulkJobModal({ open, verb, scope, onClose, onStarted }: 
       toast.success(`Bulk ${verb} handed to the job runner`, {
         description:
           "Live progress right here while the modal is open; per-item failures and the verify panel live in Operations.",
-        action: { label: "Open Ops", onClick: () => (window.location.href = paths().OPS) },
+        // Router navigation — a raw location change reloaded the whole SPA,
+        // dropping in-memory state including this modal's live progress view.
+        action: { label: "Open Ops", onClick: () => navigate(paths().OPS) },
       });
       // The modal STAYS OPEN, tracking execute progress live. Closing is
       // fine at any point — the job runs server-side either way.

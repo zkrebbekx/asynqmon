@@ -45,6 +45,22 @@ const (
 	defaultMaxSamplePer    = 200  // retry window size per queue per sample
 	tailBatchSize          = 200  // ZRANGEBYSCORE page size
 
+	// defaultCommandBudget is the indexer's Redis command spend cap in
+	// commands per second. The stats engine's §5.1 governor covers only
+	// stats.Engine; without a budget of its own the indexer issued one
+	// unchunked N×3-command pipeline per sweep plus per-queue decode reads —
+	// at tier-2/3 fleet sizes that alone could dwarf the governed sweep.
+	// Small fleets are unaffected: a run that fits the budget behaves
+	// exactly as before; beyond it the run rotates, resuming from a
+	// holder-local cursor next tick, so every queue is still visited — just
+	// across several ticks instead of one.
+	defaultCommandBudget = 500
+
+	// metaChunkSize bounds the per-queue metadata pipeline (ZCARD + GET +
+	// HGET per queue): the old single pipeline hit 75k commands at 25k
+	// queues — the classic big-pipeline blowup.
+	metaChunkSize = 200
+
 	// maxRefsPerSigPerRun bounds one run's ref additions per signature; the
 	// store's own cap (maxRefsPerSig) bounds the total.
 	maxRefsPerSigPerRun = 25
@@ -67,6 +83,10 @@ type Config struct {
 	// MaxSamplePerQueue caps retry tasks decoded per queue per sample.
 	// Default 200.
 	MaxSamplePerQueue int
+	// CommandBudget caps the indexer's Redis command spend, in commands per
+	// second, governing tail sweeps and retry samples alike. Runs that
+	// exceed it rotate across ticks from a holder-local cursor. Default 500.
+	CommandBudget int
 	// InstanceID identifies this replica in the lease. Default
 	// "hostname:pid:<random>".
 	InstanceID string
@@ -97,6 +117,18 @@ type Indexer struct {
 	cancel  context.CancelFunc
 	wg      sync.WaitGroup
 	started bool
+
+	// Budgeted-rotation state (holder-local; §5.7 command budget). tailRot /
+	// sampleRot are the last queue each feeder finished, "" = start of the
+	// sorted list; failedByQ / trimmedQ carry the last-known per-queue
+	// failed-today counter and at-cap flag so the meta hash's fleet-wide
+	// numbers stay complete across partial sweeps (values for queues not yet
+	// visited this rotation are last-known — same honesty class as the stats
+	// engine's carried-forward rows).
+	tailRot   string
+	sampleRot string
+	failedByQ map[string]int64
+	trimmedQ  map[string]bool
 }
 
 // NewIndexer creates an Indexer. It does not touch Redis until Start (or one
@@ -123,6 +155,9 @@ func NewIndexer(cfg Config) *Indexer {
 	if cfg.MaxSamplePerQueue <= 0 {
 		cfg.MaxSamplePerQueue = defaultMaxSamplePer
 	}
+	if cfg.CommandBudget <= 0 {
+		cfg.CommandBudget = defaultCommandBudget
+	}
 	if cfg.InstanceID == "" {
 		cfg.InstanceID = defaultInstanceID()
 	}
@@ -131,12 +166,14 @@ func NewIndexer(cfg Config) *Indexer {
 		logf = log.Printf
 	}
 	return &Indexer{
-		cfg:   cfg,
-		rc:    cfg.RedisClient,
-		insp:  cfg.Inspector,
-		logf:  logf,
-		kick:  make(chan struct{}, 1),
-		fence: newIndexerFence(cfg.RedisClient),
+		cfg:       cfg,
+		rc:        cfg.RedisClient,
+		insp:      cfg.Inspector,
+		logf:      logf,
+		kick:      make(chan struct{}, 1),
+		fence:     newIndexerFence(cfg.RedisClient),
+		failedByQ: make(map[string]int64),
+		trimmedQ:  make(map[string]bool),
 	}
 }
 
@@ -349,64 +386,152 @@ type tailAccum struct {
 	refs     []redis.Z
 }
 
+// rotateFrom returns qnames reordered to start just after `last` (circular),
+// so a budget-limited run resumes where the previous one stopped and every
+// queue is visited across ticks.
+func rotateFrom(qnames []string, last string) []string {
+	if len(qnames) == 0 || last == "" {
+		return qnames
+	}
+	start := sort.SearchStrings(qnames, last)
+	if start < len(qnames) && qnames[start] == last {
+		start++
+	}
+	if start >= len(qnames) {
+		return qnames
+	}
+	out := make([]string, 0, len(qnames))
+	out = append(out, qnames[start:]...)
+	out = append(out, qnames[:start]...)
+	return out
+}
+
 // SweepTailNow runs one archived-tail sweep across every queue, regardless
 // of lease ownership (exposed for tests and operational tooling; running it
 // off-lease only costs duplicate reads and idempotent merges).
 func (ix *Indexer) SweepTailNow(ctx context.Context) error {
 	now := time.Now()
+	// Capture the fencing token ONCE, up front. A lease lost mid-sweep zeroes
+	// ix.token, and reading it at write time would silently convert the
+	// fenced merge into an unfenced one — the exact stale-holder overwrite
+	// the fence exists to stop. With the captured token the CAS in
+	// leasefence.Exec rejects a superseded holder instead. An explicitly
+	// off-lease call (token 0 from the start — tests/tooling) keeps the
+	// documented unfenced *Now semantics.
+	token := ix.currentToken()
 
 	qnames, err := ix.rc.SMembers(ctx, allQueuesKey).Result()
 	if err != nil && !errors.Is(err, redis.Nil) {
 		return fmt.Errorf("reading queue set: %w", err)
 	}
 	sort.Strings(qnames)
+	// Queues deleted since the last rotation must not linger in the
+	// holder-local meta accumulators.
+	universe := make(map[string]bool, len(qnames))
+	for _, q := range qnames {
+		universe[q] = true
+	}
+	for q := range ix.failedByQ {
+		if !universe[q] {
+			delete(ix.failedByQ, q)
+		}
+	}
+	for q := range ix.trimmedQ {
+		if !universe[q] {
+			delete(ix.trimmedQ, q)
+		}
+	}
 
-	// Per-queue pipeline: archive size (trim detection), today's failed
-	// counter (magnitude cross-check), stored cursor.
+	// Command budget for this sweep (§5.7 governor): a full pass that fits
+	// spends exactly what it used to; beyond the budget the sweep stops and
+	// the next tick resumes from the rotation cursor.
+	budget := ix.cfg.CommandBudget * int(ix.cfg.TailInterval.Seconds())
+	if budget < 4*metaChunkSize {
+		budget = 4 * metaChunkSize // floor: always complete at least one chunk
+	}
+	spent := 1 // SMEMBERS
+
+	agg := make(map[string]*tailAccum)
+	newCursors := make(map[string]string)
+	ordered := rotateFrom(qnames, ix.tailRot)
+	completed := 0
+
 	type qMeta struct {
 		card   *redis.IntCmd
 		failed *redis.StringCmd
 		cursor *redis.StringCmd
 	}
-	pipe := ix.rc.Pipeline()
-	metas := make([]qMeta, len(qnames))
-	for i, q := range qnames {
-		metas[i] = qMeta{
-			card:   pipe.ZCard(ctx, archivedKey(q)),
-			failed: pipe.Get(ctx, FailedTodayKey(q, now)),
-			cursor: pipe.HGet(ctx, cursorsKey, q),
+	for chunkStart := 0; chunkStart < len(ordered) && spent < budget; chunkStart += metaChunkSize {
+		chunkEnd := chunkStart + metaChunkSize
+		if chunkEnd > len(ordered) {
+			chunkEnd = len(ordered)
+		}
+		chunk := ordered[chunkStart:chunkEnd]
+
+		// Per-queue metadata, chunk-pipelined: archive size (trim
+		// detection), today's failed counter (magnitude cross-check),
+		// stored cursor.
+		pipe := ix.rc.Pipeline()
+		metas := make([]qMeta, len(chunk))
+		for i, q := range chunk {
+			metas[i] = qMeta{
+				card:   pipe.ZCard(ctx, archivedKey(q)),
+				failed: pipe.Get(ctx, FailedTodayKey(q, now)),
+				cursor: pipe.HGet(ctx, cursorsKey, q),
+			}
+		}
+		if _, err := pipe.Exec(ctx); err != nil && !errors.Is(err, redis.Nil) {
+			return fmt.Errorf("reading queue metadata: %w", err)
+		}
+		spent += 3 * len(chunk)
+
+		for i, q := range chunk {
+			if card, err := metas[i].card.Result(); err == nil {
+				ix.trimmedQ[q] = card >= ArchiveTrimCap
+			}
+			if v, err := metas[i].failed.Result(); err == nil {
+				ix.failedByQ[q] = decodeInt(v)
+			} else {
+				ix.failedByQ[q] = 0 // counter absent = no failures today
+			}
+			cur := tailCursor{}
+			if v, err := metas[i].cursor.Result(); err == nil {
+				cur = decodeCursor(v)
+			}
+			newCur, tailSpent, err := ix.tailQueue(ctx, q, cur, agg)
+			spent += tailSpent
+			if err != nil {
+				return fmt.Errorf("tailing archived %q: %w", q, err)
+			}
+			if newCur.valid && newCur != cur {
+				newCursors[q] = newCur.encode()
+			}
+			ix.tailRot = q
+			completed++
+			if spent >= budget {
+				break
+			}
 		}
 	}
-	if _, err := pipe.Exec(ctx); err != nil && !errors.Is(err, redis.Nil) {
-		return fmt.Errorf("reading queue metadata: %w", err)
+	if completed >= len(ordered) {
+		ix.tailRot = "" // full rotation finished — start over next tick
 	}
 
+	// Fleet-wide meta numbers merge the holder-local accumulators so partial
+	// sweeps never shrink them to the swept subset.
 	var failedTotal int64
-	var trimmed []string
-	agg := make(map[string]*tailAccum)
-	newCursors := make(map[string]string)
-
-	for i, q := range qnames {
-		if card, err := metas[i].card.Result(); err == nil && card >= ArchiveTrimCap {
+	for _, n := range ix.failedByQ {
+		failedTotal += n
+	}
+	trimmed := make([]string, 0, len(ix.trimmedQ))
+	for q, at := range ix.trimmedQ {
+		if at {
 			trimmed = append(trimmed, q)
 		}
-		if v, err := metas[i].failed.Result(); err == nil {
-			failedTotal += decodeInt(v)
-		}
-		cur := tailCursor{}
-		if v, err := metas[i].cursor.Result(); err == nil {
-			cur = decodeCursor(v)
-		}
-		newCur, err := ix.tailQueue(ctx, q, cur, agg)
-		if err != nil {
-			return fmt.Errorf("tailing archived %q: %w", q, err)
-		}
-		if newCur.valid && newCur != cur {
-			newCursors[q] = newCur.encode()
-		}
 	}
+	sort.Strings(trimmed)
 
-	if err := ix.mergeAndWrite(ctx, now, agg, failedTotal, trimmed, newCursors); err != nil {
+	if err := ix.mergeAndWrite(ctx, now, token, agg, failedTotal, trimmed, newCursors); err != nil {
 		return err
 	}
 	return nil
@@ -417,22 +542,33 @@ func (ix *Indexer) SweepTailNow(ctx context.Context) error {
 // including ones whose task vanished (trim/delete) or moved state between
 // the ZRANGE and the fetch — advances the cursor, so a poisoned or trimmed
 // range can never wedge the tail.
-func (ix *Indexer) tailQueue(ctx context.Context, q string, cur tailCursor, agg map[string]*tailAccum) (tailCursor, error) {
+func (ix *Indexer) tailQueue(ctx context.Context, q string, cur tailCursor, agg map[string]*tailAccum) (tailCursor, int, error) {
+	// Paging strategy: advance the score window (Min) to the ROLLING cursor
+	// after every page, with an offset used only to step through runs of
+	// equal scores. A fixed Min with a globally growing offset was not
+	// trim-safe: asynq's archive trim removes the lowest-scored members, and
+	// every removal between two pages shifted the offset window left — so
+	// entries were skipped and lost forever behind the advanced cursor,
+	// precisely on at-cap queues where trimming is constant. With Min pinned
+	// to the cursor's score, trims strictly below the cursor cannot shift
+	// the window at all; the residual exposure is one tie run at the trim
+	// boundary, further guarded by the id filter below.
 	minStr := "-inf"
-	resuming := cur.valid
-	if resuming {
+	if cur.valid {
 		minStr = strconv.FormatInt(cur.score, 10) // inclusive; ties filtered below
 	}
 	newCur := cur
 	examined := 0
+	spent := 0
 	var offset int64
 
 	for examined < ix.cfg.MaxTailPerQueue {
 		entries, err := ix.rc.ZRangeByScoreWithScores(ctx, archivedKey(q), &redis.ZRangeBy{
 			Min: minStr, Max: "+inf", Offset: offset, Count: tailBatchSize,
 		}).Result()
+		spent++
 		if err != nil && !errors.Is(err, redis.Nil) {
-			return newCur, err
+			return newCur, spent, err
 		}
 		if len(entries) == 0 {
 			break
@@ -443,12 +579,13 @@ func (ix *Indexer) tailQueue(ctx context.Context, q string, cur tailCursor, agg 
 			}
 			id, _ := e.Member.(string)
 			score := int64(e.Score)
-			if resuming && score == cur.score && id <= cur.id {
-				continue // tie already served by a previous sweep
+			if newCur.valid && (score < newCur.score || (score == newCur.score && id <= newCur.id)) {
+				continue // tie already served (this sweep or a previous one)
 			}
 			examined++
 			newCur = tailCursor{score: score, id: id, valid: true}
 
+			spent++ // GetTaskInfo
 			ti, gerr := ix.insp.GetTaskInfo(q, id)
 			if gerr != nil {
 				continue // vanished between ZRANGE and fetch (trimmed/deleted): skip, honestly
@@ -478,12 +615,35 @@ func (ix *Indexer) tailQueue(ctx context.Context, q string, cur tailCursor, agg 
 				a.refs = append(a.refs, redis.Z{Score: float64(score), Member: TaskRef{Queue: q, ID: id}.member()})
 			}
 		}
-		offset += int64(len(entries))
 		if len(entries) < tailBatchSize {
 			break
 		}
+		// Re-anchor the window on the rolling cursor. Entries are
+		// score-ordered, so the ones sharing the cursor's score are a
+		// suffix of this page — that suffix size is the offset into the
+		// next page's tie run. If the whole page was ties at the cursor
+		// score (offset unchanged would refetch it forever), extend the
+		// offset instead; either way each page strictly advances.
+		if newCur.valid {
+			anchored := strconv.FormatInt(newCur.score, 10)
+			var sameScore int64
+			for i := len(entries) - 1; i >= 0; i-- {
+				if int64(entries[i].Score) != newCur.score {
+					break
+				}
+				sameScore++
+			}
+			if anchored == minStr && sameScore == int64(len(entries)) {
+				offset += int64(len(entries))
+			} else {
+				minStr = anchored
+				offset = sameScore
+			}
+		} else {
+			offset += int64(len(entries))
+		}
 	}
-	return newCur, nil
+	return newCur, spent, nil
 }
 
 // mergeAndWrite folds one tail sweep's accumulations into the store: it
@@ -491,7 +651,7 @@ func (ix *Indexer) tailQueue(ctx context.Context, q string, cur tailCursor, agg 
 // archived observations, rolls every signature's trend snapshot (untouched
 // signatures must still roll toward a flat delta, or a dead signature would
 // read "growing" forever), and writes back only what changed.
-func (ix *Indexer) mergeAndWrite(ctx context.Context, now time.Time, agg map[string]*tailAccum, failedTotal int64, trimmed []string, newCursors map[string]string) error {
+func (ix *Indexer) mergeAndWrite(ctx context.Context, now time.Time, token int64, agg map[string]*tailAccum, failedTotal int64, trimmed []string, newCursors map[string]string) error {
 	indexSigs, err := ix.rc.ZRange(ctx, indexKey, 0, -1).Result()
 	if err != nil && !errors.Is(err, redis.Nil) {
 		return fmt.Errorf("reading signature index: %w", err)
@@ -530,9 +690,9 @@ func (ix *Indexer) mergeAndWrite(ctx context.Context, now time.Time, agg map[str
 	}
 
 	// Fence-guarded batch (§5.13, phase 12): a superseded ex-holder's merge
-	// must never land over a newer holder's index. Token 0 (off-lease
+	// must never land over a newer holder's index — the token was captured
+	// at sweep start (see SweepTailNow). Token 0 (explicitly off-lease
 	// SweepTailNow — tests/tooling) writes unfenced by design.
-	token := ix.currentToken()
 	ttlMs := indexTTL.Milliseconds()
 	cmds := make([]leasefence.Cmd, 0, 6*len(writeSet)+8)
 	for sig := range writeSet {
@@ -639,6 +799,9 @@ type retryAccum struct {
 // which has no archived observations) is removed entirely.
 func (ix *Indexer) SampleRetryNow(ctx context.Context) error {
 	now := time.Now()
+	// Captured up front for the same reason as SweepTailNow: a lease lost
+	// mid-run must fail the fence CAS, not silently write unfenced.
+	token := ix.currentToken()
 
 	qnames, err := ix.rc.SMembers(ctx, allQueuesKey).Result()
 	if err != nil && !errors.Is(err, redis.Nil) {
@@ -646,15 +809,34 @@ func (ix *Indexer) SampleRetryNow(ctx context.Context) error {
 	}
 	sort.Strings(qnames)
 
+	// Command budget (§5.7 governor): the sampler used to walk EVERY queue
+	// per run (1 ZRANGE + up to MaxSamplePerQueue GetTaskInfo each) with no
+	// cap. Beyond the budget the run stops and the next one resumes from
+	// the rotation cursor; the wholesale-replace below is scoped to the
+	// queues actually swept so unswept queues' contributions survive.
+	budget := ix.cfg.CommandBudget * int(ix.cfg.SampleInterval.Seconds())
+	if budget < 2*ix.cfg.MaxSamplePerQueue {
+		budget = 2 * ix.cfg.MaxSamplePerQueue // floor: always finish one queue
+	}
+	spent := 1 // SMEMBERS
+	ordered := rotateFrom(qnames, ix.sampleRot)
+	swept := make(map[string]bool, len(ordered))
+	completed := 0
+
 	observed := make(map[string]*retryAccum)
-	for _, q := range qnames {
+	for _, q := range ordered {
+		if spent >= budget {
+			break
+		}
 		// A bounded window in score (next_process_at) order — deliberately
 		// not cursor-tailed (§5.7; see the file header).
 		ids, err := ix.rc.ZRange(ctx, retryKey(q), 0, int64(ix.cfg.MaxSamplePerQueue-1)).Result()
+		spent++
 		if err != nil && !errors.Is(err, redis.Nil) {
 			return fmt.Errorf("sampling retry %q: %w", q, err)
 		}
 		for _, id := range ids {
+			spent++ // GetTaskInfo
 			ti, gerr := ix.insp.GetTaskInfo(q, id)
 			if gerr != nil {
 				continue // dequeued between ZRANGE and fetch
@@ -687,10 +869,18 @@ func (ix *Indexer) SampleRetryNow(ctx context.Context) error {
 				a.refs = append(a.refs, redis.Z{Score: float64(failedAt.Unix()), Member: TaskRef{Queue: q, ID: id}.member()})
 			}
 		}
+		swept[q] = true
+		ix.sampleRot = q
+		completed++
+	}
+	if completed >= len(ordered) {
+		ix.sampleRot = "" // full rotation finished
 	}
 
 	// Union of previously-sampled signatures and this run's observations:
-	// both must be rewritten (a drained signature's retry counts go to zero).
+	// both must be rewritten (a drained signature's retry counts go to zero
+	// — but only for cells in queues this run actually swept; a budgeted
+	// partial run must not zero contributions it never re-observed).
 	prev, err := ix.rc.SMembers(ctx, retrySigsKey).Result()
 	if err != nil && !errors.Is(err, redis.Nil) {
 		return fmt.Errorf("reading retry-sampled set: %w", err)
@@ -713,9 +903,8 @@ func (ix *Indexer) SampleRetryNow(ctx context.Context) error {
 		return fmt.Errorf("reading signature hashes: %w", err)
 	}
 
-	// Fence-guarded batch (§5.13, phase 12); token 0 = off-lease
-	// SampleRetryNow, unfenced by design.
-	token := ix.currentToken()
+	// Fence-guarded batch (§5.13, phase 12); token captured at run start;
+	// token 0 = explicitly off-lease SampleRetryNow, unfenced by design.
 	ttlMs := indexTTL.Milliseconds()
 	cmds := make([]leasefence.Cmd, 0, 6*len(sigsList)+6)
 	var stillSampled []interface{}
@@ -728,10 +917,14 @@ func (ix *Indexer) SampleRetryNow(ctx context.Context) error {
 		if s == nil {
 			s = &Signature{Sig: sig, Template: acc.template, PrevCount: -1}
 		}
-		// Wholesale replace: zero every retry contribution, then apply this
-		// run's observations.
+		// Wholesale replace, scoped to the swept queues: zero their retry
+		// contributions, then apply this run's observations. Cells in
+		// unswept queues keep their last observation until their rotation
+		// turn.
 		for i := range s.Counts {
-			s.Counts[i].RetrySampled = 0
+			if swept[s.Counts[i].Queue] {
+				s.Counts[i].RetrySampled = 0
+			}
 		}
 		if acc != nil {
 			for qt, n := range acc.counts {

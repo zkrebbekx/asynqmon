@@ -3,6 +3,7 @@ package asynqmon
 import (
 	"context"
 	"fmt"
+	"log"
 	"net"
 	"net/http"
 	"strings"
@@ -100,6 +101,24 @@ func isMutating(r *http.Request) bool {
 func newActorMiddleware(opts Options) func(http.Handler) http.Handler {
 	trusted := parseTrustedProxies(opts.TrustedProxies)
 	headerName := opts.AuthHeader
+
+	// Trusting the header from ANY peer is a convenience for single-proxy
+	// deployments where the network is the boundary — but it means any
+	// client that can reach the listener directly (sidecar bypass,
+	// cluster-internal access) can forge an arbitrary actor: audit entries
+	// get attributed to the victim's name, and RequireIdentity is satisfied
+	// by the spoofed header. Warn loudly so the insecure default is a
+	// choice, not an accident.
+	if headerName != "" && len(trusted) == 0 {
+		suffix := ""
+		if opts.RequireIdentity {
+			suffix = " With RequireIdentity set, a spoofed header also fully satisfies the identity requirement."
+		}
+		log.Printf("asynqmon: AuthHeader %q is trusted from EVERY peer because TrustedProxies is empty — "+
+			"any client that can reach this listener directly can forge the audit actor. "+
+			"Set TrustedProxies (--trusted-proxies) to the CIDRs of your reverse proxy.%s",
+			headerName, suffix)
+	}
 
 	proxyTrusted := func(r *http.Request) bool {
 		if len(trusted) == 0 {

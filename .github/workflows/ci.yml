@@ -1,0 +1,82 @@
+name: CI
+on:
+  push:
+    branches:
+      - "master"
+  pull_request:
+
+jobs:
+  go:
+    name: Go build, vet, test
+    runs-on: ubuntu-latest
+    services:
+      # The root-package suites are integration tests against a real Redis
+      # (127.0.0.1:6379, DBs 12-14); without one they self-skip and CI would
+      # green-light untested changes.
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Build
+        run: go build ./...
+      - name: Vet
+        run: go vet ./...
+      - name: Test
+        run: go test ./...
+
+  ui:
+    name: UI lint, test, embedded-build drift
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ui
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+      - name: Install
+        run: npm ci
+      - name: Lint
+        run: npm run lint
+      - name: Test
+        run: npm test
+      - name: Build
+        run: npm run build
+      - name: Embedded build is in sync with ui/src
+        # ui/build is committed because the Go binary embeds it (go:embed).
+        # A src change without a rebuild ships a stale UI silently — this
+        # already happened once (2f36d6b). The Vite build is deterministic
+        # under npm ci, so any diff here means "run `make assets` and commit".
+        run: |
+          if [ -n "$(git status --porcelain -- build)" ]; then
+            echo "::error::ui/build is out of sync with ui/src — run 'make assets' and commit the result."
+            git status --porcelain -- build
+            git diff --stat -- build | tail -5
+            exit 1
+          fi
+
+  helm:
+    name: Helm chart lint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Lint chart
+        run: helm lint charts/asynqmon

@@ -16,7 +16,7 @@ import { useLocation, useNavigate, useParams } from "react-router-dom";
 import { Search, AlertTriangle } from "lucide-react";
 import { AppState } from "../store";
 import * as api from "../api";
-import { DailyStat, JobVerb, TaskInfo } from "../api";
+import { DailyStat, JobMutationVerb, TaskInfo } from "../api";
 import {
   CoverageRow,
   FleetQueueRow,
@@ -44,6 +44,9 @@ import {
   upcomingRetries,
 } from "../lib/workspace";
 import WorkspaceHealthStrip from "../components/workspace/WorkspaceHealthStrip";
+import ConfirmDialog from "../components/ConfirmDialog";
+import { toast } from "sonner";
+import { toErrorString } from "../utils";
 import PageShell from "../components/PageShell";
 import WorkspaceAttentionTab from "../components/workspace/WorkspaceAttentionTab";
 import WorkspaceRail from "../components/workspace/WorkspaceRail";
@@ -70,7 +73,7 @@ const TAB_LABELS: Record<WorkspaceTab, string> = {
 };
 
 interface BulkTarget {
-  verb: JobVerb;
+  verb: JobMutationVerb;
   state: string;
   aql?: string;
 }
@@ -229,9 +232,46 @@ export default function TasksView() {
     }
   };
 
+  // ---------- queue lifecycle controls (pause/resume/delete) ----------
+  // Pause is the on-call operator's first remediation lever; these endpoints
+  // existed since upstream but had no UI entry point (review P1-10).
+  const [queueMutating, setQueueMutating] = useState(false);
+  const [confirmDeleteQueue, setConfirmDeleteQueue] = useState(false);
+  const doPauseResume = useCallback(
+    async (action: "pause" | "resume") => {
+      setQueueMutating(true);
+      try {
+        if (action === "pause") {
+          await api.pauseQueue(queue);
+          toast.success(`Queue ${queue} paused — consumers stop dequeuing until resumed.`);
+        } else {
+          await api.resumeQueue(queue);
+          toast.success(`Queue ${queue} resumed.`);
+        }
+        await fetchCore();
+      } catch (e) {
+        toast.error(`Could not ${action} ${queue}: ${toErrorString(e as Parameters<typeof toErrorString>[0])}`);
+      }
+      setQueueMutating(false);
+    },
+    [queue, fetchCore]
+  );
+  const doDeleteQueue = useCallback(async () => {
+    setConfirmDeleteQueue(false);
+    setQueueMutating(true);
+    try {
+      await api.deleteQueue(queue);
+      toast.success(`Queue ${queue} deleted.`);
+      navigate(paths().QUEUES);
+    } catch (e) {
+      toast.error(`Could not delete ${queue}: ${toErrorString(e as Parameters<typeof toErrorString>[0])}`);
+      setQueueMutating(false);
+    }
+  }, [queue, navigate]);
+
   // ---------- bulk-job modal (§4.3, pre-scoped to this queue) ----------
   const [bulk, setBulk] = useState<BulkTarget | null>(null);
-  const onClusterVerb = (verb: JobVerb, state: "retry" | "archived", signature: string) =>
+  const onClusterVerb = (verb: JobMutationVerb, state: "retry" | "archived", signature: string) =>
     setBulk({ verb, state, aql: `error~${quoteAqlValue(signature)}` });
 
   const countLabel = (t: WorkspaceTab): string => {
@@ -269,6 +309,24 @@ export default function TasksView() {
         counts={counts}
         coverageRow={coverageRow}
         nowMs={nowMs}
+        onPause={window.READ_ONLY ? undefined : () => doPauseResume("pause")}
+        onResume={window.READ_ONLY ? undefined : () => doPauseResume("resume")}
+        onDelete={window.READ_ONLY ? undefined : () => setConfirmDeleteQueue(true)}
+        mutating={queueMutating}
+      />
+      <ConfirmDialog
+        open={confirmDeleteQueue}
+        title="Delete queue"
+        description={
+          <>
+            Delete queue <strong className="font-mono">{queue}</strong>? The queue
+            must be empty (no tasks in any state) — asynq refuses to delete a
+            non-empty queue. This cannot be undone.
+          </>
+        }
+        confirmLabel="Delete queue"
+        onConfirm={doDeleteQueue}
+        onClose={() => setConfirmDeleteQueue(false)}
       />
 
       <div className="grid grid-cols-1 gap-2.5 xl:grid-cols-[minmax(0,1fr)_320px]">

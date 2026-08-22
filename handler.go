@@ -3,6 +3,7 @@ package asynqmon
 import (
 	"context"
 	"embed"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -360,14 +361,18 @@ func New(opts Options) *HTTPHandler {
 	}
 }
 
-// Close closes connections to redis.
+// Close closes connections to redis. Every closer runs even when an early
+// one errors — aborting used to leak the redis client, inspector, and
+// engine goroutines in embedders that construct/tear down handlers — and
+// the errors are joined.
 func (h *HTTPHandler) Close() error {
+	var errs []error
 	for _, f := range h.closers {
 		if err := f(); err != nil {
-			return err
+			errs = append(errs, err)
 		}
 	}
-	return nil
+	return errors.Join(errs...)
 }
 
 // RootPath returns the root URL path used for asynqmon application.
@@ -541,8 +546,10 @@ func muxRouter(opts Options, rc redis.UniversalClient, inspector *asynq.Inspecto
 	api.HandleFunc("/task_metadata", newTaskMetadataHandlerFunc(inspector, rc, payloadFmt)).Methods("GET")
 	// Failure/usage analytics: group the filtered set by type/error/queue.
 	api.HandleFunc("/task_aggregate", newTaskAggregateHandlerFunc(inspector, rc, payloadFmt)).Methods("GET")
-	// Apply an action to every task matching a filter (not just the current page).
-	api.HandleFunc("/tasks:batch_filtered", newBulkFilteredTasksHandlerFunc(inspector, rc, payloadFmt)).Methods("POST")
+	// Apply an action to every task matching a filter (not just the current
+	// page). Audited via the jobs store like every other mutation path.
+	jobsStore := jobs.NewStore(rc)
+	api.HandleFunc("/tasks:batch_filtered", newBulkFilteredTasksHandlerFunc(inspector, rc, payloadFmt, jobsStore)).Methods("POST")
 
 	// Groups endponts
 	api.HandleFunc("/queues/{qname}/groups", newListGroupsHandlerFunc(inspector)).Methods("GET")
@@ -602,7 +609,6 @@ func muxRouter(opts Options, rc redis.UniversalClient, inspector *asynq.Inspecto
 	// read-only mode's method filter below blocks them.
 	// ------------------------------------------------------------------
 	api.Use(newActorMiddleware(opts))
-	jobsStore := jobs.NewStore(rc)
 	api.HandleFunc("/jobs", newCreateJobHandlerFunc(jobsStore)).Methods("POST")
 	api.HandleFunc("/jobs", newListJobsHandlerFunc(jobsStore)).Methods("GET")
 	api.HandleFunc("/jobs/{job_id}", newGetJobHandlerFunc(jobsStore)).Methods("GET")
@@ -769,7 +775,11 @@ func muxRouter(opts Options, rc redis.UniversalClient, inspector *asynq.Inspecto
 func restrictToReadOnly(h http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != "GET" && r.Method != "" {
-			http.Error(w, fmt.Sprintf("API Server is running in read-only mode: %s request is not allowed", r.Method), http.StatusMethodNotAllowed)
+			// The JSON error shape is the API contract everywhere else —
+			// a bare text 405 surfaced in the frontend as a cryptic JSON
+			// parse failure instead of the reason.
+			writeErrorMsg(w, http.StatusMethodNotAllowed,
+				fmt.Sprintf("API server is running in read-only mode: %s request is not allowed", r.Method))
 			return
 		}
 		h.ServeHTTP(w, r)

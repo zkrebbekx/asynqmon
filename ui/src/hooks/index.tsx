@@ -4,6 +4,7 @@ import { useDispatch, useSelector } from "react-redux";
 import { AppState } from "../store";
 import { pollTick } from "../actions/settingsActions";
 import { ThemePreference } from "../reducers/settingsReducer";
+import { acquireOverlayMute } from "../lib/keymap";
 
 export function usePolling(
   doFn: () => void,
@@ -91,4 +92,36 @@ export function useIsDark(): boolean {
   if (themePreference === ThemePreference.Always) return true;
   if (themePreference === ThemePreference.Never) return false;
   return prefersDark;
+}
+
+// useLatestOnly guards async fetchers against out-of-order resolution: a
+// slow response for an old filter must never overwrite the results of a
+// newer one (it used to leave the table showing the previous query's rows,
+// total, and cursor under the new state pill until the next poll tick).
+//
+//   const beginFetch = useLatestOnly();
+//   const fetch = useCallback(async () => {
+//     const isCurrent = beginFetch();   // this call is now the newest
+//     const resp = await api.get(...);
+//     if (!isCurrent()) return;         // a newer call started meanwhile
+//     setRows(resp.rows);
+//   }, [...]);
+//
+// The returned function identity is stable, so it never churns callback deps.
+export function useLatestOnly(): () => () => boolean {
+  const seq = useRef(0);
+  return useRef(() => {
+    const mine = ++seq.current;
+    return () => mine === seq.current;
+  }).current;
+}
+
+// useOverlayMute stamps the keymap's overlay marker while `active` so
+// page-level shortcuts (j/k/x/#/…) never fire behind a modal surface.
+// Refcounted in lib/keymap so stacked overlays compose.
+export function useOverlayMute(active: boolean = true) {
+  useEffect(() => {
+    if (!active) return;
+    return acquireOverlayMute();
+  }, [active]);
 }

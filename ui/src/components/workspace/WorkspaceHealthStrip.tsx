@@ -6,7 +6,7 @@
 
 import { ReactNode, useState } from "react";
 import { Link } from "react-router-dom";
-import { ChevronDown, ChevronUp } from "lucide-react";
+import { ChevronDown, ChevronUp, Pause, Play, Trash2 } from "lucide-react";
 import type { CoverageRow, FleetQueueRow } from "../../api-fleet";
 import {
   ageTone,
@@ -28,6 +28,13 @@ interface Props {
   counts: Record<string, number> | null;
   coverageRow: CoverageRow | null;
   nowMs: number;
+  // Queue lifecycle controls (§ pause is the on-call operator's first
+  // remediation lever). Absent (read-only mode) = not rendered.
+  onPause?: () => void;
+  onResume?: () => void;
+  onDelete?: () => void;
+  // True while a pause/resume request is in flight — disables the toggle.
+  mutating?: boolean;
 }
 
 function Cell({
@@ -67,6 +74,10 @@ export default function WorkspaceHealthStrip({
   counts,
   coverageRow,
   nowMs,
+  onPause,
+  onResume,
+  onDelete,
+  mutating,
 }: Props) {
   const [consumersOpen, setConsumersOpen] = useState(false);
 
@@ -166,6 +177,44 @@ export default function WorkspaceHealthStrip({
         <Cell label="error rate 24h">
           {fleetRow ? formatErrorRate(fleetRow.error_rate) : "—"}
         </Cell>
+        {(onPause || onResume || onDelete) && (
+          <Cell label="actions" className="min-w-[120px]">
+            <span className="inline-flex items-center gap-1.5">
+              {fleetRow?.paused
+                ? onResume && (
+                    <button
+                      onClick={onResume}
+                      disabled={mutating}
+                      title="resume this queue — pending tasks start processing again"
+                      className="inline-flex items-center gap-1 rounded-md bg-[var(--fc-acc-bg)] px-2 py-0.5 text-[11.5px] font-semibold text-[var(--fc-acc)] hover:opacity-90 disabled:opacity-50"
+                    >
+                      <Play size={12} aria-hidden /> resume
+                    </button>
+                  )
+                : onPause && (
+                    <button
+                      onClick={onPause}
+                      disabled={mutating}
+                      title="pause this queue — consumers stop dequeuing until resumed"
+                      className="inline-flex items-center gap-1 rounded-md px-2 py-0.5 text-[11.5px] font-semibold text-[var(--fc-ink2)] hover:bg-[var(--fc-raise)] hover:text-[var(--fc-ink)] disabled:opacity-50"
+                    >
+                      <Pause size={12} aria-hidden /> pause
+                    </button>
+                  )}
+              {onDelete && (
+                <button
+                  onClick={onDelete}
+                  disabled={mutating}
+                  aria-label={`delete queue ${qname}`}
+                  title="delete this queue (must be empty)"
+                  className="inline-flex items-center rounded-md p-1 text-[var(--fc-ink3)] hover:bg-[var(--fc-raise)] hover:text-[var(--fc-crit)] disabled:opacity-50"
+                >
+                  <Trash2 size={13} aria-hidden />
+                </button>
+              )}
+            </span>
+          </Cell>
+        )}
         <Cell label="consumers" className="min-w-[130px]">
           <button
             onClick={() => setConsumersOpen((o) => !o)}

@@ -95,14 +95,18 @@ securityContext:
     drop:
       - ALL
 
-# /healthz PINGs redis with a 2s budget: 200 ok / 503 unavailable
-# (upstream hibiken/asynqmon#276).
+# Liveness is process-level (TCP): /healthz PINGs Redis and answers 503 when
+# it is down, so pointing liveness at it made the kubelet restart-loop
+# asynqmon pods during any Redis outage — restarts that cannot fix Redis and
+# add CrashLoopBackOff delay to recovery. Readiness (below) is the probe
+# that should track Redis.
 livenessProbe:
-  httpGet:
-    path: /healthz
+  tcpSocket:
     port: http
   initialDelaySeconds: 5
   periodSeconds: 15
+# /healthz PINGs redis with a 2s budget: 200 ok / 503 unavailable
+# (upstream hibiken/asynqmon#276).
 readinessProbe:
   httpGet:
     path: /healthz

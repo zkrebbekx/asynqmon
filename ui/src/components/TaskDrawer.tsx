@@ -13,7 +13,7 @@ import {
   deletePendingTaskAsync, deleteCompletedTaskAsync,
   cancelActiveTaskAsync,
 } from "../actions/tasksActions";
-import { usePolling } from "../hooks";
+import { useOverlayMute, usePolling } from "../hooks";
 import {
   useCorrelationKeys, useEnqueueEnabled, usePayloadDetailLimit,
 } from "../hooks/useFeatures";
@@ -248,6 +248,11 @@ export default function TaskDrawer({ peek, resultList, onClose, onPeek, onPivot 
   const handlersRef = useRef({ onClose, prevTask, nextTask, onPeek, confirmDelete, cloneOpen });
   handlersRef.current = { onClose, prevTask, nextTask, onPeek, confirmDelete, cloneOpen };
 
+  // The drawer is aria-modal: page-level bindings (j/k/x/#/e/r…) must not
+  // fire on the hidden selection behind it. Its own keys below use a raw
+  // listener, so the mute doesn't silence them.
+  useOverlayMute();
+
   // Keyboard: Esc closes, [ and ] move through the result list.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -343,16 +348,30 @@ export default function TaskDrawer({ peek, resultList, onClose, onPeek, onPivot 
     };
   }, [tab, corr, flow, flowLoading]);
 
+  // Timer refs so the "copied ✓" flash is cleared on unmount and never
+  // carries over to the next task after a fast [ / ] pivot.
+  const copyTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const payloadCopyTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => {
+    setCopied(false);
+    setPayloadCopied(false);
+    return () => {
+      if (copyTimer.current !== null) clearTimeout(copyTimer.current);
+      if (payloadCopyTimer.current !== null) clearTimeout(payloadCopyTimer.current);
+    };
+  }, [peekKey]);
   const copyId = () => {
     navigator.clipboard?.writeText(peek.id);
     setCopied(true);
-    setTimeout(() => setCopied(false), 1500);
+    if (copyTimer.current !== null) clearTimeout(copyTimer.current);
+    copyTimer.current = setTimeout(() => setCopied(false), 1500);
   };
   const copyPayload = () => {
     if (!task?.payload) return;
     navigator.clipboard?.writeText(task.payload);
     setPayloadCopied(true);
-    setTimeout(() => setPayloadCopied(false), 1500);
+    if (payloadCopyTimer.current !== null) clearTimeout(payloadCopyTimer.current);
+    payloadCopyTimer.current = setTimeout(() => setPayloadCopied(false), 1500);
   };
 
   // Server-side detail truncation note (upstream hibiken/asynqmon#301): the
@@ -374,7 +393,11 @@ export default function TaskDrawer({ peek, resultList, onClose, onPeek, onPivot 
   // never mutates this one — but only when the deployment enables enqueue
   // (§5.10); the action hides entirely otherwise.
   const enqueueEnabled = useEnqueueEnabled();
-  const canClone = enqueueEnabled && !window.READ_ONLY && !!task;
+  // Visible whenever it COULD work (not read-only): a deployment with
+  // enqueue off gets a disabled button naming the flag instead of the
+  // feature silently not existing.
+  const cloneVisible = !window.READ_ONLY && !!task;
+  const canClone = enqueueEnabled && cloneVisible;
 
   // Actions re-check the guard (`task` is null unless it matches the peek
   // param) and refetch so the drawer reflects the task's new state.
@@ -865,10 +888,15 @@ export default function TaskDrawer({ peek, resultList, onClose, onPeek, onPivot 
                       <Archive size={12} /> Archive
                     </DrawerButton>
                   )}
-                  {canClone && (
+                  {cloneVisible && (
                     <DrawerButton
-                      onClick={() => setCloneOpen(true)}
-                      title="Create a new task from this one"
+                      onClick={() => canClone && setCloneOpen(true)}
+                      disabled={!canClone}
+                      title={
+                        canClone
+                          ? "Create a new task from this one"
+                          : "Enqueueing from the UI is disabled — start asynqmon with --enable-enqueue"
+                      }
                     >
                       <CopyPlus size={12} /> Clone &amp; edit…
                     </DrawerButton>

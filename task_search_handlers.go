@@ -1,6 +1,7 @@
 package asynqmon
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -14,6 +15,7 @@ import (
 	"github.com/redis/go-redis/v9"
 
 	"github.com/hibiken/asynqmon/aql"
+	"github.com/hibiken/asynqmon/jobs"
 	"github.com/hibiken/asynqmon/stats"
 )
 
@@ -35,8 +37,8 @@ import (
 // ****************************************************************************
 
 const (
-	defaultMaxScan   = 10000  // cap on tasks scanned per queue per request
-	maxScanCeiling   = 100000 // hard upper bound on the per-queue scan cap
+	defaultMaxScan   = 10000  // cap on tasks scanned per request, TOTAL across queues
+	maxScanCeiling   = 100000 // hard upper bound on the total scan cap
 	searchBatchSize  = 1000   // page size used while scanning the inspector
 	defaultSearchTop = 20     // default result page size
 )
@@ -51,6 +53,24 @@ func clampMaxScan(n int) int {
 		return maxScanCeiling
 	}
 	return n
+}
+
+// pageBounds returns the [start, end) window for one result page, clamped to
+// [0, total]. The multiplication (page-1)*size can overflow for hostile page
+// values, so it only runs once page-1 is known to fit inside total/size.
+func pageBounds(total, page, size int) (int, int) {
+	if page < 1 {
+		page = 1
+	}
+	start := total
+	if size > 0 && page-1 <= total/size {
+		start = (page - 1) * size
+	}
+	end := start + size
+	if end > total || end < start {
+		end = total
+	}
+	return start, end
 }
 
 // searchableStates are the task states accepted by the search/facet/aggregate/
@@ -131,8 +151,22 @@ func toSearchTask(ti *asynq.TaskInfo, pf PayloadFormatter) *searchTask {
 		NextProcessAt: fmtTime(ti.NextProcessAt),
 		LastFailedAt:  fmtTime(ti.LastFailedAt),
 		CompletedAt:   fmtTime(ti.CompletedAt),
-		rawPayload:    DefaultPayloadFormatter.FormatPayload(ti.Type, ti.Payload),
+		rawPayload:    searchablePayload(ti.Type, ti.Payload),
 	}
+}
+
+// searchablePayload is the text free-text/meta matching runs against: the
+// default formatter's output for printable payloads, but the raw bytes for
+// binary ones — the formatter's "non-printable bytes" placeholder used to be
+// matched instead, so q=non-printable matched every binary task and no real
+// byte content was searchable (the AQL path matches raw bytes; the two query
+// paths now agree).
+func searchablePayload(taskType string, payload []byte) string {
+	formatted := DefaultPayloadFormatter.FormatPayload(taskType, payload)
+	if formatted == "non-printable bytes" {
+		return string(payload)
+	}
+	return formatted
 }
 
 // taskMatchesSearch reports whether the task matches the free-text query
@@ -247,9 +281,12 @@ func resolveQueues(inspector *asynq.Inspector, queueParam string) ([]string, err
 }
 
 // scanMatchingTasks scans the given queues/state in batches, applies the search
-// and metadata filters, and returns all matches found within the per-queue
-// max_scan cap (along with how many tasks were examined and whether the cap was
-// hit). Shared by the search and facet endpoints.
+// and metadata filters, and returns all matches found within the max_scan cap —
+// a TOTAL budget across all queues, like the AQL scan path (along with how many
+// tasks were examined and whether the cap was hit). A per-queue budget would
+// multiply by fleet size: queue=all on a large fleet could walk
+// max_scan × #queues tasks and buffer every match in memory for one request.
+// Shared by the search and facet endpoints.
 //
 // Queues removed mid-scan are skipped; any other error (e.g. a Redis outage)
 // aborts the request so the caller can surface it instead of silently
@@ -281,11 +318,10 @@ func scanMatchingTasks(
 			// Group listing is also SMEMBERS-backed; sort for stable pagination.
 			sort.Strings(groups)
 		}
-		qScanned := 0
 	queueScan:
 		for _, gname := range groups {
 			pageNum := 1
-			for qScanned < maxScan {
+			for scanned < maxScan {
 				batch, lerr := listTasksByState(inspector, qname, gname, state, pageNum, searchBatchSize)
 				if lerr != nil {
 					if errors.Is(lerr, asynq.ErrQueueNotFound) {
@@ -303,15 +339,15 @@ func scanMatchingTasks(
 					}
 				}
 				scanned += len(batch)
-				qScanned += len(batch)
 				if len(batch) < searchBatchSize {
 					break // reached the end of this queue/group/state
 				}
 				pageNum++
 			}
 		}
-		if qScanned >= maxScan {
+		if scanned >= maxScan {
 			truncated = true
+			break
 		}
 	}
 	return matches, scanned, truncated, nil
@@ -375,14 +411,7 @@ func newSearchTasksHandlerFunc(inspector *asynq.Inspector, rc redis.UniversalCli
 		}
 
 		total := len(matches)
-		start := (page - 1) * size
-		if start > total {
-			start = total
-		}
-		end := start + size
-		if end > total {
-			end = total
-		}
+		start, end := pageBounds(total, page, size)
 		pageTasks := matches[start:end]
 		if pageTasks == nil {
 			pageTasks = make([]*searchTask, 0)
@@ -502,14 +531,7 @@ func serveAqlSearch(w http.ResponseWriter, r *http.Request, inspector *asynq.Ins
 	matches := out.matches
 	var pageTasks []*searchTask
 	if scanCursor == "" {
-		start := (page - 1) * size
-		if start > len(matches) {
-			start = len(matches)
-		}
-		end := start + size
-		if end > len(matches) {
-			end = len(matches)
-		}
+		start, end := pageBounds(len(matches), page, size)
 		pageTasks = matches[start:end]
 	} else {
 		pageTasks = matches
@@ -561,6 +583,13 @@ func newStateCountsHandlerFunc(inspector *asynq.Inspector, rc redis.UniversalCli
 	return func(w http.ResponseWriter, r *http.Request) {
 		qname := r.URL.Query().Get("queue")
 		if qname != "" && qname != "all" {
+			// LLEN/ZCARD on missing keys answer 0, so without this check a
+			// typoed ?queue= silently reported an all-zero state instead of
+			// the 404 every other per-queue endpoint returns.
+			if exists, err := rc.SIsMember(r.Context(), "asynq:queues", qname).Result(); err == nil && !exists {
+				writeErrorMsg(w, http.StatusNotFound, fmt.Sprintf("queue %q does not exist", qname))
+				return
+			}
 			counts, err := stateCountsForQueues(r.Context(), rc, inspector, []string{qname})
 			if err != nil {
 				writeError(w, errorStatus(err), err)
@@ -929,6 +958,9 @@ type bulkFilteredRequest struct {
 	Meta    []string `json:"meta"`
 	Action  string   `json:"action"` // delete | run | archive | cancel
 	MaxScan int      `json:"max_scan"`
+	// Reason is an optional operator-provided note recorded in the audit
+	// entry, mirroring the jobs API's audited reason.
+	Reason string `json:"reason"`
 }
 
 type bulkFilteredResponse struct {
@@ -944,8 +976,8 @@ type bulkFilteredResponse struct {
 // GET /api/tasks (phase 6). §4.3 note: the jobs API is the first-class bulk
 // primitive; this endpoint remains for selection-sized scopes.
 //
-//	POST /api/tasks:batch_filtered  {queue,state,q,meta,action,max_scan}
-func newBulkFilteredTasksHandlerFunc(inspector *asynq.Inspector, rc redis.UniversalClient, pf PayloadFormatter) http.HandlerFunc {
+//	POST /api/tasks:batch_filtered  {queue,state,q,meta,action,max_scan,reason}
+func newBulkFilteredTasksHandlerFunc(inspector *asynq.Inspector, rc redis.UniversalClient, pf PayloadFormatter, audit *jobs.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodySize)
 		dec := json.NewDecoder(r.Body)
@@ -999,8 +1031,24 @@ func newBulkFilteredTasksHandlerFunc(inspector *asynq.Inspector, rc redis.Univer
 			}
 		}
 
+		// Throttled at the jobs runner's maximum rate so a filter matching
+		// tens of thousands of tasks cannot hammer Redis with an unbounded
+		// burst; larger scopes belong on the jobs API, which previews,
+		// audits, and throttles as a background job.
+		const actionsPerSecond = 1000
+		limiter := time.NewTicker(time.Second / actionsPerSecond)
+		defer limiter.Stop()
 		processed, errCount := 0, 0
+		canceled := false
 		for _, t := range matches {
+			select {
+			case <-r.Context().Done():
+				canceled = true
+			case <-limiter.C:
+			}
+			if canceled {
+				break // client gone; still audit what was applied so far
+			}
 			var actErr error
 			switch req.Action {
 			case "delete":
@@ -1017,6 +1065,26 @@ func newBulkFilteredTasksHandlerFunc(inspector *asynq.Inspector, rc redis.Univer
 			} else {
 				processed++
 			}
+		}
+
+		// Audit like every other mutation path (§5.11). Uses a background
+		// context so a client disconnect cannot erase the trace of actions
+		// already applied.
+		actor := actorFromContext(r.Context())
+		auditCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := audit.AppendAudit(auditCtx, jobs.AuditEntry{
+			Event:  jobs.AuditBatchFiltered,
+			Actor:  actor.Name,
+			Verb:   req.Action,
+			Scope:  jobs.Scope{Queue: req.Queue, State: req.State, Q: req.Q, Meta: req.Meta},
+			Reason: strings.TrimSpace(req.Reason),
+			Acted:  int64(processed),
+			Failed: int64(errCount),
+		}); err != nil {
+			writeErrorMsg(w, http.StatusInternalServerError,
+				fmt.Sprintf("%d task(s) were %sd, but the audit write failed: %v", processed, req.Action, err))
+			return
 		}
 
 		writeResponseJSON(w, bulkFilteredResponse{

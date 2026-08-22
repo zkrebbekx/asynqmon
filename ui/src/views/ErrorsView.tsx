@@ -24,7 +24,7 @@ import {
   getErrorSignature,
   listErrorSignatures,
 } from "../api-errors";
-import { JobVerb } from "../api";
+import { JobMutationVerb } from "../api";
 import { paths } from "../paths";
 import { timeAgo, toErrorString } from "../utils";
 import {
@@ -146,7 +146,7 @@ function SignatureDetail({
   onVerb,
 }: {
   detail: GetErrorSignatureResponse;
-  onVerb: (verb: JobVerb, scope: BulkJobScope) => void;
+  onVerb: (verb: JobMutationVerb, scope: BulkJobScope) => void;
 }) {
   const [scopeState, setScopeState] = useState<SigScopeState>("retry");
   const row = detail.signature;
@@ -177,8 +177,8 @@ function SignatureDetail({
         {/* Left: magnitude cross-check (count-over-time is phase 10) */}
         <div className="px-3.5 py-3">
           <MicroLabel className="mb-1.5">
-            occurrences — count-over-time arrives with ring buffers (phase 10); until then, the
-            counter cross-check:
+            occurrences — two independent counts of the same failures, so
+            you can sanity-check one against the other:
           </MicroLabel>
           <div className="space-y-1 text-xs">
             <div className="flex items-baseline gap-2">
@@ -353,7 +353,7 @@ export default function ErrorsView() {
   const [loading, setLoading] = useState(true);
 
   // Bulk-verb modal state (§4.3 flow, shared machinery).
-  const [job, setJob] = useState<{ verb: JobVerb; scope: BulkJobScope } | null>(null);
+  const [job, setJob] = useState<{ verb: JobMutationVerb; scope: BulkJobScope } | null>(null);
 
   const fetchList = useCallback(async () => {
     try {
@@ -429,7 +429,7 @@ export default function ErrorsView() {
       <div className="rounded-lg border border-[var(--fc-line)] bg-[var(--fc-panel)]">
         <div className="flex flex-wrap items-center gap-2 border-b border-[var(--fc-line2)] px-3 py-2 text-xs">
           <span className="font-semibold text-[var(--fc-ink)]">
-            Failure signatures{resp ? ` · ${fmt(resp.total_signatures)}` : ""}
+            Error signatures{resp ? ` · ${fmt(resp.total_signatures)}` : ""}
           </span>
           {resp && resp.honesty.trimmed_queues.length > 0 && (
             <FcChip tone="warn">

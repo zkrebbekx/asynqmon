@@ -219,6 +219,19 @@ func main() {
 		os.Exit(1)
 	}
 
+	// A spoofable identity must not satisfy --require-identity: with
+	// --auth-header set and no --trusted-proxies, the header is trusted from
+	// EVERY peer, so any client that can reach the listener directly can
+	// forge the audit actor AND pass the identity requirement. The library
+	// keeps the permissive single-proxy default (with a loud warning); the
+	// binary refuses the misconfiguration outright.
+	if cfg.RequireIdentity && cfg.AuthHeader != "" && strings.TrimSpace(cfg.TrustedProxies) == "" {
+		log.Fatal("--require-identity with --auth-header needs --trusted-proxies: " +
+			"without it the identity header is trusted from every peer, so any direct " +
+			"client can forge the audit actor and still satisfy the identity requirement. " +
+			"Set --trusted-proxies to your reverse proxy's CIDRs (e.g. --trusted-proxies=10.0.0.0/8).")
+	}
+
 	redisConnOpt, err := makeRedisConnOpt(cfg)
 	if err != nil {
 		log.Fatal(err)

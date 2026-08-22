@@ -138,6 +138,11 @@ func writeCache(ctx context.Context, fence *leasefence.Fence, token int64, fleet
 		add := append(leasefence.Cmd{"SADD", queueIndexKey}, names...)
 		cmds = append(cmds, add)
 	}
+	// The index gets the same safety-net TTL as the rows: it was the one
+	// cache key that never expired, so a decommissioned install's index (up
+	// to tens of thousands of names) persisted forever. Refreshed on every
+	// sweep, so a live sweeper keeps it alive indefinitely.
+	cmds = append(cmds, leasefence.Cmd{"PEXPIRE", queueIndexKey, ttlMs})
 	for _, name := range removed {
 		cmds = append(cmds,
 			leasefence.Cmd{"SREM", queueIndexKey, name},

@@ -129,6 +129,7 @@ func auditView(w http.ResponseWriter, r *http.Request, audit *jobs.Store, event 
 func newCreateViewHandlerFunc(store viewStore, audit *jobs.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req upsertViewRequest
+		r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodySize)
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			writeErrorMsg(w, http.StatusBadRequest, `invalid JSON body (want {"name", "target", "state"})`)
 			return
@@ -147,7 +148,14 @@ func newCreateViewHandlerFunc(store viewStore, audit *jobs.Store) http.HandlerFu
 			writeErrorMsg(w, http.StatusBadRequest, reason)
 			return
 		}
-		if n, err := store.Count(r.Context()); err == nil && n >= viewMaxCount {
+		// Fail closed: the cap protects the unpaginated List (ZRANGE 0 -1 +
+		// HGETALL per id), so a Count error must not skip it.
+		n, err := store.Count(r.Context())
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+		if n >= viewMaxCount {
 			writeErrorMsg(w, http.StatusBadRequest, "view store is at its 500-view cap — delete stale views first")
 			return
 		}
@@ -179,6 +187,7 @@ func newUpdateViewHandlerFunc(store viewStore, audit *jobs.Store) http.HandlerFu
 	return func(w http.ResponseWriter, r *http.Request) {
 		id := mux.Vars(r)["view_id"]
 		var req upsertViewRequest
+		r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodySize)
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			writeErrorMsg(w, http.StatusBadRequest, `invalid JSON body (want {"name"?, "target"?, "state"?})`)
 			return

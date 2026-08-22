@@ -15,7 +15,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { Search, CornerDownLeft } from "lucide-react";
 import * as api from "../api";
-import { JobVerb } from "../api";
+import { JobMutationVerb } from "../api";
 import { listFleetQueues, FleetQueueRow } from "../api-fleet";
 import { listViews, SavedView } from "../api-views";
 import { fuzzyFilter, FuzzyMatch } from "../lib/fuzzy";
@@ -76,7 +76,7 @@ export default function CommandPalette({ open, onClose }: Props) {
   const [views, setViews] = useState<SavedView[]>([]);
   const [lookup, setLookup] = useState<"idle" | "busy" | "notfound">("idle");
   // Verb handoff: the modal outlives the (closed) overlay.
-  const [pendingVerb, setPendingVerb] = useState<{ verb: JobVerb; scope: BulkJobScope } | null>(null);
+  const [pendingVerb, setPendingVerb] = useState<{ verb: JobMutationVerb; scope: BulkJobScope } | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
 

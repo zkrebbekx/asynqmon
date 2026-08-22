@@ -75,9 +75,9 @@ func newCreateJobHandlerFunc(store *jobs.Store) http.HandlerFunc {
 		}
 		verb := jobs.Verb(req.Verb)
 		switch verb {
-		case jobs.VerbRun, jobs.VerbArchive, jobs.VerbDelete, jobs.VerbCancel:
+		case jobs.VerbRun, jobs.VerbArchive, jobs.VerbDelete, jobs.VerbCancel, jobs.VerbCount:
 		default:
-			writeErrorMsg(w, http.StatusBadRequest, "invalid verb (want run|archive|delete|cancel)")
+			writeErrorMsg(w, http.StatusBadRequest, "invalid verb (want run|archive|delete|cancel|count)")
 			return
 		}
 		if reason := jobs.ValidateScopeVerb(req.Scope, verb); reason != "" {
@@ -180,6 +180,9 @@ func newGetJobHandlerFunc(store *jobs.Store) http.HandlerFunc {
 		}
 		q := r.URL.Query()
 		offset := int64(atoiDefault(q.Get("failures_offset"), 0))
+		if offset < 0 {
+			offset = 0
+		}
 		limit := int64(atoiDefault(q.Get("failures_limit"), 100))
 		if limit < 1 || limit > 1000 {
 			limit = 100

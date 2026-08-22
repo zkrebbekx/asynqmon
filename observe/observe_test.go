@@ -20,11 +20,18 @@ func TestKeyBuilders(t *testing.T) {
 			ak := AttemptsKey(DefaultKeyPrefix, "billing", "task-1")
 			sk := SummaryKey(DefaultKeyPrefix, "billing", "task-1")
 
-			Convey("Then the attempts key is prefix + queue + id", func() {
-				So(ak, ShouldEqual, "asynqmon:obs:billing:task-1")
+			Convey("Then the attempts key carries the att namespace", func() {
+				// A discriminator segment on BOTH key kinds keeps the
+				// namespaces disjoint: a queue named "sum" used to collide
+				// an attempt LIST with a summary HASH.
+				So(ak, ShouldEqual, "asynqmon:obs:att:billing:task-1")
 			})
 			Convey("And the summary key inserts the sum namespace", func() {
 				So(sk, ShouldEqual, "asynqmon:obs:sum:billing:task-1")
+			})
+			Convey("And a queue literally named sum cannot collide the two", func() {
+				So(AttemptsKey(DefaultKeyPrefix, "sum", "t"), ShouldNotEqual,
+					SummaryKey(DefaultKeyPrefix, "", "t"))
 			})
 		})
 	})

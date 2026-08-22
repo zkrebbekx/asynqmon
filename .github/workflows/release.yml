@@ -5,50 +5,71 @@ on:
     types:
       - created
 
+permissions:
+  contents: write
+
 jobs:
   release:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        goos: [darwin, linux, windows]
+        include:
+          - goos: linux
+            goarch: amd64
+          - goos: linux
+            goarch: arm64
+          - goos: darwin
+            goarch: amd64
+          - goos: darwin
+            goarch: arm64
+          - goos: windows
+            goarch: amd64
     steps:
       - name: Checkout
-        uses: actions/checkout@v2
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: "1.21"
+          go-version-file: go.mod
 
       - name: Set up Node
         uses: actions/setup-node@v4
         with:
           node-version: "20"
-
-      - name: Get release
-        id: release
-        uses: bruceadams/get-release@v1.2.2
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
 
       - name: Install NPM packages
         run: cd ui && npm ci
 
-      - name: Build Release Binary
-        run: |
-          GOOS=${{ matrix.goos }} GOARCH=amd64 make build
-          tar -czvf asynqmon_${{ steps.release.outputs.tag_name }}_${{ matrix.goos }}_amd64.tar.gz asynqmon
-          ls
-
-      - name: Upload Release Binary
-        id: upload-go-release-asset
-        uses: actions/upload-release-asset@v1
+      - name: Build release binary
         env:
-          GITHUB_TOKEN: ${{ github.token }}
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          set -euo pipefail
+          make build
+          base="asynqmon_${TAG}_${GOOS}_${GOARCH}"
+          if [ "$GOOS" = "windows" ]; then
+            # Windows binaries need the .exe suffix and land in a zip, not a
+            # tarball of an extensionless PE file.
+            mv asynqmon asynqmon.exe
+            zip "${base}.zip" asynqmon.exe
+            sha256sum "${base}.zip" > "${base}.zip.sha256"
+          else
+            tar -czvf "${base}.tar.gz" asynqmon
+            sha256sum "${base}.tar.gz" > "${base}.tar.gz.sha256"
+          fi
+          ls -la
+
+      - name: Upload release assets
+        uses: softprops/action-gh-release@v2
         with:
-          upload_url: ${{ steps.release.outputs.upload_url }}
-          asset_path: ./asynqmon_${{ steps.release.outputs.tag_name }}_${{ matrix.goos }}_amd64.tar.gz
-          asset_name: asynqmon_${{ steps.release.outputs.tag_name }}_${{ matrix.goos }}_amd64.tar.gz
-          asset_content_type: application/gzip
+          files: |
+            asynqmon_*.tar.gz
+            asynqmon_*.zip
+            asynqmon_*.sha256

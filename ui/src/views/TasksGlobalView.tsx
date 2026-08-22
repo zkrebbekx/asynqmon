@@ -34,7 +34,7 @@ import {
 } from "../lib/aql";
 import { TIME_CHIPS, TimeChip, applyTimeChip, isTimeChipActive, timeChipClause } from "../lib/timechips";
 import { cn, clickableRowClass, clickableRowProps } from "../lib/utils";
-import { usePolling } from "../hooks";
+import { useLatestOnly, usePolling } from "../hooks";
 import { useKeymap } from "../hooks/useKeymap";
 import { useFrozenData } from "../hooks/useFrozenData";
 import { useJobProgress } from "../hooks/useJobProgress";
@@ -83,17 +83,19 @@ const actionFns: Record<State, { run?: ActionFn; archive?: ActionFn; delete?: Ac
 // Shared with the ⌘K palette's verb entries (lib/palette).
 const bulkCaps = STATE_BULK_VERBS;
 
-// Verb used for "Scan-to-completion as job": the LEAST destructive verb the
-// state supports — the point is the completed preview enumeration (exact
-// count on the Operations screen), never an execution.
+// "Scan-to-completion as job" uses the dedicated preview-only count verb:
+// the point is the completed preview enumeration (exact count on the
+// Operations screen), and the audit log now says so honestly — these used
+// to be recorded as the least destructive mutation the state supported
+// (delete, for completed), training admins to ignore delete entries.
 const scanJobVerb: Record<State, api.JobVerb> = {
-  active: "cancel",
-  pending: "archive",
-  aggregating: "archive",
-  scheduled: "archive",
-  retry: "archive",
-  archived: "run",
-  completed: "delete",
+  active: "count",
+  pending: "count",
+  aggregating: "count",
+  scheduled: "count",
+  retry: "count",
+  archived: "count",
+  completed: "count",
 };
 
 // AQL wire fields of one search response the console renders from.
@@ -311,19 +313,24 @@ export default function TasksGlobalView() {
     setJobVanished(0);
     setJobPage(0);
   }, [scanJobId]);
+  const beginJobResultsFetch = useLatestOnly();
   const fetchJobResults = useCallback(async () => {
     if (!jobResultsMode || !scanJobId) return;
+    const isCurrent = beginJobResultsFetch();
     setLoading(true);
     try {
       const resp = await api.getJobResults(scanJobId, jobPage * view.size, view.size);
+      if (!isCurrent()) return;
       setJobTasks(resp.tasks ?? []);
       setJobTotal(resp.total_candidates);
       setJobVanished(resp.vanished);
       setError("");
     } catch (e) {
+      if (!isCurrent()) return;
       setError(toErrorString(e));
     }
     setLoading(false);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [jobResultsMode, scanJobId, jobPage, view.size]);
   useEffect(() => {
     fetchJobResults();
@@ -341,10 +348,12 @@ export default function TasksGlobalView() {
 
   const filterKey = `${view.q}|${view.state}|${view.queue}|${view.size}`;
 
+  const beginTasksFetch = useLatestOnly();
   const fetchTasks = useCallback(async () => {
     // Job-results mode serves the completed job's own enumerated list —
     // never re-run the live budgeted scan under it.
     if (jobResultsMode) return;
+    const isCurrent = beginTasksFetch();
     try {
       const resp = await api.searchTasks({
         queue: view.queue,
@@ -354,6 +363,11 @@ export default function TasksGlobalView() {
         size: view.size,
         cursor: currentCursor || undefined,
       });
+      // An in-flight response for an old filter must never overwrite a
+      // newer one: the table would show the previous query's rows/total/
+      // cursor under the new pill (and the whole-scope bulk bar would
+      // advertise the stale total) until the next poll tick.
+      if (!isCurrent()) return;
       const rows = resp.tasks ?? [];
       setTasks(rows);
       setTotal(resp.total);
@@ -376,6 +390,7 @@ export default function TasksGlobalView() {
         }
       }
     } catch (e) {
+      if (!isCurrent()) return;
       const data = (e as { response?: { status?: number; data?: unknown } })?.response;
       if (data?.status === 400 && isAqlRejection(data.data)) {
         setRejection({ ...data.data, query: view.q });
@@ -394,28 +409,37 @@ export default function TasksGlobalView() {
   usePolling(fetchTasks, pollInterval, [view.queue, view.state, view.q, view.page, view.size, currentCursor, jobResultsMode]);
 
   // All-seven state pill counts: one pipelined pass server-side, polled.
+  const beginCountsFetch = useLatestOnly();
   const fetchCounts = useCallback(async () => {
+    const isCurrent = beginCountsFetch();
     try {
       const resp = await api.taskStateCounts(view.queue);
+      if (!isCurrent()) return;
       setStateCounts(resp.counts);
     } catch {
       /* keep the last counts — pills degrade to stale, not empty */
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [view.queue]);
   usePolling(fetchCounts, pollInterval, [view.queue]);
 
   // Global metadata facets (across the whole filtered set, not just this page).
+  const beginFacetsFetch = useLatestOnly();
   const fetchFacets = useCallback(async () => {
+    const isCurrent = beginFacetsFetch();
     try {
       const resp = await api.taskMetadata({
         queue: view.queue,
         state: view.state,
         q: view.q,
       });
+      if (!isCurrent()) return;
       setFacets(resp.facets);
     } catch {
+      if (!isCurrent()) return;
       setFacets([]);
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [view.queue, view.state, view.q]);
 
   useEffect(() => {
@@ -426,24 +450,29 @@ export default function TasksGlobalView() {
   // group result mode the groups ARE the result set, so fetch more of them.
   const isFailureState = view.state === "retry" || view.state === "archived";
   const isGroupMode = isFailureState && view.mode !== "rows";
+  const beginAnalyticsFetch = useLatestOnly();
   const fetchAnalytics = useCallback(async () => {
     if (!isFailureState) {
       setErrorGroups([]);
       setTypeGroups([]);
       return;
     }
+    const isCurrent = beginAnalyticsFetch();
     const limit = isGroupMode ? 50 : 8;
     try {
       const [byError, byType] = await Promise.all([
         api.taskAggregate({ queue: view.queue, state: view.state, q: view.q, by: "error", limit }),
         api.taskAggregate({ queue: view.queue, state: view.state, q: view.q, by: "type", limit }),
       ]);
+      if (!isCurrent()) return;
       setErrorGroups(byError.groups);
       setTypeGroups(byType.groups);
     } catch {
+      if (!isCurrent()) return;
       setErrorGroups([]);
       setTypeGroups([]);
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isFailureState, isGroupMode, view.queue, view.state, view.q]);
 
   useEffect(() => {
@@ -1256,7 +1285,19 @@ export default function TasksGlobalView() {
               ) : rows.length === 0 ? (
                 <TableRow>
                   <TableCell colSpan={window.READ_ONLY ? 4 : 6} className="text-center py-8 text-[var(--fc-ink3)]">
-                    No tasks
+                    No tasks match this filter.
+                    <div className="mt-1 text-[11px]">
+                      Nothing enqueued yet? Connect an{" "}
+                      <a
+                        href="https://github.com/hibiken/asynq"
+                        target="_blank"
+                        rel="noreferrer"
+                        className="text-[var(--fc-acc)] hover:underline"
+                      >
+                        asynq client
+                      </a>{" "}
+                      to this Redis and enqueue a first task — it shows up here live.
+                    </div>
                   </TableCell>
                 </TableRow>
               ) : (
@@ -1301,28 +1342,28 @@ export default function TasksGlobalView() {
                           <div className="flex items-center justify-center gap-1">
                             {acts.run && (
                               <Tooltip><TooltipTrigger asChild>
-                                <Button size="icon" variant="ghost" className="h-7 w-7" onClick={() => runAction(acts.run!, t.queue, t.id)}>
+                                <Button size="icon" variant="ghost" className="h-7 w-7" onClick={() => runAction(acts.run!, t.queue, t.id)} aria-label={`Run task ${t.id}`}>
                                   <Play size={13} />
                                 </Button>
                               </TooltipTrigger><TooltipContent>Run now</TooltipContent></Tooltip>
                             )}
                             {acts.cancel && (
                               <Tooltip><TooltipTrigger asChild>
-                                <Button size="icon" variant="ghost" className="h-7 w-7" onClick={() => runAction(acts.cancel!, t.queue, t.id)}>
+                                <Button size="icon" variant="ghost" className="h-7 w-7" onClick={() => runAction(acts.cancel!, t.queue, t.id)} aria-label={`Cancel task ${t.id}`}>
                                   <X size={13} />
                                 </Button>
                               </TooltipTrigger><TooltipContent>Cancel</TooltipContent></Tooltip>
                             )}
                             {acts.archive && (
                               <Tooltip><TooltipTrigger asChild>
-                                <Button size="icon" variant="ghost" className="h-7 w-7" onClick={() => runAction(acts.archive!, t.queue, t.id)}>
+                                <Button size="icon" variant="ghost" className="h-7 w-7" onClick={() => runAction(acts.archive!, t.queue, t.id)} aria-label={`Archive task ${t.id}`}>
                                   <Archive size={13} />
                                 </Button>
                               </TooltipTrigger><TooltipContent>Archive</TooltipContent></Tooltip>
                             )}
                             {acts.delete && (
                               <Tooltip><TooltipTrigger asChild>
-                                <Button size="icon" variant="ghost" className="h-7 w-7 text-[var(--fc-crit)]" onClick={() => setConfirmDelete(t)}>
+                                <Button size="icon" variant="ghost" className="h-7 w-7 text-[var(--fc-crit)]" onClick={() => setConfirmDelete(t)} aria-label={`Delete task ${t.id}`}>
                                   <Trash2 size={13} />
                                 </Button>
                               </TooltipTrigger><TooltipContent>Delete</TooltipContent></Tooltip>
@@ -1401,6 +1442,7 @@ export default function TasksGlobalView() {
                   className="h-7 w-7"
                   disabled={cursorStack.length === 0}
                   onClick={() => setCursorStack((s) => s.slice(0, -1))}
+                  aria-label="Previous window"
                 >
                   <ChevronLeft size={14} />
                 </Button>
@@ -1410,6 +1452,7 @@ export default function TasksGlobalView() {
                   className="h-7 w-7"
                   disabled={meta.cursor === ""}
                   onClick={() => setCursorStack((s) => [...s, meta.cursor])}
+                  aria-label="Next window"
                 >
                   <ChevronRight size={14} />
                 </Button>
@@ -1436,10 +1479,10 @@ export default function TasksGlobalView() {
                   </select>
                 </div>
                 <div className="flex items-center gap-1">
-                  <Button size="icon" variant="ghost" className="h-7 w-7" disabled={view.page === 0} onClick={() => updateView({ page: view.page - 1 })}>
+                  <Button size="icon" variant="ghost" className="h-7 w-7" disabled={view.page === 0} onClick={() => updateView({ page: view.page - 1 })} aria-label="Previous page">
                     <ChevronLeft size={14} />
                   </Button>
-                  <Button size="icon" variant="ghost" className="h-7 w-7" disabled={view.page >= totalPages - 1} onClick={() => updateView({ page: view.page + 1 })}>
+                  <Button size="icon" variant="ghost" className="h-7 w-7" disabled={view.page >= totalPages - 1} onClick={() => updateView({ page: view.page + 1 })} aria-label="Next page">
                     <ChevronRight size={14} />
                   </Button>
                 </div>

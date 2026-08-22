@@ -187,9 +187,14 @@ func hotSet(universe map[string]bool, prev map[string]*QueueSnapshot, attention,
 		if taken >= k || !room() {
 			break
 		}
-		if !set[c.q] {
-			set[c.q] = true
+		if set[c.q] {
+			// Already admitted (attention-flagged / viewed): top-K slots are
+			// "on top of" those admissions, so a duplicate must not consume
+			// one — during incidents (attention-heavy sets) the scored
+			// component otherwise shrank exactly when coverage mattered most.
+			continue
 		}
+		set[c.q] = true
 		taken++
 	}
 	out := make([]string, 0, len(set))

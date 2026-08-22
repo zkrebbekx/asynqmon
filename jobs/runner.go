@@ -43,8 +43,14 @@ const (
 	// abandoned; the index cap and TTL age them out.
 	claimScanLimit = 200
 
-	// pausedPollEvery is how often a claiming runner re-reads a paused job.
-	pausedPollEvery = time.Second
+	// maxCandidates caps a preview's persisted candidate list. Refs are
+	// ~40-60 bytes each, so the cap bounds a job's Redis footprint at tens
+	// of MB; without it a fleet-wide preview near asynq's archive caps
+	// could persist tens of millions of refs — gigabytes on the production
+	// Redis — for the full jobTTL even if the preview was abandoned. A job
+	// that exceeds it fails with instructions to narrow the scope (an
+	// honest failure beats a silently truncated 'exact' count).
+	maxCandidates = 1_000_000
 )
 
 // asynq's pending/active LIST keys, mirrored (same version-pinned rationale
@@ -262,12 +268,18 @@ func (r *Runner) claimTick(ctx context.Context) {
 	}
 }
 
-// claimableState: previewing and running jobs need a worker; paused jobs
-// need a watcher so a resume is picked up even after the pausing replica
-// died. preview_ready jobs are dormant until an execute request flips them
-// to running.
+// claimableState: only previewing and running jobs need a worker. Paused
+// jobs are deliberately NOT claimable: RequestResume flips the state back to
+// previewing/running directly in the store, so the next claim tick picks a
+// resumed job up without any replica having to babysit it — claiming paused
+// jobs both pinned concurrency slots indefinitely (a few forgotten paused
+// jobs could starve the whole fleet, oldest-first) and re-entered
+// enumeration without a state check, silently resuming work the UI showed
+// as paused. preview_ready jobs are dormant until an execute request flips
+// them to running; canceling an unclaimed paused/preview_ready job is
+// finalized store-side (RequestCancel).
 func claimableState(j *Job) bool {
-	return j.State == StatePreviewing || j.State == StateRunning || j.State == StatePaused
+	return j.State == StatePreviewing || j.State == StateRunning
 }
 
 // ----------------------------------------------------------------------------
@@ -332,6 +344,13 @@ func (r *Runner) work(ctx context.Context, id string, token int64) {
 		return
 	}
 
+	// A job can flip to paused/terminal between the claim listing and here;
+	// never enumerate or execute a job whose state says otherwise. The
+	// deferred release frees it for whichever replica claims after resume.
+	if j.State != StatePreviewing && j.State != StateRunning {
+		return
+	}
+
 	if !j.PreviewComplete {
 		done := r.enumerate(ctx, j, token, cs)
 		if !done {
@@ -349,18 +368,13 @@ func (r *Runner) work(ctx context.Context, id string, token int64) {
 		r.execute(ctx, j, token, cs)
 		return
 	}
-	if j.State == StatePaused {
-		// Claimed a paused job: hold the claim and watch for resume/cancel.
-		if next := r.waitWhilePaused(ctx, id, token, cs); next != nil && next.Phase == PhaseExecute && next.State == StateRunning {
-			r.execute(ctx, next, token, cs)
-		}
-	}
-	// preview_ready: park (release claim via defer) until execute.
+	// preview_ready or paused-mid-claim: park (release claim via defer)
+	// until an execute/resume request flips the state back to claimable.
 }
 
 // checkCtl handles a pending pause/cancel request between batches. Returns
 // the (possibly re-read) job and whether work may continue.
-func (r *Runner) checkCtl(ctx context.Context, j *Job, token int64, cs *claimSession) (*Job, bool) {
+func (r *Runner) checkCtl(ctx context.Context, j *Job, token int64) (*Job, bool) {
 	fresh, err := r.store.Get(ctx, j.ID)
 	if err != nil {
 		return j, false
@@ -370,48 +384,16 @@ func (r *Runner) checkCtl(ctx context.Context, j *Job, token int64, cs *claimSes
 		r.finalize(ctx, fresh, token, StateCanceled, "")
 		return fresh, false
 	case CtlPause:
-		if ok, _ := r.store.WriteProgress(ctx, j.ID, token, ProgressWrite{
+		// Honor the pause and unwind: the claim is released so the job sits
+		// unclaimed while paused (paused jobs are not claimable — see
+		// claimableState). RequestResume flips the state back, and the next
+		// claim tick on any replica continues from the persisted cursor.
+		_, _ = r.store.WriteProgress(ctx, j.ID, token, ProgressWrite{
 			Fields: map[string]string{"state": string(StatePaused), "ctl": ""},
-		}); !ok {
-			return fresh, false
-		}
-		next := r.waitWhilePaused(ctx, j.ID, token, cs)
-		if next == nil {
-			return fresh, false
-		}
-		return next, true
+		})
+		return fresh, false
 	}
 	return fresh, true
-}
-
-// waitWhilePaused polls a paused job until it is resumed (returns the fresh
-// job) or canceled / lost (returns nil).
-func (r *Runner) waitWhilePaused(ctx context.Context, id string, token int64, cs *claimSession) *Job {
-	for {
-		select {
-		case <-ctx.Done():
-			return nil
-		case <-time.After(pausedPollEvery):
-		}
-		if cs.isLost() {
-			return nil
-		}
-		j, err := r.store.Get(ctx, id)
-		if err != nil {
-			return nil
-		}
-		switch {
-		case j.Ctl == CtlCancel:
-			r.finalize(ctx, j, token, StateCanceled, "")
-			return nil
-		case j.State == StatePaused:
-			continue
-		case j.State.IsTerminal():
-			return nil
-		default:
-			return j // resumed (running or previewing)
-		}
-	}
 }
 
 // finalize writes a terminal state (fence-guarded) and the completion audit
@@ -600,14 +582,23 @@ func (r *Runner) enumerate(ctx context.Context, j *Job, token int64, cs *claimSe
 						nextQ, nextG = qi+1, 0
 					}
 				}
+				fields := map[string]string{
+					"candidates":  strconv.FormatInt(j.Counts.Candidates, 10),
+					"scanned":     strconv.FormatInt(j.Counts.Scanned, 10),
+					"cursor_qidx": strconv.Itoa(nextQ),
+					"cursor_gidx": strconv.Itoa(nextG),
+					"cursor_page": strconv.Itoa(nextPage),
+				}
+				if nextQ != qi {
+					// Advancing to the next queue: the frozen group list
+					// belongs to THIS queue. A resume at the boundary must
+					// re-list the next queue's groups, not enumerate it
+					// against this queue's names (which silently under-counts
+					// the preview the delete gate trusts).
+					fields["cursor_groups"] = ""
+				}
 				ok, werr := r.store.WriteProgress(ctx, j.ID, token, ProgressWrite{
-					Fields: map[string]string{
-						"candidates":  strconv.FormatInt(j.Counts.Candidates, 10),
-						"scanned":     strconv.FormatInt(j.Counts.Scanned, 10),
-						"cursor_qidx": strconv.Itoa(nextQ),
-						"cursor_gidx": strconv.Itoa(nextG),
-						"cursor_page": strconv.Itoa(nextPage),
-					},
+					Fields:     fields,
 					Candidates: refs,
 					Sample:     sample,
 				})
@@ -621,9 +612,18 @@ func (r *Runner) enumerate(ctx context.Context, j *Job, token int64, cs *claimSe
 					r.logf("asynqmon: jobs: %s: fencing token superseded during preview; standing down", j.ID)
 					return false
 				}
+				if j.Counts.Candidates > maxCandidates {
+					r.finalize(ctx, j, token, StateFailed, fmt.Sprintf(
+						"scope too large: preview exceeded %d candidates — narrow the scope (queue, state, or an AQL clause) and retry",
+						maxCandidates))
+					// Free the refs immediately instead of holding tens of
+					// MB for the full jobTTL. Best-effort.
+					_ = r.store.DropCandidates(ctx, j.ID)
+					return false
+				}
 
 				var cont bool
-				if j, cont = r.checkCtl(ctx, j, token, cs); !cont {
+				if j, cont = r.checkCtl(ctx, j, token); !cont {
 					return false
 				}
 				if last {
@@ -836,7 +836,7 @@ func (r *Runner) execute(ctx context.Context, j *Job, token int64, cs *claimSess
 		}
 
 		var cont bool
-		if j, cont = r.checkCtl(ctx, j, token, cs); !cont {
+		if j, cont = r.checkCtl(ctx, j, token); !cont {
 			return
 		}
 
