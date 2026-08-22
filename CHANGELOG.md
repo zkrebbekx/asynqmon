@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-08-22
+
+First tagged release of this fork ("Fleet Console"): the full console rebuild
+(Overview/attention engine, Queues directory, AQL task search, Errors,
+Operations bulk jobs + audit, Hygiene, saved views, SSE live updates) plus the
+2026-08-20 full-review hardening pass below. Requires asynq 0.24.x.
+
 ### Security
 
 - (api): Fixed a remotely-triggerable panic — a hostile `?page=` value overflowed the search pagination arithmetic past the bounds clamp (review P1-1)

@@ -1,9 +1,14 @@
 name: Release
 
+# Fires on a version tag push: softprops/action-gh-release creates the GitHub
+# Release for the tag if none exists yet, so `git tag v0.8.0 && git push
+# origin v0.8.0` is the entire release procedure (the docker publish
+# workflow's semver image tags fire on the same push). Creating a release in
+# the UI first still works — the action then just attaches the assets.
 on:
-  release:
-    types:
-      - created
+  push:
+    tags:
+      - "v*"
 
 permissions:
   contents: write
@@ -49,7 +54,7 @@ jobs:
         env:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
-          TAG: ${{ github.event.release.tag_name }}
+          TAG: ${{ github.ref_name }}
         run: |
           set -euo pipefail
           make build
@@ -66,9 +71,11 @@ jobs:
           fi
           ls -la
 
-      - name: Upload release assets
+      - name: Create release / upload assets
         uses: softprops/action-gh-release@v2
         with:
+          generate_release_notes: true
+          body: "See [CHANGELOG.md](https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/CHANGELOG.md) for the curated changes in this release."
           files: |
             asynqmon_*.tar.gz
             asynqmon_*.zip
