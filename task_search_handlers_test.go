@@ -1,6 +1,7 @@
 package asynqmon
 
 import (
+	"fmt"
 	"testing"
 
 	. "github.com/smartystreets/goconvey/convey"
@@ -175,6 +176,29 @@ func TestPageBounds(t *testing.T) {
 			s, e = pageBounds(5, 1, 0)
 			So(s, ShouldEqual, 5)
 			So(e, ShouldEqual, 5)
+		})
+	})
+}
+
+func TestCollectFacetsHighCardinalityGuard(t *testing.T) {
+	Convey("Given payloads with one low- and one high-cardinality key", t, func() {
+		var matches []*searchTask
+		for i := 0; i < 40; i++ {
+			matches = append(matches, &searchTask{
+				rawPayload: fmt.Sprintf(`{"collection":"articles","doc_id":"doc_%06d"}`, i),
+			})
+		}
+		facets := collectFacets(matches, 50)
+
+		Convey("The repeated value keeps its chip with the full count", func() {
+			So(len(facets), ShouldBeGreaterThan, 0)
+			So(facets[0].Key, ShouldEqual, "collection")
+			So(facets[0].Count, ShouldEqual, 40)
+		})
+		Convey("The unique-per-task key produces no count-1 chip flood", func() {
+			for _, f := range facets {
+				So(f.Key, ShouldNotEqual, "doc_id")
+			}
 		})
 	})
 }

@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- (api): The task-metadata facet sampler drops high-cardinality payload keys (UUID-ish ids whose values are all distinct) instead of flooding the console's chip row with pages of count-1 chips that cannot drill anything down
+
+### Changed
+
+- (docs): README screenshots regenerated against the current console — the previous set predated the Fleet Console rebuild entirely; adds an Overview screenshot (the landing screen had none) and content-fit captures of the Queues directory, queue workspace, Tasks console, Metrics, and dark-mode Settings
+- (docs): Install/run instructions point at this fork's own releases page and `ghcr.io/zkrebbekx/asynqmon` images instead of upstream's, which include none of the fork's console
+
 ## [0.8.0] - 2026-08-22
 
 First tagged release of this fork ("Fleet Console"): the full console rebuild
