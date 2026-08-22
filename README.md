@@ -34,19 +34,23 @@ There're a few options to install the binary:
 
 ### Release binaries
 
-You can download the release binary for your system from the [releases page](https://github.com/hibiken/asynqmon/releases).
+You can download the release binary for your system from this fork's
+[releases page](https://github.com/zkrebbekx/asynqmon/releases) — five
+platforms (linux/darwin × amd64/arm64, windows) with SHA256 checksums.
 
 ### Docker image
 
 To pull the Docker image:
 
 ```bash
-# Pull the latest image
-docker pull hibiken/asynqmon
+# Pull the latest image of this fork
+docker pull ghcr.io/zkrebbekx/asynqmon
 
-# Or specify the image by tag
-docker pull hibiken/asynqmon[:tag]
+# Or pin a released version (recommended)
+docker pull ghcr.io/zkrebbekx/asynqmon:0.8.0
 ```
+
+(The upstream `hibiken/asynqmon` image does not include this fork's console.)
 
 ### Building from source
 
@@ -95,7 +99,7 @@ To use the defaults, simply run and open http://localhost:8080.
 docker run --rm \
     --name asynqmon \
     -p 8080:8080 \
-    hibiken/asynqmon
+    ghcr.io/zkrebbekx/asynqmon:0.8.0
 ```
 
 By default, Asynqmon web server listens on port `8080` and connects to a Redis server running on `127.0.0.1:6379`.
@@ -107,7 +111,7 @@ To see all available flags, run:
 ./asynqmon --help
 
 # with a docker image
-docker run hibiken/asynqmon --help
+docker run ghcr.io/zkrebbekx/asynqmon:0.8.0 --help
 ```
 
 Here's the available flags:
@@ -223,32 +227,40 @@ query. The credentials are never logged.
 docker run --rm \
     --name asynqmon \
     -p 3000:3000 \
-    hibiken/asynqmon --port=3000 --redis-addr=host.docker.internal:6380
+    ghcr.io/zkrebbekx/asynqmon:0.8.0 --port=3000 --redis-addr=host.docker.internal:6380
 
 # with Docker (connect to a Redis server running in the Docker container)
 docker run --rm \
     --name asynqmon \
     --network dev-network \
     -p 8080:8080 \
-    hibiken/asynqmon --redis-addr=dev-redis:6379
+    ghcr.io/zkrebbekx/asynqmon:0.8.0 --redis-addr=dev-redis:6379
 ```
 
-Next, go to [localhost:8080](http://localhost:8080) and see Asynqmon dashboard:
+Next, go to [localhost:8080](http://localhost:8080). The **Overview** landing
+screen shows fleet-wide KPIs, the failure pulse, and the attention list of
+queues that need a human:
 
-![Web UI Queues View](./docs/screenshots/dashboard.png)
+![Overview — fleet KPIs, failure pulse, attention findings](./docs/screenshots/overview.png)
 
-**Tasks view**
+**Queues directory** — every queue, sortable by any column, with 30-minute
+pending sparklines, per-row pause/resume, and the filter grammar in the
+search box:
 
-![Web UI Tasks View](./docs/screenshots/tasks.png)
+![Queues directory](./docs/screenshots/dashboard.png)
 
-**Browse and filter tasks across queues**
+**Queue workspace** — drill into one queue: the health strip (with
+pause/resume/delete controls), an Attention tab, all seven state tabs, and
+the top-errors rail:
 
-The **Tasks** view lets you browse tasks without first selecting a queue — the
-queue becomes a filter. Search by task id, type, queue name, or payload, and
-click the dynamically-generated metadata chips (parsed from each task's JSON
-payload) to drill down with `key=value` filters.
+![Queue workspace](./docs/screenshots/tasks.png)
 
-![Web UI global Tasks view](./docs/screenshots/tasks-global.png)
+**Tasks console** — browse tasks across all queues; the queue is just a
+filter. Plain words search id/type/queue/payload; clause-shaped queries are
+[AQL](#task-search-aql). Metadata chips (parsed from each task's JSON
+payload) drill down with `key=value` filters:
+
+![Tasks console](./docs/screenshots/tasks-global.png)
 
 ## The console
 
@@ -435,9 +447,10 @@ observed data as such ("recorded by observe middleware — attempts before
 adoption are not shown"). Tasks without records simply show nothing — the
 dashboard never fabricates history.
 
-**Settings and adaptive dark mode**
+**Settings and adaptive dark mode** — poll cadence, theme, saved-view
+management, and the console-health diagnostics:
 
-![Web UI Settings and adaptive dark mode](./docs/screenshots/settings-dark.png)
+![Settings in dark mode](./docs/screenshots/settings-dark.png)
 
 ## Import as a Library
 
