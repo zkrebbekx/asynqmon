@@ -304,7 +304,7 @@ function DeadLetterTable({
                 {b}
               </th>
             ))}
-            <th className={theadClass}>Top error clusters</th>
+            <th className={theadClass}>Top errors</th>
             <th className={theadClass}></th>
           </tr>
         </thead>

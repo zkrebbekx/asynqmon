@@ -10,27 +10,25 @@ frontend (ui/src), product/UX, and build/CI/packaging.
 >
 > Status legend: `[ ]` open · `[x]` fixed in this review branch · `[~]` partially fixed.
 >
-> **Status as of the end of the review session** — what remains open:
+> **Status as of the end of the review session:** every item is fixed on this
+> branch. The follow-up pass closed the previously-open remainders:
 >
-> - **P1-10 [~]**: pause/resume/delete shipped in the queue workspace header;
->   Queues-directory row actions are still a nice-to-have.
-> - **P2-2 [~]**: loud startup warning shipped + README trust-model docs;
->   consider hard-refusing `RequireIdentity` without `TrustedProxies` in a
->   breaking release.
-> - **P2-3 [~]**: series/scheduler/errsig writes are fenced and tail paging is
->   trim-safe; the errsig indexer still has **no command budget/tiering** at
->   tier-2/3 fleet sizes (largest remaining scale-engineering item).
-> - **P2-8 [~]**: liveness probe + rs/cors + go.mod + dependabot shipped;
->   cutting an actual tagged release (chart appVersion, CHANGELOG release)
->   is a process step for the maintainer.
-> - **P2-9 [~]**: fleet-stream watchdog + candidates cap shipped; useJobsEvents
->   still opens one EventSource per consumer (HTTP/1.1 6-per-host pressure).
-> - **P3-1 [~]**: fleet/§-jargon strings fixed; unifying the four names for
->   failure grouping (Errors / signatures / clusters / top errors) is a
->   product-naming decision left open.
-> - **P3-3 [~]**: index TTL, hot-set slots, live consumer counts, observe key
->   collision shipped; `counterDelta`'s UTC-midnight tail loss remains (needs
->   an extra per-queue read at rollover, to be budgeted).
+> - **P1-10**: pause/resume also added to Queues-directory rows.
+> - **P2-2**: the binary now refuses `--require-identity` + `--auth-header`
+>   without `--trusted-proxies` (the library keeps the warning, no breaking
+>   API change).
+> - **P2-3**: the errsig indexer runs under a command budget
+>   (`Config.CommandBudget`, default 500 cmds/s) with holder-local rotation
+>   for both feeders; the metadata pipeline is chunked.
+> - **P2-9**: useJobsEvents shares one refcounted EventSource per tab.
+> - **P3-1**: naming unified — the indexed page is "Error signatures", live
+>   `error~` aggregations are "Top errors" everywhere.
+> - **P3-3**: `counterDelta` recovers the UTC-midnight tail (2 budgeted GETs
+>   per rolling queue per day).
+>
+> The only remaining process step is **cutting a tagged release** (P2-8),
+> which should happen from master after this branch merges: tag `v0.8.0`,
+> promote the CHANGELOG Unreleased section, and pin the chart's appVersion.
 
 Baseline at review time: `go build`, `go vet`, full Go test suite (9 packages)
 and all 505 UI tests pass; embedded `ui/build` is in sync with `ui/src` at HEAD.
@@ -234,7 +232,7 @@ and `QueuesDirectoryView.fetchQueues` (lower impact).
 **Fix:** sequence number or AbortController per filter key; discard
 non-current responses.
 
-### [~] P1-10 · Queue pause / resume / delete have no UI entry point
+### [x] P1-10 · Queue pause / resume / delete have no UI entry point
 
 **Area:** product/frontend · **Type:** gap
 
@@ -272,7 +270,7 @@ docker tag rules have never fired (see P2-8).
 **Fix:** modernize (checkout@v4 + `softprops/action-gh-release` or goreleaser),
 add `.exe` + zip for Windows, darwin/arm64, and a SHA256SUMS file.
 
-### [~] P2-2 · Identity: `AuthHeader` is trusted from any peer when `TrustedProxies` is empty — `RequireIdentity` satisfiable by a spoofed header
+### [x] P2-2 · Identity: `AuthHeader` is trusted from any peer when `TrustedProxies` is empty — `RequireIdentity` satisfiable by a spoofed header
 
 **Area:** backend · **Type:** security
 
@@ -289,7 +287,7 @@ operator cares about attribution.
 `RequireIdentity: true` without `TrustedProxies`. Document the trust model in
 the README flag table (see P2-6).
 
-### [~] P2-3 · Fencing gaps outside the stats cache; errsig indexer has no command budget and a paging skip bug
+### [x] P2-3 · Fencing gaps outside the stats cache; errsig indexer has no command budget and a paging skip bug
 
 **Area:** backend (stats/errsig) · **Type:** bug
 
@@ -428,7 +426,7 @@ is unattributed without `--auth-header` (and spoofable without
    language semantics and misadvertises support). `.github/dependabot.yml`
    covers only npm — add `gomod` + `github-actions` ecosystems.
 
-### [~] P2-9 · Frontend resilience batch: sticky SSE health flag defeats poll fallback; per-consumer EventSources; partial fleet fetch clears errors; jobs candidates list unbounded
+### [x] P2-9 · Frontend resilience batch: sticky SSE health flag defeats poll fallback; per-consumer EventSources; partial fleet fetch clears errors; jobs candidates list unbounded
 
 **Area:** frontend/backend · **Type:** bug
 
@@ -455,7 +453,7 @@ is unattributed without `--auth-header` (and spoofable without
 
 ## P3 — polish / follow-ups
 
-### [~] P3-1 · Terminology and copy cleanup: "fleet" leftovers, internal spec jargon, four names for failure grouping
+### [x] P3-1 · Terminology and copy cleanup: "fleet" leftovers, internal spec jargon, four names for failure grouping
 
 **Area:** product · **Type:** polish
 
@@ -495,7 +493,7 @@ is unattributed without `--auth-header` (and spoofable without
   explanation (deliberate, `handler.go:695-696`); `/api/queue_stats` has no
   UI caller left (dead surface).
 
-### [~] P3-3 · Subsystem data-honesty batch (stats/observe)
+### [x] P3-3 · Subsystem data-honesty batch (stats/observe)
 
 **Area:** backend · **Type:** polish
 

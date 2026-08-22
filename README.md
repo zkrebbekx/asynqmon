@@ -139,7 +139,7 @@ _Note_: Use `--redis-url` to specify address, db-number, and password with one f
 | `--disable-stats`(bool)           | `DISABLE_STATS`           | disable the background stats sweeper and the `/api/fleet` endpoints; the console degrades to the classic per-queue views      | false            |
 | `--auth-header`(string)           | `AUTH_HEADER`             | reverse-proxy header resolved as the acting user for the audit log (e.g. `X-Auth-Request-User`) — see [Identity & the audit log](#identity--the-audit-log) | "" |
 | `--trusted-proxies`(string)       | `TRUSTED_PROXIES`         | comma separated CIDRs the auth header is trusted from. **Empty means trusted from any peer** — set this whenever `--auth-header` is set, or any client that can reach the listener can forge the audit actor | "" |
-| `--require-identity`(bool)        | `REQUIRE_IDENTITY`        | refuse mutating requests (403 JSON) that carry no resolvable identity (auth header or basic-auth user)                        | false            |
+| `--require-identity`(bool)        | `REQUIRE_IDENTITY`        | refuse mutating requests (403 JSON) that carry no resolvable identity (auth header or basic-auth user). The binary refuses to start with `--require-identity` + `--auth-header` unless `--trusted-proxies` is also set — otherwise a spoofed header would satisfy the requirement | false            |
 
 ### Connecting to Redis
 

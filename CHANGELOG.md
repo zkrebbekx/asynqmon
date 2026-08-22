@@ -36,6 +36,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- (errsig): `Config.CommandBudget` (default 500 cmds/s) governs both indexer feeders with holder-local rotation — a run that fits the budget behaves as before; larger fleets are covered across ticks; the per-queue metadata pipeline is chunked (review P2-3, closing the last scale item)
+- (cmd): The binary refuses `--require-identity` + `--auth-header` without `--trusted-proxies` — a spoofed header must not satisfy the identity requirement (review P2-2; the library keeps the warning)
+- (ui): Pause/resume from Queues-directory rows (review P1-10); one shared refcounted jobs EventSource per tab (review P2-9); failure-grouping names unified — the indexed page is "Error signatures", live `error~` aggregations are "Top errors" everywhere (review P3-1)
+- (stats): `counterDelta` recovers the UTC-midnight counter tail for cold queues via two budgeted GETs per rolling queue per day (review P3-3)
 - (jobs/ui): Preview-only `count` verb — scan-to-completion counting no longer masquerades as `delete`/`archive` in the Operations screen and audit log; count jobs are refused by the execute gate and render a muted chip (review P2-5)
 - (ui): Queue pause / resume / delete controls in the queue workspace header, honoring read-only mode — the endpoints existed since upstream with no UI entry point (review P1-10)
 - (ui): Saved-view management in Settings (open/rename/delete, shared-asset warning); a `?` keyboard-cheatsheet chip in the topbar; disabled-with-tooltip affordances naming `--enable-enqueue` for Clone & edit and Schedulers Run-now; first-run guidance in the Tasks empty state (review P3-2)
