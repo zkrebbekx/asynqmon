@@ -8,6 +8,10 @@ on:
   pull_request:
     branches:
       - "master"
+  # Dispatch at a tag ref (e.g. refs/tags/v0.8.0) to publish that tag's
+  # semver images — needed when the tag was created by another workflow's
+  # token, whose events do not re-trigger tag-push workflows.
+  workflow_dispatch:
 jobs:
   push_to_registry:
     name: Push Docker image to GHCR

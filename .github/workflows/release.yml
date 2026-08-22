@@ -1,20 +1,44 @@
 name: Release
 
-# Fires on a version tag push: softprops/action-gh-release creates the GitHub
-# Release for the tag if none exists yet, so `git tag v0.8.0 && git push
-# origin v0.8.0` is the entire release procedure (the docker publish
-# workflow's semver image tags fire on the same push). Creating a release in
-# the UI first still works — the action then just attaches the assets.
+# Two entry points, same result:
+#   - pushing a v* tag (`git tag v0.8.0 && git push origin v0.8.0`), or
+#   - dispatching the workflow with a `tag` input (for environments whose
+#     git relay cannot push tags) — the create-release job then creates the
+#     tag at the dispatched commit via the release API.
+# Either way the create-release job creates the GitHub Release exactly once
+# (five parallel matrix jobs each racing to create it could produce
+# duplicates), and the matrix jobs only attach assets. Note: a tag created
+# by the workflow's own token does not re-trigger tag-push workflows, so
+# after a dispatch-mode release, dispatch the docker publish workflow at the
+# new tag ref for the semver image tags.
 on:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to create (e.g. v0.8.0), at the dispatched ref's commit"
+        required: true
+        type: string
 
 permissions:
   contents: write
 
 jobs:
+  create-release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create release (and tag, in dispatch mode)
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.tag || github.ref_name }}
+          target_commitish: ${{ github.sha }}
+          generate_release_notes: true
+          body: "See [CHANGELOG.md](https://github.com/${{ github.repository }}/blob/${{ inputs.tag || github.ref_name }}/CHANGELOG.md) for the curated changes in this release."
+
   release:
+    needs: create-release
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -54,7 +78,7 @@ jobs:
         env:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
-          TAG: ${{ github.ref_name }}
+          TAG: ${{ inputs.tag || github.ref_name }}
         run: |
           set -euo pipefail
           make build
@@ -71,11 +95,10 @@ jobs:
           fi
           ls -la
 
-      - name: Create release / upload assets
+      - name: Upload release assets
         uses: softprops/action-gh-release@v2
         with:
-          generate_release_notes: true
-          body: "See [CHANGELOG.md](https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/CHANGELOG.md) for the curated changes in this release."
+          tag_name: ${{ inputs.tag || github.ref_name }}
           files: |
             asynqmon_*.tar.gz
             asynqmon_*.zip
