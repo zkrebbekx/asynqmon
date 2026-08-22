@@ -319,6 +319,30 @@ cannot answer is rejected with a caret and the nearest supported alternative
 resumable cursor, or can be handed to a background **count** job that scans
 to completion for an exact number.
 
+### Task drawer: base64 payload decoding
+
+When a task's payload or result carries base64-encoded values — a common
+pattern for envelope fields and nested JSON — the task drawer shows the
+**decoded** rendering by default, with the raw view one click away:
+
+![Task drawer decoding base64 payload fields](./docs/screenshots/task-drawer-decoded.png)
+
+Base64-of-JSON embeds as structure (the `envelope` above renders as its
+inner object), plain-text values decode in place, and a payload that is one
+bare base64 string is handled too. A note under the block names exactly
+which fields were transformed ("decoded from base64: envelope, note"), and
+the copy button always copies the **raw** payload, so what you paste
+elsewhere is what's stored.
+
+Detection is deliberately conservative — a wrongly-"decoded" field is worse
+than a raw one. A value must have strict base64 shape (≥16 chars, standard
+or URL-safe alphabet, a length base64 can produce, ≥12 decoded bytes), mix
+character classes (single-class strings like slugs and long words are the
+main false-positive source), and decode to fully printable UTF-8 — which is
+what makes hex strings, dashless UUIDs, and prefixed ids that merely look
+base64-ish reliably stay raw. Anything failing any layer renders raw with
+no toggle at all.
+
 ### Operations, bulk jobs & the audit log
 
 Every whole-scope verb (run/archive/delete/cancel "all matching") is a

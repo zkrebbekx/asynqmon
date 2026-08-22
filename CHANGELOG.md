@@ -19,6 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - (docs): README screenshots regenerated against the current console — the previous set predated the Fleet Console rebuild entirely; adds an Overview screenshot (the landing screen had none) and content-fit captures of the Queues directory, queue workspace, Tasks console, Metrics, and dark-mode Settings
 - (docs): Install/run instructions point at this fork's own releases page and `ghcr.io/zkrebbekx/asynqmon` images instead of upstream's, which include none of the fork's console
+- (docs): README documents the task drawer's base64 payload decoding (detection layers, decoded/raw toggle, copy-copies-raw) with a live-app screenshot
 
 ## [0.8.0] - 2026-08-22
 
