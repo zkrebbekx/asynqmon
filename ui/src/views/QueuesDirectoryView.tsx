@@ -14,11 +14,13 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useSelector } from "react-redux";
 import { useNavigate, useSearchParams } from "react-router-dom";
-import { BookmarkPlus, X } from "lucide-react";
+import { BookmarkPlus, Pause, Play, X } from "lucide-react";
+import { toast } from "sonner";
 import { AppState } from "../store";
 import { useLatestOnly, usePolling } from "../hooks";
 import { useFrozenData } from "../hooks/useFrozenData";
 import { listFleetQueues, FleetQueuesResponse, FleetQueueRow } from "../api-fleet";
+import { pauseQueue, resumeQueue } from "../api";
 import { SeriesResponse, SeriesSpec, getSeriesBatch } from "../api-series";
 import {
   DirectoryState,
@@ -73,6 +75,8 @@ const COLUMNS: Col[] = [
   { label: "Consumers", sortKey: "consumers", numeric: true },
   { label: "Paused since" }, // not server-sortable per contract
   { label: "" }, // staleness dot
+  // + a trailing actions column (pause/resume) appended at render time when
+  //   not read-only — see COLUMNS usage in the table header.
 ];
 
 function QueueRowView({
@@ -80,12 +84,15 @@ function QueueRowView({
   now,
   spark,
   sparkEligible,
+  onPauseResume,
 }: {
   row: FleetQueueRow;
   now: number;
   spark?: SeriesResponse;
   // False beyond the top-50 rows (§3.2 cap) — renders a dash, not a fetch.
   sparkEligible: boolean;
+  // Absent in read-only mode — the actions cell is not rendered.
+  onPauseResume?: (queue: string, action: "pause" | "resume") => void;
 }) {
   const navigate = useNavigate();
   const uncovered = row.consumers === 0 && row.pending > 0;
@@ -200,6 +207,26 @@ function QueueRowView({
           />
         )}
       </td>
+      {onPauseResume && (
+        <td className="px-1.5 py-1.5 text-right">
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
+              onPauseResume(row.queue, row.paused ? "resume" : "pause");
+            }}
+            onKeyDown={(e) => e.stopPropagation()}
+            aria-label={row.paused ? `Resume queue ${row.queue}` : `Pause queue ${row.queue}`}
+            title={
+              row.paused
+                ? "Resume this queue"
+                : "Pause this queue — consumers stop dequeuing until resumed"
+            }
+            className="inline-flex items-center rounded-md p-1 text-[var(--fc-ink3)] hover:bg-[var(--fc-raise)] hover:text-[var(--fc-ink)]"
+          >
+            {row.paused ? <Play size={12} aria-hidden /> : <Pause size={12} aria-hidden />}
+          </button>
+        </td>
+      )}
     </tr>
   );
 }
@@ -269,6 +296,28 @@ export default function QueuesDirectoryView() {
   }, [view.sort, view.dir, view.f, view.cursor, view.limit]);
 
   usePolling(fetchQueues, pollInterval, [view.sort, view.dir, view.f, view.cursor, view.limit]);
+
+  // Row-level pause/resume (review P1-10): the same lever the queue
+  // workspace header has, one click from the directory during an incident.
+  const doPauseResume = useCallback(
+    async (queue: string, action: "pause" | "resume") => {
+      try {
+        if (action === "pause") {
+          await pauseQueue(queue);
+          toast.success(`Queue ${queue} paused — consumers stop dequeuing until resumed.`);
+        } else {
+          await resumeQueue(queue);
+          toast.success(`Queue ${queue} resumed.`);
+        }
+        fetchQueues();
+      } catch (e) {
+        toast.error(
+          `Could not ${action} ${queue}: ${toErrorString(e as Parameters<typeof toErrorString>[0])}`
+        );
+      }
+    },
+    [fetchQueues]
+  );
 
   // Sparkline data (§3.2): ONE batch call for the page's top rows, refreshed
   // at the hot-slot cadence. Data fetch is capped at SPARK_ROW_CAP and
@@ -515,6 +564,13 @@ export default function QueuesDirectoryView() {
                     )}
                   </th>
                 ))}
+                {!window.READ_ONLY && (
+                  <th
+                    key="actions"
+                    aria-label="Actions"
+                    className="sticky top-0 z-[2] border-b border-[var(--fc-line)] bg-[var(--fc-panel)] px-1.5 py-[7px]"
+                  />
+                )}
               </tr>
             </thead>
             <tbody className="font-mono tabular-nums [&_td.num-cell]:whitespace-nowrap [&_td.num-cell]:px-2.5 [&_td.num-cell]:py-1.5 [&_td.num-cell]:text-right">
@@ -525,6 +581,7 @@ export default function QueuesDirectoryView() {
                   now={now}
                   spark={sparks[row.queue]}
                   sparkEligible={i < SPARK_ROW_CAP}
+                  onPauseResume={window.READ_ONLY ? undefined : doPauseResume}
                 />
               ))}
             </tbody>
