@@ -754,8 +754,21 @@ func collectFacets(matches []*searchTask, limit int) []metaFacet {
 			}
 		}
 	}
+	// High-cardinality guard: a key whose values are (nearly) all distinct —
+	// UUIDs, order ids, unique document ids — cannot drill anything down; it
+	// only floods the chip row with count-1 chips. Keep a key's singleton
+	// values only while the key stays low-cardinality; keys with many
+	// distinct values keep just their repeated (actually filterable) values.
+	const facetKeyCardinalityCap = 8
+	distinctPerKey := make(map[string]int)
+	for _, a := range counts {
+		distinctPerKey[a.facet.Key]++
+	}
 	out := make([]metaFacet, 0, len(counts))
 	for _, a := range counts {
+		if a.n == 1 && distinctPerKey[a.facet.Key] > facetKeyCardinalityCap {
+			continue
+		}
 		f := a.facet
 		f.Count = a.n
 		out = append(out, f)
