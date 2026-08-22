@@ -41,3 +41,5 @@ examples/
 *.bak
 *_backup.*
 *_backup/
+# local redis snapshot (screenshot/dev runs)
+dump.rdb
