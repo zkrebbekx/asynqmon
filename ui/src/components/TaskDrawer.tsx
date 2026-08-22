@@ -26,6 +26,7 @@ import {
   distinctQueues, extractCorrelation, mergeFlowTasks, observedAt,
 } from "../lib/correlation";
 import { STATE_TONE, JourneyState } from "../lib/journey";
+import { decodeBase64Fields } from "../lib/base64";
 import { PeekTarget } from "../lib/urlstate";
 import { cn } from "../lib/utils";
 import SyntaxHighlighter from "./SyntaxHighlighter";
@@ -115,6 +116,63 @@ function SectionTitle({ children }: { children: React.ReactNode }) {
 // Muted provenance/staleness stamp, per the mockup's .stamp.
 function Stamp({ children, className }: { children: React.ReactNode; className?: string }) {
   return <span className={cn("text-[10.5px] text-[var(--fc-ink3)]", className)}>{children}</span>;
+}
+
+// DecodableBlock renders a payload/result body. When base64-encoded fields
+// are reliably detected (lib/base64's layered detector) it shows the DECODED
+// rendering by default with a decoded/raw toggle and an honesty note naming
+// exactly which fields were transformed — the raw bytes stay one click away
+// and the copy button always copies raw. No detection = plain raw block.
+function DecodableBlock({ raw }: { raw: string }) {
+  const decoded = useMemo(() => decodeBase64Fields(raw), [raw]);
+  const [showRaw, setShowRaw] = useState(false);
+  useEffect(() => setShowRaw(false), [raw]);
+
+  const body = (text: string) => (
+    <div
+      data-testid="decodable-body"
+      className="overflow-x-auto rounded-md border border-[var(--fc-line)] bg-[var(--fc-bg)] p-2 text-xs"
+    >
+      <SyntaxHighlighter>{text}</SyntaxHighlighter>
+    </div>
+  );
+
+  if (decoded === null) return body(prettifyPayload(raw));
+
+  const toggle = (label: "decoded" | "raw", active: boolean, onClick: () => void) => (
+    <button
+      onClick={onClick}
+      aria-pressed={active}
+      className={cn(
+        "rounded px-1.5 py-0.5 text-[10.5px] transition-colors",
+        active
+          ? "bg-[var(--fc-acc-bg)] font-semibold text-[var(--fc-acc)]"
+          : "text-[var(--fc-ink2)] hover:bg-[var(--fc-raise)] hover:text-[var(--fc-ink)]"
+      )}
+    >
+      {label}
+    </button>
+  );
+
+  const pathNote =
+    decoded.paths.length <= 3
+      ? decoded.paths.join(", ")
+      : `${decoded.paths.slice(0, 3).join(", ")} +${decoded.paths.length - 3} more`;
+
+  return (
+    <>
+      <div className="mb-1 flex items-center gap-0.5">
+        {toggle("decoded", !showRaw, () => setShowRaw(false))}
+        {toggle("raw", showRaw, () => setShowRaw(true))}
+      </div>
+      {body(showRaw ? prettifyPayload(raw) : decoded.text)}
+      <Stamp className="mt-1 block">
+        {showRaw
+          ? `raw view — ${decoded.paths.length} base64 field${decoded.paths.length === 1 ? "" : "s"} can be decoded (${pathNote})`
+          : `decoded from base64: ${pathNote} — copy always copies raw`}
+      </Stamp>
+    </>
+  );
 }
 
 // Small drawer-chrome button (header prev/next/close) in fc styling.
@@ -840,9 +898,7 @@ export default function TaskDrawer({ peek, resultList, onClose, onPeek, onPivot 
                 </SectionTitle>
                 {task.payload ? (
                   <>
-                    <div className="overflow-x-auto rounded-md border border-[var(--fc-line)] bg-[var(--fc-bg)] p-2 text-xs">
-                      <SyntaxHighlighter>{prettifyPayload(task.payload)}</SyntaxHighlighter>
-                    </div>
+                    <DecodableBlock raw={task.payload} />
                     {/* Honest server-cap note (upstream hibiken/asynqmon#301) */}
                     {payloadTruncated && (
                       <Stamp className="mt-1 block">
@@ -861,9 +917,7 @@ export default function TaskDrawer({ peek, resultList, onClose, onPeek, onPivot 
                 <section className="mb-5">
                   <SectionTitle>Result</SectionTitle>
                   {task.result ? (
-                    <div className="overflow-x-auto rounded-md border border-[var(--fc-line)] bg-[var(--fc-bg)] p-2 text-xs">
-                      <SyntaxHighlighter>{prettifyPayload(task.result)}</SyntaxHighlighter>
-                    </div>
+                    <DecodableBlock raw={task.result} />
                   ) : (
                     <Stamp>No result stored</Stamp>
                   )}

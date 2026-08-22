@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- (ui): The task drawer decodes base64-encoded payload/result fields by default, with a decoded/raw toggle and an honesty note naming exactly which fields were transformed. Detection is layered to make false positives statistically negligible (strict charset/length shape, a character-class guard that rejects slugs and single-class strings, and a strict fully-printable-UTF-8 decode check that rejects hex strings, dashless UUIDs, and binary blobs); base64-of-JSON embeds as structure, whole-payload base64 is handled, and copy always copies raw
+
 ### Fixed
 
 - (api): The task-metadata facet sampler drops high-cardinality payload keys (UUID-ish ids whose values are all distinct) instead of flooding the console's chip row with pages of count-1 chips that cannot drill anything down
