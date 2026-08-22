@@ -2,9 +2,11 @@ apiVersion: v2
 name: asynqmon
 description: Web UI for monitoring and administering Asynq task queues
 type: application
-version: 0.1.0
-# appVersion is the default image tag if image.tag is not set.
-appVersion: "latest"
+version: 0.2.0
+# appVersion is the default image tag if image.tag is not set. Pinned to a
+# released image so default installs are reproducible and rollbackable —
+# "latest" gave mixed versions across nodes and no rollback target.
+appVersion: "0.8.0"
 home: https://github.com/zkrebbekx/asynqmon
 sources:
   - https://github.com/zkrebbekx/asynqmon
