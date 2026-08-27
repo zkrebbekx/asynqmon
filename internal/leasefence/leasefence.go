@@ -39,6 +39,7 @@ package leasefence
 
 import (
 	"context"
+	"fmt"
 	"strconv"
 	"time"
 
@@ -50,8 +51,8 @@ import (
 // the remainder.
 const execChunk = 100
 
-// LockKey returns the lease key for a role ("asynqmon:lock:<role>").
-func LockKey(role string) string { return "asynqmon:lock:" + role }
+// LockKey returns the lease key for a role ("asynqmon:lock:{<role>}").
+func LockKey(role string) string { return fmt.Sprintf("asynqmon:lock:{%s}", role) }
 
 // FenceKey returns the fencing-counter key for a role.
 func FenceKey(role string) string { return LockKey(role) + ":fence" }

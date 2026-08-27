@@ -60,7 +60,7 @@ var (
 	ErrPartialNotAcked   = errors.New("preview is incomplete; set proceed_on_partial to execute on a partial count")
 )
 
-func jobKey(id string) string        { return jobKeyPrefix + id }
+func jobKey(id string) string        { return fmt.Sprintf("%s:{%s}", jobKeyPrefix, id) }
 func candidatesKey(id string) string { return jobKey(id) + ":candidates" }
 func sampleKey(id string) string     { return jobKey(id) + ":sample" }
 func failuresKey(id string) string   { return jobKey(id) + ":failures" }
