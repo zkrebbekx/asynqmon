@@ -2,10 +2,18 @@
 // 409 answers are told apart (review #55.2).
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import axios from "axios";
-import { isDuplicateNameError, isViewChangedError, updateView } from "./api-views";
 
-vi.mock("axios", () => ({ default: vi.fn() }));
+// api.ts builds one shared client with axios.create at module load, and every
+// api module sends through it, so the mock must provide create.
+const { httpSpy } = vi.hoisted(() => ({ httpSpy: vi.fn() }));
+vi.mock("axios", () => ({
+  default: {
+    create: vi.fn(() => httpSpy),
+    isAxiosError: () => false,
+  },
+}));
+
+import { isDuplicateNameError, isViewChangedError, updateView } from "./api-views";
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -14,9 +22,9 @@ beforeEach(() => {
 
 describe("updateView", () => {
   it("sends the version in the PUT body", async () => {
-    vi.mocked(axios).mockResolvedValue({ data: { id: "vw_1", version: 3 } } as never);
+    httpSpy.mockResolvedValue({ data: { id: "vw_1", version: 3 } } as never);
     await updateView("vw_1", 2, { name: "renamed" });
-    expect(vi.mocked(axios)).toHaveBeenCalledWith(
+    expect(httpSpy).toHaveBeenCalledWith(
       expect.objectContaining({
         method: "put",
         data: { name: "renamed", version: 2 },
