@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"net/http"
 	"sort"
 	"strconv"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/hibiken/asynq"
 	"github.com/redis/go-redis/v9"
+	"golang.org/x/time/rate"
 
 	"github.com/zkrebbekx/asynqmon/aql"
 	"github.com/zkrebbekx/asynqmon/jobs"
@@ -37,22 +39,144 @@ import (
 // ****************************************************************************
 
 const (
-	defaultMaxScan   = 10000  // cap on tasks scanned per request, TOTAL across queues
-	maxScanCeiling   = 100000 // hard upper bound on the total scan cap
-	searchBatchSize  = 1000   // page size used while scanning the inspector
-	defaultSearchTop = 20     // default result page size
+	defaultMaxScan            = 10000 // cap on tasks scanned per request, TOTAL across queues
+	defaultMaxScanCeiling     = 20000 // default Options.MaxScanCeiling (review #27)
+	defaultMaxConcurrentScans = 4     // default Options.MaxConcurrentScans (review #27)
+	searchBatchSize           = 1000  // page size used while scanning the inspector
+	defaultSearchTop          = 20    // default result page size
+
+	// batchFilteredMaxMatches caps the synchronous batch_filtered path. A
+	// filter that matches more tasks is refused with 400 and pointed at
+	// POST /api/jobs, which previews, audits and throttles large sets as a
+	// leased background job (review #31).
+	batchFilteredMaxMatches = 2000
 )
 
-// clampMaxScan bounds the user-provided max_scan so a single request cannot
-// force an unbounded scan of every task in every queue.
-func clampMaxScan(n int) int {
-	if n < 1 {
-		return defaultMaxScan
+// scanGate is the process-wide limit on concurrent task scans plus the
+// ceiling on a request's max_scan (Options.MaxConcurrentScans and
+// Options.MaxScanCeiling, review #27). One gate is shared by GET /api/tasks,
+// /api/task_metadata, /api/task_aggregate and POST /api/tasks:batch_filtered,
+// on both the legacy and the AQL scan-plan paths. A scan that finds the
+// gate full is refused with 429 instead of queued: an operator's retry costs
+// one round trip, while a queue of blocked handlers would pin memory and
+// goroutines for every open Tasks tab.
+type scanGate struct {
+	sem     chan struct{}
+	ceiling int
+}
+
+func newScanGate(maxConcurrent, ceiling int) *scanGate {
+	if maxConcurrent < 1 {
+		maxConcurrent = defaultMaxConcurrentScans
 	}
-	if n > maxScanCeiling {
-		return maxScanCeiling
+	if ceiling < 1 {
+		ceiling = defaultMaxScanCeiling
+	}
+	return &scanGate{sem: make(chan struct{}, maxConcurrent), ceiling: ceiling}
+}
+
+// tryAcquire takes a scan slot without blocking; false when every slot is
+// busy. Every true must be paired with one release.
+func (g *scanGate) tryAcquire() bool {
+	select {
+	case g.sem <- struct{}{}:
+		return true
+	default:
+		return false
+	}
+}
+
+func (g *scanGate) release() { <-g.sem }
+
+// clampMaxScan bounds the user-provided max_scan so a single request cannot
+// force an unbounded scan of every task in every queue. The default is also
+// clamped, so a ceiling below defaultMaxScan still holds.
+func (g *scanGate) clampMaxScan(n int) int {
+	if n < 1 {
+		n = defaultMaxScan
+	}
+	if n > g.ceiling {
+		return g.ceiling
 	}
 	return n
+}
+
+// writeScanBusy is the 429 every scan endpoint answers when the gate is full.
+func writeScanBusy(w http.ResponseWriter) {
+	w.Header().Set("Retry-After", "1")
+	writeErrorMsg(w, http.StatusTooManyRequests, "too many concurrent scans")
+}
+
+// batchFilteredLimiter throttles the synchronous batch_filtered action loop
+// at the jobs runner's maximum rate, shared by every request in the process
+// (review #31): N parallel requests share one 1000/s budget instead of
+// getting N x 1000/s. The burst is one tenth of a second of budget, so a
+// small selection still finishes in one go.
+var batchFilteredLimiter = rate.NewLimiter(rate.Limit(batchFilteredActionsPerSecond), batchFilteredActionsPerSecond/10)
+
+const batchFilteredActionsPerSecond = 1000
+
+// matchSink receives every match a scan produces, in scan order. It returns
+// false to stop the scan early (the batch_filtered cap). Scans stream: no
+// caller holds every matched row any more (review #27).
+type matchSink func(st *searchTask) bool
+
+// pageWindow is the [start, end) index window one result page covers, with
+// overflow-safe arithmetic for hostile page values (page-1)*size.
+func pageWindow(page, size int) (start, end int) {
+	if page < 1 {
+		page = 1
+	}
+	if size < 1 {
+		return 0, 0
+	}
+	if page-1 > math.MaxInt/size {
+		return math.MaxInt, math.MaxInt
+	}
+	start = (page - 1) * size
+	end = start + size
+	if end < start {
+		end = math.MaxInt
+	}
+	return start, end
+}
+
+// pageCollector keeps only the matches inside one page window and counts
+// the rest, so a scan over N matches holds at most `size` formatted rows.
+type pageCollector struct {
+	start, end int
+	total      int
+	rows       []*searchTask
+}
+
+func newPageCollector(page, size int) *pageCollector {
+	start, end := pageWindow(page, size)
+	return &pageCollector{start: start, end: end, rows: make([]*searchTask, 0)}
+}
+
+func (c *pageCollector) sink(st *searchTask) bool {
+	if c.total >= c.start && c.total < c.end {
+		c.rows = append(c.rows, st)
+	}
+	c.total++
+	return true
+}
+
+// boundedCollector keeps up to limit matches and stops the scan on the
+// first match beyond it (overflow), for the batch_filtered cap.
+type boundedCollector struct {
+	limit    int
+	rows     []*searchTask
+	overflow bool
+}
+
+func (c *boundedCollector) sink(st *searchTask) bool {
+	if len(c.rows) >= c.limit {
+		c.overflow = true
+		return false
+	}
+	c.rows = append(c.rows, st)
+	return true
 }
 
 // pageBounds returns the [start, end) window for one result page, clamped to
@@ -123,6 +247,11 @@ type searchTasksResponse struct {
 	ScanCursor        string `json:"scan_cursor,omitempty"` // scan-mode resume ("" = scan complete)
 	CandidateEstimate int64  `json:"candidate_estimate,omitempty"`
 	Budget            int    `json:"budget,omitempty"` // scan budget applied this call
+
+	// PendingSinceUnknown counts scanned pending tasks that carry no
+	// pending_since record and were therefore not evaluated by pending_age>
+	// (RunTask/RunAll/shutdown-requeue gap, review #48). Scan mode only.
+	PendingSinceUnknown int `json:"pending_since_unknown,omitempty"`
 }
 
 // metaFilter is a single key=value payload constraint.
@@ -184,6 +313,9 @@ func taskMatchesSearch(t *searchTask, q string) bool {
 
 // taskMatchesMeta reports whether the task's JSON payload contains every
 // required key=value pair (AND). Non-JSON payloads only match an empty filter.
+// A numeric payload value compares numerically against the filter value
+// (10 = 10.0 = 1e1), like the AQL meta.KEY= clause; integers beyond 2^53
+// lose precision in the JSON decode and cannot match (review #54.6).
 func taskMatchesMeta(payload string, filters []metaFilter) bool {
 	if len(filters) == 0 {
 		return true
@@ -194,11 +326,22 @@ func taskMatchesMeta(payload string, filters []metaFilter) bool {
 	}
 	for _, f := range filters {
 		v, ok := obj[f.Key]
-		if !ok || scalarString(v) != f.Value {
+		if !ok || !metaValueMatches(v, f.Value) {
 			return false
 		}
 	}
 	return true
+}
+
+// metaValueMatches compares one decoded JSON value against a filter string:
+// numbers numerically (when the filter parses as a number), everything else
+// through scalarString.
+func metaValueMatches(v interface{}, want string) bool {
+	if f, ok := v.(float64); ok {
+		wantF, err := strconv.ParseFloat(want, 64)
+		return err == nil && wantF == f
+	}
+	return scalarString(v) == want
 }
 
 // scalarString renders a JSON scalar the same way the frontend chips do; nested
@@ -280,27 +423,34 @@ func resolveQueues(inspector *asynq.Inspector, queueParam string) ([]string, err
 	return qnames, nil
 }
 
-// scanMatchingTasks scans the given queues/state in batches, applies the search
-// and metadata filters, and returns all matches found within the max_scan cap —
-// a TOTAL budget across all queues, like the AQL scan path (along with how many
-// tasks were examined and whether the cap was hit). A per-queue budget would
-// multiply by fleet size: queue=all on a large fleet could walk
-// max_scan × #queues tasks and buffer every match in memory for one request.
-// Shared by the search and facet endpoints.
+// scanMatchingTasks scans the given queues/state in batches, applies the
+// search and metadata filters, and streams every match into sink, within the
+// max_scan cap — a TOTAL budget across all queues, like the AQL scan path. It
+// returns how many tasks matched, how many were examined, and whether the
+// scan stopped before completion. A per-queue budget would multiply by fleet
+// size: queue=all on a large fleet could walk max_scan x #queues tasks.
+// Shared by the search, facet, aggregate and batch_filtered endpoints.
+//
+// The scan holds one listing batch at a time; the sink decides what to keep
+// (review #27). truncated is true only when the budget stopped the scan
+// while work remained: the last batch was full, or later groups/queues were
+// never listed (review #54.5). The scan stops at ctx.Err() per page, so a
+// client that disconnects stops burning Redis and memory (review #39).
 //
 // Queues removed mid-scan are skipped; any other error (e.g. a Redis outage)
 // aborts the request so the caller can surface it instead of silently
 // returning an empty result set.
 func scanMatchingTasks(
+	ctx context.Context,
 	inspector *asynq.Inspector,
 	queues []string,
 	state, search string,
 	metaFilters []metaFilter,
 	maxScan int,
 	pf PayloadFormatter,
-) (matches []*searchTask, scanned int, truncated bool, err error) {
-	matches = make([]*searchTask, 0)
-	for _, qname := range queues {
+	sink matchSink,
+) (matched, scanned int, truncated bool, err error) {
+	for qi, qname := range queues {
 		// The aggregating state is per-group; scan every group in the queue.
 		groups := []string{""}
 		if state == "aggregating" {
@@ -309,7 +459,7 @@ func scanMatchingTasks(
 				if errors.Is(gerr, asynq.ErrQueueNotFound) {
 					continue
 				}
-				return nil, scanned, truncated, gerr
+				return matched, scanned, false, gerr
 			}
 			groups = groups[:0]
 			for _, g := range ginfos {
@@ -319,15 +469,22 @@ func scanMatchingTasks(
 			sort.Strings(groups)
 		}
 	queueScan:
-		for _, gname := range groups {
+		for gi, gname := range groups {
 			pageNum := 1
-			for scanned < maxScan {
+			for {
+				if scanned >= maxScan {
+					// Reached only after a full batch: more pages may remain.
+					return matched, scanned, true, nil
+				}
+				if cerr := ctx.Err(); cerr != nil {
+					return matched, scanned, true, cerr
+				}
 				batch, lerr := listTasksByState(inspector, qname, gname, state, pageNum, searchBatchSize)
 				if lerr != nil {
 					if errors.Is(lerr, asynq.ErrQueueNotFound) {
 						break queueScan // queue removed mid-scan; skip it
 					}
-					return nil, scanned, truncated, lerr
+					return matched, scanned, false, lerr
 				}
 				if len(batch) == 0 {
 					break
@@ -335,7 +492,10 @@ func scanMatchingTasks(
 				for _, ti := range batch {
 					st := toSearchTask(ti, pf)
 					if taskMatchesSearch(st, search) && taskMatchesMeta(st.rawPayload, metaFilters) {
-						matches = append(matches, st)
+						matched++
+						if !sink(st) {
+							return matched, scanned + len(batch), true, nil
+						}
 					}
 				}
 				scanned += len(batch)
@@ -344,13 +504,12 @@ func scanMatchingTasks(
 				}
 				pageNum++
 			}
-		}
-		if scanned >= maxScan {
-			truncated = true
-			break
+			if scanned >= maxScan && (gi+1 < len(groups) || qi+1 < len(queues)) {
+				return matched, scanned, true, nil // budget spent with scope left
+			}
 		}
 	}
-	return matches, scanned, truncated, nil
+	return matched, scanned, false, nil
 }
 
 // writeAqlError writes the structured 400 rejection body the console's
@@ -361,7 +520,7 @@ func writeAqlError(w http.ResponseWriter, perr *aql.ParseError) {
 	json.NewEncoder(w).Encode(perr)
 }
 
-func newSearchTasksHandlerFunc(inspector *asynq.Inspector, rc redis.UniversalClient, statsEngine *stats.Engine, pf PayloadFormatter) http.HandlerFunc {
+func newSearchTasksHandlerFunc(inspector *asynq.Inspector, rc redis.UniversalClient, statsEngine *stats.Engine, pf PayloadFormatter, scans *scanGate) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		q := r.URL.Query()
 		search := q.Get("q")
@@ -371,7 +530,7 @@ func newSearchTasksHandlerFunc(inspector *asynq.Inspector, rc redis.UniversalCli
 		// keeps the pre-AQL substring semantics below, so old URLs and old
 		// clients behave identically.
 		if aql.IsQuery(search) {
-			serveAqlSearch(w, r, inspector, rc, statsEngine, pf, search)
+			serveAqlSearch(w, r, inspector, rc, statsEngine, pf, scans, search)
 			return
 		}
 
@@ -396,7 +555,13 @@ func newSearchTasksHandlerFunc(inspector *asynq.Inspector, rc redis.UniversalCli
 		if size > maxPageSize {
 			size = maxPageSize
 		}
-		maxScan := clampMaxScan(atoiDefault(q.Get("max_scan"), defaultMaxScan))
+		maxScan := scans.clampMaxScan(atoiDefault(q.Get("max_scan"), defaultMaxScan))
+
+		if !scans.tryAcquire() {
+			writeScanBusy(w)
+			return
+		}
+		defer scans.release()
 
 		queues, err := resolveQueues(inspector, q.Get("queue"))
 		if err != nil {
@@ -404,21 +569,15 @@ func newSearchTasksHandlerFunc(inspector *asynq.Inspector, rc redis.UniversalCli
 			return
 		}
 
-		matches, scanned, truncated, err := scanMatchingTasks(inspector, queues, state, search, metaFilters, maxScan, pf)
+		collector := newPageCollector(page, size)
+		total, scanned, truncated, err := scanMatchingTasks(r.Context(), inspector, queues, state, search, metaFilters, maxScan, pf, collector.sink)
 		if err != nil {
 			writeError(w, errorStatus(err), err)
 			return
 		}
 
-		total := len(matches)
-		start, end := pageBounds(total, page, size)
-		pageTasks := matches[start:end]
-		if pageTasks == nil {
-			pageTasks = make([]*searchTask, 0)
-		}
-
 		writeResponseJSON(w, searchTasksResponse{
-			Tasks:     pageTasks,
+			Tasks:     collector.rows,
 			Total:     int64(total),
 			Scanned:   scanned,
 			Truncated: truncated,
@@ -433,7 +592,7 @@ func newSearchTasksHandlerFunc(inspector *asynq.Inspector, rc redis.UniversalCli
 // serveAqlSearch handles GET /api/tasks when q is an AQL query: parse →
 // resolve state (explicit clause > legacy state param > inference) →
 // compile → execute as an exact cursor listing or a budgeted scan.
-func serveAqlSearch(w http.ResponseWriter, r *http.Request, inspector *asynq.Inspector, rc redis.UniversalClient, statsEngine *stats.Engine, pf PayloadFormatter, search string) {
+func serveAqlSearch(w http.ResponseWriter, r *http.Request, inspector *asynq.Inspector, rc redis.UniversalClient, statsEngine *stats.Engine, pf PayloadFormatter, scans *scanGate, search string) {
 	q := r.URL.Query()
 	now := time.Now()
 
@@ -501,8 +660,14 @@ func serveAqlSearch(w http.ResponseWriter, r *http.Request, inspector *asynq.Ins
 		return
 	}
 
-	// Scan mode: budgeted, resumable.
-	budget := clampMaxScan(atoiDefault(q.Get("max_scan"), defaultMaxScan))
+	// Scan mode: budgeted, resumable, gated (review #27).
+	budget := scans.clampMaxScan(atoiDefault(q.Get("max_scan"), defaultMaxScan))
+	if !scans.tryAcquire() {
+		writeScanBusy(w)
+		return
+	}
+	defer scans.release()
+
 	env, eerr := prepareRequestEnv(r.Context(), rc, inspector, plan, queues, now)
 	if eerr != nil {
 		writeError(w, errorStatus(eerr), eerr)
@@ -514,44 +679,41 @@ func serveAqlSearch(w http.ResponseWriter, r *http.Request, inspector *asynq.Ins
 		return
 	}
 
+	// First call (no scan_cursor): legacy in-window pagination over the
+	// matches, so existing paging UI keeps working — only the requested
+	// page's rows are kept. Continuation calls return the new window's
+	// matches wholesale, because the console appends them; that window is
+	// bounded by the scan ceiling.
 	scanCursor := q.Get("scan_cursor")
-	out, serr := execScanPlan(r.Context(), rc, inspector, plan, env, queues, extra, scanCursor, budget, pf)
+	page := atoiDefault(q.Get("page"), 1)
+	if page < 1 || scanCursor != "" {
+		page = 1
+	}
+	var collector *pageCollector
+	if scanCursor == "" {
+		collector = newPageCollector(page, size)
+	} else {
+		collector = newPageCollector(1, math.MaxInt)
+	}
+	out, serr := execScanPlan(r.Context(), rc, inspector, plan, env, queues, extra, scanCursor, budget, pf, collector.sink)
 	if serr != nil {
 		writeError(w, errorStatus(serr), serr)
 		return
 	}
 
-	// First call (no scan_cursor): legacy in-window pagination over the
-	// matches, so existing paging UI keeps working. Continuation calls
-	// return the new window's matches wholesale — the console appends them.
-	page := atoiDefault(q.Get("page"), 1)
-	if page < 1 || scanCursor != "" {
-		page = 1
-	}
-	matches := out.matches
-	var pageTasks []*searchTask
-	if scanCursor == "" {
-		start, end := pageBounds(len(matches), page, size)
-		pageTasks = matches[start:end]
-	} else {
-		pageTasks = matches
-	}
-	if pageTasks == nil {
-		pageTasks = make([]*searchTask, 0)
-	}
-
 	writeResponseJSON(w, searchTasksResponse{
-		Tasks:             pageTasks,
-		Total:             int64(len(matches)),
-		Scanned:           out.scanned,
-		Truncated:         out.cursor != "", // back-compat flag; the cursor is the real signal
-		Page:              page,
-		Size:              size,
-		Mode:              "scan",
-		State:             state,
-		ScanCursor:        out.cursor,
-		CandidateEstimate: estimate,
-		Budget:            budget,
+		Tasks:               collector.rows,
+		Total:               int64(out.matched),
+		Scanned:             out.scanned,
+		Truncated:           out.cursor != "", // back-compat flag; the cursor is the real signal
+		Page:                page,
+		Size:                size,
+		Mode:                "scan",
+		State:               state,
+		ScanCursor:          out.cursor,
+		CandidateEstimate:   estimate,
+		Budget:              budget,
+		PendingSinceUnknown: env.PendingSinceUnknown,
 	})
 }
 
@@ -583,16 +745,20 @@ func newStateCountsHandlerFunc(inspector *asynq.Inspector, rc redis.UniversalCli
 	return func(w http.ResponseWriter, r *http.Request) {
 		qname := r.URL.Query().Get("queue")
 		if qname != "" && qname != "all" {
-			// LLEN/ZCARD on missing keys answer 0, so without this check a
-			// typoed ?queue= silently reported an all-zero state instead of
-			// the 404 every other per-queue endpoint returns.
-			if exists, err := rc.SIsMember(r.Context(), "asynq:queues", qname).Result(); err == nil && !exists {
-				writeErrorMsg(w, http.StatusNotFound, fmt.Sprintf("queue %q does not exist", qname))
-				return
-			}
 			counts, err := stateCountsForQueues(r.Context(), rc, inspector, []string{qname})
 			if err != nil {
 				writeError(w, errorStatus(err), err)
+				return
+			}
+			// LLEN/ZCARD on missing keys answer 0, so without this check a
+			// typoed ?queue= silently reported an all-zero state instead of
+			// the 404 every other per-queue endpoint returns. asynq 0.25+
+			// producers cache "queue already published" per process: a
+			// queue an operator deleted keeps receiving tasks without being
+			// re-added to asynq:queues, so absence from the set is only a
+			// 404 when every per-state count is zero too (review #44).
+			if exists, err := rc.SIsMember(r.Context(), "asynq:queues", qname).Result(); err == nil && !exists && stateCountsAllZero(counts) {
+				writeErrorMsg(w, http.StatusNotFound, fmt.Sprintf("queue %q does not exist", qname))
 				return
 			}
 			writeResponseJSON(w, stateCountsResponse{
@@ -647,6 +813,16 @@ func newStateCountsHandlerFunc(inspector *asynq.Inspector, rc redis.UniversalCli
 	}
 }
 
+// stateCountsAllZero reports whether every per-state count is zero.
+func stateCountsAllZero(counts map[string]int64) bool {
+	for _, n := range counts {
+		if n != 0 {
+			return false
+		}
+	}
+	return true
+}
+
 // fleetAggregating sums group member counts across the cached queues that
 // report groups, bounded by aggregatingFleetMaxQueues; -1 when unknowable.
 func fleetAggregating(inspector *asynq.Inspector, snaps []*stats.QueueSnapshot) int64 {
@@ -667,22 +843,23 @@ func fleetAggregating(inspector *asynq.Inspector, snaps []*stats.QueueSnapshot) 
 }
 
 // collectAqlMatches runs one budgeted scan of an AQL query for the facet /
-// aggregate / bulk-filtered endpoints, which need the whole match set (not a
-// page). Always a scan — those endpoints decode payloads regardless of the
-// plan's mode. truncated reports whether the budget stopped the scan early.
-func collectAqlMatches(r *http.Request, inspector *asynq.Inspector, rc redis.UniversalClient, pf PayloadFormatter, search, stateParam, queueParam string, metaFilters []metaFilter, budget int) (matches []*searchTask, scanned int, truncated bool, aqlErr *aql.ParseError, err error) {
+// aggregate / bulk-filtered endpoints, streaming every match into sink.
+// Always a scan — those endpoints decode payloads regardless of the plan's
+// mode. truncated reports whether the budget (or the sink) stopped the scan
+// early.
+func collectAqlMatches(r *http.Request, inspector *asynq.Inspector, rc redis.UniversalClient, pf PayloadFormatter, search, stateParam, queueParam string, metaFilters []metaFilter, budget int, sink matchSink) (matched, scanned int, truncated bool, aqlErr *aql.ParseError, err error) {
 	now := time.Now()
 	parsed, perr := aql.Parse(search)
 	if perr != nil {
-		return nil, 0, false, perr, nil
+		return 0, 0, false, perr, nil
 	}
 	state, perr := parsed.ResolveState(stateParam)
 	if perr != nil {
-		return nil, 0, false, perr, nil
+		return 0, 0, false, perr, nil
 	}
 	plan, perr := aql.Compile(parsed, state, now)
 	if perr != nil {
-		return nil, 0, false, perr, nil
+		return 0, 0, false, perr, nil
 	}
 	qParam := plan.Queue
 	if qParam == "" {
@@ -690,21 +867,60 @@ func collectAqlMatches(r *http.Request, inspector *asynq.Inspector, rc redis.Uni
 	}
 	queues, err := resolveQueues(inspector, qParam)
 	if err != nil {
-		return nil, 0, false, nil, err
+		return 0, 0, false, nil, err
 	}
 	env, err := prepareRequestEnv(r.Context(), rc, inspector, plan, queues, now)
 	if err != nil {
-		return nil, 0, false, nil, err
+		return 0, 0, false, nil, err
 	}
 	var extra func(*searchTask) bool
 	if len(metaFilters) > 0 {
 		extra = func(st *searchTask) bool { return taskMatchesMeta(st.rawPayload, metaFilters) }
 	}
-	out, err := execScanPlan(r.Context(), rc, inspector, plan, env, queues, extra, "", budget, pf)
+	out, err := execScanPlan(r.Context(), rc, inspector, plan, env, queues, extra, "", budget, pf, sink)
 	if err != nil {
-		return nil, 0, false, nil, err
+		return 0, 0, false, nil, err
 	}
-	return out.matches, out.scanned, out.cursor != "", nil, nil
+	return out.matched, out.scanned, out.cursor != "", nil, nil
+}
+
+// collectMatches runs the scan for the facet / aggregate / bulk-filtered
+// endpoints: AQL-shaped q values compile and scan like GET /api/tasks,
+// anything else takes the legacy substring path. defaultState applies when
+// the legacy path gets no state. A *aql.ParseError or an invalid legacy
+// state is answered as 400 here; the caller only sees ok=false.
+func collectMatches(w http.ResponseWriter, r *http.Request, inspector *asynq.Inspector, rc redis.UniversalClient, pf PayloadFormatter, search, stateParam, defaultState, queueParam string, metaFilters []metaFilter, maxScan int, sink matchSink) (matched, scanned int, truncated bool, ok bool) {
+	if aql.IsQuery(search) {
+		matched, scanned, truncated, aqlErr, err := collectAqlMatches(r, inspector, rc, pf, search, stateParam, queueParam, metaFilters, maxScan, sink)
+		if aqlErr != nil {
+			writeAqlError(w, aqlErr)
+			return 0, 0, false, false
+		}
+		if err != nil {
+			writeError(w, errorStatus(err), err)
+			return 0, 0, false, false
+		}
+		return matched, scanned, truncated, true
+	}
+	state := stateParam
+	if state == "" {
+		state = defaultState
+	}
+	if !searchableStates[state] {
+		writeErrorMsg(w, http.StatusBadRequest, fmt.Sprintf("invalid state %q", state))
+		return 0, 0, false, false
+	}
+	queues, err := resolveQueues(inspector, queueParam)
+	if err != nil {
+		writeError(w, errorStatus(err), err)
+		return 0, 0, false, false
+	}
+	matched, scanned, truncated, err = scanMatchingTasks(r.Context(), inspector, queues, state, search, metaFilters, maxScan, pf, sink)
+	if err != nil {
+		writeError(w, errorStatus(err), err)
+		return 0, 0, false, false
+	}
+	return matched, scanned, truncated, true
 }
 
 type metaFacet struct {
@@ -721,39 +937,49 @@ type taskMetadataResponse struct {
 
 const defaultFacetLimit = 50
 
-// collectFacets aggregates distinct top-level scalar key=value pairs across the
-// matched tasks, most frequent first, capped at limit.
-func collectFacets(matches []*searchTask, limit int) []metaFacet {
-	type agg struct {
-		facet metaFacet
-		n     int
+// facetAgg folds matches into distinct top-level scalar key=value counts as
+// the scan streams them, so the facet endpoint never holds the match set.
+type facetAgg struct {
+	counts map[string]*facetCount
+}
+
+type facetCount struct {
+	facet metaFacet
+	n     int
+}
+
+func newFacetAgg() *facetAgg { return &facetAgg{counts: make(map[string]*facetCount)} }
+
+// add folds one match; it always continues the scan.
+func (a *facetAgg) add(t *searchTask) bool {
+	var obj map[string]interface{}
+	if err := json.Unmarshal([]byte(t.rawPayload), &obj); err != nil {
+		return true
 	}
-	counts := make(map[string]*agg)
-	for _, t := range matches {
-		var obj map[string]interface{}
-		if err := json.Unmarshal([]byte(t.rawPayload), &obj); err != nil {
+	for k, v := range obj {
+		val := scalarString(v)
+		if v == nil {
 			continue
 		}
-		for k, v := range obj {
-			val := scalarString(v)
-			if v == nil {
-				continue
-			}
-			// Skip nested/complex values (scalarString returns "" for them).
-			if _, isObj := v.(map[string]interface{}); isObj {
-				continue
-			}
-			if _, isArr := v.([]interface{}); isArr {
-				continue
-			}
-			id := k + "\x00" + val
-			if a, ok := counts[id]; ok {
-				a.n++
-			} else {
-				counts[id] = &agg{facet: metaFacet{Key: k, Value: val}, n: 1}
-			}
+		// Skip nested/complex values (scalarString returns "" for them).
+		if _, isObj := v.(map[string]interface{}); isObj {
+			continue
+		}
+		if _, isArr := v.([]interface{}); isArr {
+			continue
+		}
+		id := k + "\x00" + val
+		if c, ok := a.counts[id]; ok {
+			c.n++
+		} else {
+			a.counts[id] = &facetCount{facet: metaFacet{Key: k, Value: val}, n: 1}
 		}
 	}
+	return true
+}
+
+// result ranks the facets most frequent first, capped at limit.
+func (a *facetAgg) result(limit int) []metaFacet {
 	// High-cardinality guard: a key whose values are (nearly) all distinct —
 	// UUIDs, order ids, unique document ids — cannot drill anything down; it
 	// only floods the chip row with count-1 chips. Keep a key's singleton
@@ -761,16 +987,16 @@ func collectFacets(matches []*searchTask, limit int) []metaFacet {
 	// distinct values keep just their repeated (actually filterable) values.
 	const facetKeyCardinalityCap = 8
 	distinctPerKey := make(map[string]int)
-	for _, a := range counts {
-		distinctPerKey[a.facet.Key]++
+	for _, c := range a.counts {
+		distinctPerKey[c.facet.Key]++
 	}
-	out := make([]metaFacet, 0, len(counts))
-	for _, a := range counts {
-		if a.n == 1 && distinctPerKey[a.facet.Key] > facetKeyCardinalityCap {
+	out := make([]metaFacet, 0, len(a.counts))
+	for _, c := range a.counts {
+		if c.n == 1 && distinctPerKey[c.facet.Key] > facetKeyCardinalityCap {
 			continue
 		}
-		f := a.facet
-		f.Count = a.n
+		f := c.facet
+		f.Count = c.n
 		out = append(out, f)
 	}
 	sort.Slice(out, func(i, j int) bool {
@@ -788,6 +1014,16 @@ func collectFacets(matches []*searchTask, limit int) []metaFacet {
 	return out
 }
 
+// collectFacets aggregates distinct top-level scalar key=value pairs across
+// the matched tasks, most frequent first, capped at limit.
+func collectFacets(matches []*searchTask, limit int) []metaFacet {
+	a := newFacetAgg()
+	for _, t := range matches {
+		a.add(t)
+	}
+	return a.result(limit)
+}
+
 type aggregateGroup struct {
 	Label string `json:"label"`
 	Count int    `json:"count"`
@@ -801,29 +1037,40 @@ type taskAggregateResponse struct {
 	Truncated bool             `json:"truncated"`
 }
 
-// aggregateBy groups the matched tasks by a chosen field (type/error/queue) and
-// returns counts, most frequent first, capped at limit.
-func aggregateBy(matches []*searchTask, by string, limit int) []aggregateGroup {
-	counts := make(map[string]int)
-	for _, t := range matches {
-		var label string
-		switch by {
-		case "type":
-			label = t.Type
-		case "error":
-			label = t.LastError
-		case "queue":
-			label = t.Queue
-		default:
-			label = t.Type
-		}
-		if label == "" {
-			continue
-		}
-		counts[label]++
+// aggregateAgg folds matches into per-label counts for one grouping field
+// (type/error/queue) as the scan streams them.
+type aggregateAgg struct {
+	by     string
+	counts map[string]int
+}
+
+func newAggregateAgg(by string) *aggregateAgg {
+	return &aggregateAgg{by: by, counts: make(map[string]int)}
+}
+
+// add folds one match; it always continues the scan.
+func (a *aggregateAgg) add(t *searchTask) bool {
+	var label string
+	switch a.by {
+	case "type":
+		label = t.Type
+	case "error":
+		label = t.LastError
+	case "queue":
+		label = t.Queue
+	default:
+		label = t.Type
 	}
-	out := make([]aggregateGroup, 0, len(counts))
-	for label, n := range counts {
+	if label != "" {
+		a.counts[label]++
+	}
+	return true
+}
+
+// result ranks the groups most frequent first, capped at limit.
+func (a *aggregateAgg) result(limit int) []aggregateGroup {
+	out := make([]aggregateGroup, 0, len(a.counts))
+	for label, n := range a.counts {
 		out = append(out, aggregateGroup{Label: label, Count: n})
 	}
 	sort.Slice(out, func(i, j int) bool {
@@ -838,12 +1085,22 @@ func aggregateBy(matches []*searchTask, by string, limit int) []aggregateGroup {
 	return out
 }
 
+// aggregateBy groups the matched tasks by a chosen field (type/error/queue) and
+// returns counts, most frequent first, capped at limit.
+func aggregateBy(matches []*searchTask, by string, limit int) []aggregateGroup {
+	a := newAggregateAgg(by)
+	for _, t := range matches {
+		a.add(t)
+	}
+	return a.result(limit)
+}
+
 // newTaskAggregateHandlerFunc groups the filtered task set by type, error, or
 // queue — powering failure analytics ("top failing types", "top errors").
 // AQL-shaped q values are compiled and scanned like GET /api/tasks (phase 6).
 //
 //	GET /api/task_aggregate?queue=&state=&q=&meta=&by=type|error|queue&max_scan=&limit=
-func newTaskAggregateHandlerFunc(inspector *asynq.Inspector, rc redis.UniversalClient, pf PayloadFormatter) http.HandlerFunc {
+func newTaskAggregateHandlerFunc(inspector *asynq.Inspector, rc redis.UniversalClient, pf PayloadFormatter, scans *scanGate) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		q := r.URL.Query()
 		by := q.Get("by")
@@ -852,51 +1109,29 @@ func newTaskAggregateHandlerFunc(inspector *asynq.Inspector, rc redis.UniversalC
 		}
 		search := q.Get("q")
 		metaFilters := parseMetaFilters(q["meta"])
-		maxScan := clampMaxScan(atoiDefault(q.Get("max_scan"), defaultMaxScan))
+		maxScan := scans.clampMaxScan(atoiDefault(q.Get("max_scan"), defaultMaxScan))
 		limit := atoiDefault(q.Get("limit"), defaultFacetLimit)
 		if limit < 1 {
 			limit = defaultFacetLimit
 		}
 
-		var matches []*searchTask
-		var scanned int
-		var truncated bool
-		if aql.IsQuery(search) {
-			var aqlErr *aql.ParseError
-			var err error
-			matches, scanned, truncated, aqlErr, err = collectAqlMatches(r, inspector, rc, pf, search, q.Get("state"), q.Get("queue"), metaFilters, maxScan)
-			if aqlErr != nil {
-				writeAqlError(w, aqlErr)
-				return
-			}
-			if err != nil {
-				writeError(w, errorStatus(err), err)
-				return
-			}
-		} else {
-			state := q.Get("state")
-			if state == "" {
-				state = "retry"
-			}
-			if !searchableStates[state] {
-				writeErrorMsg(w, http.StatusBadRequest, fmt.Sprintf("invalid state %q", state))
-				return
-			}
-			queues, err := resolveQueues(inspector, q.Get("queue"))
-			if err != nil {
-				writeError(w, errorStatus(err), err)
-				return
-			}
-			matches, scanned, truncated, err = scanMatchingTasks(inspector, queues, state, search, metaFilters, maxScan, pf)
-			if err != nil {
-				writeError(w, errorStatus(err), err)
-				return
-			}
+		if !scans.tryAcquire() {
+			writeScanBusy(w)
+			return
+		}
+		defer scans.release()
+
+		// Each batch folds into the per-label counts; no row survives the
+		// batch (review #27).
+		agg := newAggregateAgg(by)
+		matched, scanned, truncated, ok := collectMatches(w, r, inspector, rc, pf, search, q.Get("state"), "retry", q.Get("queue"), metaFilters, maxScan, agg.add)
+		if !ok {
+			return
 		}
 		writeResponseJSON(w, taskAggregateResponse{
 			By:        by,
-			Groups:    aggregateBy(matches, by, limit),
-			Total:     len(matches),
+			Groups:    agg.result(limit),
+			Total:     matched,
 			Scanned:   scanned,
 			Truncated: truncated,
 		})
@@ -909,55 +1144,32 @@ func newTaskAggregateHandlerFunc(inspector *asynq.Inspector, rc redis.UniversalC
 // values are compiled and scanned like GET /api/tasks (phase 6).
 //
 //	GET /api/task_metadata?queue=&state=&q=&meta=key:val&max_scan=&limit=
-func newTaskMetadataHandlerFunc(inspector *asynq.Inspector, rc redis.UniversalClient, pf PayloadFormatter) http.HandlerFunc {
+func newTaskMetadataHandlerFunc(inspector *asynq.Inspector, rc redis.UniversalClient, pf PayloadFormatter, scans *scanGate) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		q := r.URL.Query()
 		search := q.Get("q")
 		metaFilters := parseMetaFilters(q["meta"])
-		maxScan := clampMaxScan(atoiDefault(q.Get("max_scan"), defaultMaxScan))
+		maxScan := scans.clampMaxScan(atoiDefault(q.Get("max_scan"), defaultMaxScan))
 		limit := atoiDefault(q.Get("limit"), defaultFacetLimit)
 		if limit < 1 {
 			limit = defaultFacetLimit
 		}
 
-		var matches []*searchTask
-		var scanned int
-		var truncated bool
-		if aql.IsQuery(search) {
-			var aqlErr *aql.ParseError
-			var err error
-			matches, scanned, truncated, aqlErr, err = collectAqlMatches(r, inspector, rc, pf, search, q.Get("state"), q.Get("queue"), metaFilters, maxScan)
-			if aqlErr != nil {
-				writeAqlError(w, aqlErr)
-				return
-			}
-			if err != nil {
-				writeError(w, errorStatus(err), err)
-				return
-			}
-		} else {
-			state := q.Get("state")
-			if state == "" {
-				state = "pending"
-			}
-			if !searchableStates[state] {
-				writeErrorMsg(w, http.StatusBadRequest, fmt.Sprintf("invalid state %q", state))
-				return
-			}
-			queues, err := resolveQueues(inspector, q.Get("queue"))
-			if err != nil {
-				writeError(w, errorStatus(err), err)
-				return
-			}
-			matches, scanned, truncated, err = scanMatchingTasks(inspector, queues, state, search, metaFilters, maxScan, pf)
-			if err != nil {
-				writeError(w, errorStatus(err), err)
-				return
-			}
+		if !scans.tryAcquire() {
+			writeScanBusy(w)
+			return
 		}
+		defer scans.release()
 
+		// Each batch folds into the facet counts; no row survives the batch
+		// (review #27).
+		agg := newFacetAgg()
+		_, scanned, truncated, ok := collectMatches(w, r, inspector, rc, pf, search, q.Get("state"), "pending", q.Get("queue"), metaFilters, maxScan, agg.add)
+		if !ok {
+			return
+		}
 		writeResponseJSON(w, taskMetadataResponse{
-			Facets:    collectFacets(matches, limit),
+			Facets:    agg.result(limit),
 			Scanned:   scanned,
 			Truncated: truncated,
 		})
@@ -990,7 +1202,7 @@ type bulkFilteredResponse struct {
 // primitive; this endpoint remains for selection-sized scopes.
 //
 //	POST /api/tasks:batch_filtered  {queue,state,q,meta,action,max_scan,reason}
-func newBulkFilteredTasksHandlerFunc(inspector *asynq.Inspector, rc redis.UniversalClient, pf PayloadFormatter, audit *jobs.Store) http.HandlerFunc {
+func newBulkFilteredTasksHandlerFunc(inspector *asynq.Inspector, rc redis.UniversalClient, pf PayloadFormatter, audit *jobs.Store, scans *scanGate) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodySize)
 		dec := json.NewDecoder(r.Body)
@@ -1014,52 +1226,42 @@ func newBulkFilteredTasksHandlerFunc(inspector *asynq.Inspector, rc redis.Univer
 			writeErrorMsg(w, http.StatusBadRequest, fmt.Sprintf("invalid state %q", req.State))
 			return
 		}
-		maxScan := clampMaxScan(req.MaxScan)
+		maxScan := scans.clampMaxScan(req.MaxScan)
 
-		var matches []*searchTask
-		var scanned int
-		var truncated bool
-		if aql.IsQuery(req.Q) {
-			var aqlErr *aql.ParseError
-			var err error
-			matches, scanned, truncated, aqlErr, err = collectAqlMatches(r, inspector, rc, pf, req.Q, req.State, req.Queue, parseMetaFilters(req.Meta), maxScan)
-			if aqlErr != nil {
-				writeAqlError(w, aqlErr)
-				return
+		// The scan holds a gate slot only while it runs; the action loop
+		// below is throttled by the shared limiter instead.
+		matches, scanned, truncated, ok := func() ([]*searchTask, int, bool, bool) {
+			if !scans.tryAcquire() {
+				writeScanBusy(w)
+				return nil, 0, false, false
 			}
-			if err != nil {
-				writeError(w, errorStatus(err), err)
-				return
+			defer scans.release()
+			// At most batchFilteredMaxMatches rows are kept; the first match
+			// beyond stops the scan and the request is refused (review #31).
+			collector := &boundedCollector{limit: batchFilteredMaxMatches}
+			_, scanned, truncated, ok := collectMatches(w, r, inspector, rc, pf, req.Q, req.State, req.State, req.Queue, parseMetaFilters(req.Meta), maxScan, collector.sink)
+			if !ok {
+				return nil, 0, false, false
 			}
-		} else {
-			queues, err := resolveQueues(inspector, req.Queue)
-			if err != nil {
-				writeError(w, errorStatus(err), err)
-				return
+			if collector.overflow {
+				writeErrorMsg(w, http.StatusBadRequest, fmt.Sprintf(
+					"the filter matches more than %d tasks; use POST /api/jobs, which previews, audits and throttles large sets as a background job",
+					batchFilteredMaxMatches))
+				return nil, 0, false, false
 			}
-			matches, scanned, truncated, err = scanMatchingTasks(inspector, queues, req.State, req.Q, parseMetaFilters(req.Meta), maxScan, pf)
-			if err != nil {
-				writeError(w, errorStatus(err), err)
-				return
-			}
+			return collector.rows, scanned, truncated, true
+		}()
+		if !ok {
+			return
 		}
 
-		// Throttled at the jobs runner's maximum rate so a filter matching
-		// tens of thousands of tasks cannot hammer Redis with an unbounded
-		// burst; larger scopes belong on the jobs API, which previews,
-		// audits, and throttles as a background job.
-		const actionsPerSecond = 1000
-		limiter := time.NewTicker(time.Second / actionsPerSecond)
-		defer limiter.Stop()
+		// Throttled at the jobs runner's maximum rate through the
+		// process-wide limiter, so parallel requests share one budget and a
+		// filter matching thousands of tasks cannot hammer Redis with an
+		// unbounded burst (review #31).
 		processed, errCount := 0, 0
-		canceled := false
 		for _, t := range matches {
-			select {
-			case <-r.Context().Done():
-				canceled = true
-			case <-limiter.C:
-			}
-			if canceled {
+			if err := batchFilteredLimiter.Wait(r.Context()); err != nil {
 				break // client gone; still audit what was applied so far
 			}
 			var actErr error

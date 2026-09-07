@@ -117,6 +117,10 @@ func (s *Session) Match(ti *asynq.TaskInfo) bool {
 	return s.plan.Match(s.env, ti)
 }
 
+// PendingSinceUnknown reports how many prepared pending tasks carried no
+// usable pending_since record so far (review #48).
+func (s *Session) PendingSinceUnknown() int { return s.env.PendingSinceUnknown }
+
 // Prepare readies the env for one batch of tasks: refreshes window data
 // (Servers(), orphan sets — once per RefreshWindow) and pipelines batch data
 // (pending_since, group scores) for exactly the tasks given.
@@ -193,12 +197,19 @@ func (s *Session) Prepare(ctx context.Context, batch []*asynq.TaskInfo) error {
 			return fmt.Errorf("reading pending_since for env: %w", err)
 		}
 		for i, cmd := range cmds {
+			// A missing or unparsable field is counted (Env.PendingSinceUnknown),
+			// not guessed: RunTask/RunAll/shutdown-requeue leave no record
+			// (review #48). pending_age> reports false; pending_age=unknown
+			// lists the task.
 			v, err := cmd.Result()
 			if err != nil {
-				continue // dequeued mid-batch: predicate reports false, honestly
+				s.env.PendingSinceUnknown++
+				continue
 			}
 			if ns, perr := strconv.ParseInt(v, 10, 64); perr == nil && ns > 0 {
 				s.env.PendingSince[EnvKey(batch[i].Queue, batch[i].ID)] = time.Unix(0, ns)
+			} else {
+				s.env.PendingSinceUnknown++
 			}
 		}
 	}

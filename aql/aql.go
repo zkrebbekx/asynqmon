@@ -159,7 +159,8 @@ var fieldSpecs = map[string]fieldSpec{
 	"type":    {ops: []Op{OpEq, OpSub}, kind: kindString, scan: true, backing: "matches the task type (msg decode)"},
 	"id":      {ops: []Op{OpEq}, kind: kindString, scan: true, backing: "matches the task id"},
 	"payload": {ops: []Op{OpSub}, kind: kindString, scan: true, backing: "substring-matches the raw payload (msg decode)"},
-	"meta":    {ops: []Op{OpEq}, kind: kindString, scan: true, backing: "matches a top-level JSON payload key (msg decode)"},
+	"meta": {ops: []Op{OpEq}, kind: kindString, scan: true,
+		backing: "matches a top-level JSON payload key (msg decode); numbers compare numerically (10 = 10.0 = 1e1), integers beyond 2^53 cannot match"},
 	"retries": {
 		ops:    []Op{OpGe, OpLt, OpEq},
 		states: []string{"pending", "active", "scheduled", "retry", "archived", "aggregating"},
@@ -173,10 +174,13 @@ var fieldSpecs = map[string]fieldSpec{
 		backing: "matches msg.ErrorMsg (the last error only), which asynq stores only for retry and archived tasks",
 	},
 	"pending_age": {
-		ops:    []Op{OpGt},
+		// OpEq accepts only the literal `unknown` (review #48).
+		ops:    []Op{OpGt, OpEq},
 		states: []string{"pending"},
 		kind:   kindDuration, scan: true, env: true,
-		backing: "reads the pending_since hash field, which exists only while a task is pending (asynq deletes it on dequeue)",
+		backing: "reads the pending_since hash field, which exists only while a task is pending (asynq deletes it on dequeue) " +
+			"and which asynq writes on Enqueue and scheduler forwarding only: a task re-run through RunTask or RunAll, or requeued by a worker shutdown, " +
+			"has no record and is not evaluated by pending_age> — list such tasks with pending_age=unknown",
 	},
 	"running": {
 		ops:    []Op{OpGt},
@@ -610,6 +614,18 @@ func parseValue(c *Clause, spec fieldSpec, valuePos int) *ParseError {
 		c.Num = n
 		return nil
 	case kindDuration:
+		if c.Op == OpEq {
+			// Only pending_age allows `=`, and only with the literal
+			// `unknown` (no pending_since record, review #48).
+			if c.Value != "unknown" {
+				return &ParseError{
+					Msg:  fmt.Sprintf("`%s=` accepts only `unknown`, got %q", c.Field, c.Value),
+					Pos:  valuePos,
+					Hint: fmt.Sprintf("write `%s>2h` for an age, or `%s=unknown` for tasks with no queued-at record", c.Field, c.Field),
+				}
+			}
+			return nil
+		}
 		d, ok := parseDur(c.Value)
 		if !ok {
 			return &ParseError{

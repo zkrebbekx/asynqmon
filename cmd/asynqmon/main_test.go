@@ -36,13 +36,16 @@ func TestParseFlags(t *testing.T) {
 				MaxResultLength:       200,
 				// Detail endpoint safety cap (upstream #301): 256Ki chars.
 				MaxDetailPayloadLength: 262144,
-				EnableMetricsExporter:  false,
-				PrometheusServerAddr:   "",
-				PrometheusBasicAuth:    "", // upstream #248
-				ReadOnly:               false,
-				StatsInterval:          5 * time.Second,
-				DisableStats:           false,
-				CorrelationKeys:        "trace_id,correlation_id,request_id",
+				// Task-scan limits (review issue #27).
+				MaxConcurrentScans:    4,
+				MaxScanCeiling:        20000,
+				EnableMetricsExporter: false,
+				PrometheusServerAddr:  "",
+				PrometheusBasicAuth:   "", // upstream #248
+				ReadOnly:              false,
+				StatsInterval:         5 * time.Second,
+				DisableStats:          false,
+				CorrelationKeys:       "trace_id,correlation_id,request_id",
 
 				Args: []string{},
 			},

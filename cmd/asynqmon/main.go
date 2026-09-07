@@ -56,6 +56,11 @@ type Config struct {
 	// up to this safety cap. 0 = unlimited. Default 262144.
 	MaxDetailPayloadLength int
 
+	// Task-scan limits (review issue #27): concurrent scans per process and
+	// the ceiling on a request's max_scan.
+	MaxConcurrentScans int
+	MaxScanCeiling     int
+
 	// Fleet stats sweeper configs
 	StatsInterval time.Duration
 	DisableStats  bool
@@ -115,6 +120,8 @@ func parseFlags(progname string, args []string) (cfg *Config, output string, err
 	flags.IntVar(&conf.MaxPayloadLength, "max-payload-length", getEnvOrDefaultInt("MAX_PAYLOAD_LENGTH", 200), "maximum number of utf8 characters printed in the payload cell in the Web UI")
 	flags.IntVar(&conf.MaxResultLength, "max-result-length", getEnvOrDefaultInt("MAX_RESULT_LENGTH", 200), "maximum number of utf8 characters printed in the result cell in the Web UI")
 	flags.IntVar(&conf.MaxDetailPayloadLength, "max-detail-payload-length", getEnvOrDefaultInt("MAX_DETAIL_PAYLOAD_LENGTH", 262144), "maximum number of utf8 characters of formatted payload/result served on the task DETAIL endpoint (upstream #301); list cells stay capped by --max-payload-length/--max-result-length; 0 = unlimited")
+	flags.IntVar(&conf.MaxConcurrentScans, "max-concurrent-scans", getEnvOrDefaultInt("MAX_CONCURRENT_SCANS", 4), "maximum number of task scans (GET /api/tasks, /api/task_metadata, /api/task_aggregate, POST /api/tasks:batch_filtered) this process runs at once; further scans get 429")
+	flags.IntVar(&conf.MaxScanCeiling, "max-scan-ceiling", getEnvOrDefaultInt("MAX_SCAN_CEILING", 20000), "largest max_scan a task-scan request can ask for; larger values clamp to it")
 	flags.BoolVar(&conf.EnableMetricsExporter, "enable-metrics-exporter", getEnvOrDefaultBool("ENABLE_METRICS_EXPORTER", false), "enable prometheus metrics exporter to expose queue metrics")
 	flags.StringVar(&conf.PrometheusServerAddr, "prometheus-addr", getEnvDefaultString("PROMETHEUS_ADDR", ""), "address of prometheus server to query time series")
 	flags.StringVar(&conf.PrometheusBasicAuth, "prometheus-basic-auth", getEnvDefaultString("PROMETHEUS_BASIC_AUTH", ""), "user:password basic-auth credentials sent with every query to --prometheus-addr (upstream #248); prefer the env var to keep the secret out of argv")
@@ -260,6 +267,8 @@ func main() {
 		DetailPayloadFormatter: asynqmon.PayloadFormatterFunc(detailPayloadFormatterFunc(cfg)),
 		DetailResultFormatter:  asynqmon.ResultFormatterFunc(detailResultFormatterFunc(cfg)),
 		DetailPayloadLimit:     cfg.MaxDetailPayloadLength,
+		MaxConcurrentScans:     cfg.MaxConcurrentScans,
+		MaxScanCeiling:         cfg.MaxScanCeiling,
 		PrometheusAddress:      cfg.PrometheusServerAddr,
 		// Basic-auth credentials for the Prometheus proxy (upstream #248).
 		// Passed through verbatim and never logged.

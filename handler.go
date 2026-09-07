@@ -208,6 +208,22 @@ type Options struct {
 	// absent (direct-router tests).
 	hygieneEngine *hygiene.Engine
 	// --------------------------- end phase 15 --------------------------
+
+	// ------------------------------------------------------------------
+	// Task-scan limits (review issue #27).
+	// ------------------------------------------------------------------
+
+	// MaxConcurrentScans bounds how many task scans this process runs at
+	// once, across GET /api/tasks, /api/task_metadata, /api/task_aggregate
+	// and POST /api/tasks:batch_filtered (legacy and AQL scan plans). A
+	// request that finds the limit full gets 429 with Retry-After: 1.
+	// Default 4.
+	MaxConcurrentScans int
+
+	// MaxScanCeiling is the largest max_scan a request can ask for; larger
+	// values clamp to it silently. Default 20000.
+	MaxScanCeiling int
+	// --------------------------- end #27 -------------------------------
 }
 
 // HTTPHandler is a http.Handler for asynqmon application.
@@ -538,18 +554,19 @@ func muxRouter(opts Options, rc redis.UniversalClient, inspector *asynq.Inspecto
 	// scan_cursor; parse rejections are 400 {error, position, hint}. The
 	// stats engine feeds the phase-12 candidate estimator (cache when fresh,
 	// live fallback).
-	api.HandleFunc("/tasks", newSearchTasksHandlerFunc(inspector, rc, statsEngine, payloadFmt)).Methods("GET")
+	scans := newScanGate(opts.MaxConcurrentScans, opts.MaxScanCeiling)
+	api.HandleFunc("/tasks", newSearchTasksHandlerFunc(inspector, rc, statsEngine, payloadFmt, scans)).Methods("GET")
 	// All seven per-state counts in one pipelined pass (state pills, §3.4);
 	// fleet-wide answers come from the stats cache sums.
 	api.HandleFunc("/tasks/state_counts", newStateCountsHandlerFunc(inspector, rc, statsEngine)).Methods("GET")
 	// Global metadata facets (distinct key=value chips) for the filtered set.
-	api.HandleFunc("/task_metadata", newTaskMetadataHandlerFunc(inspector, rc, payloadFmt)).Methods("GET")
+	api.HandleFunc("/task_metadata", newTaskMetadataHandlerFunc(inspector, rc, payloadFmt, scans)).Methods("GET")
 	// Failure/usage analytics: group the filtered set by type/error/queue.
-	api.HandleFunc("/task_aggregate", newTaskAggregateHandlerFunc(inspector, rc, payloadFmt)).Methods("GET")
+	api.HandleFunc("/task_aggregate", newTaskAggregateHandlerFunc(inspector, rc, payloadFmt, scans)).Methods("GET")
 	// Apply an action to every task matching a filter (not just the current
 	// page). Audited via the jobs store like every other mutation path.
 	jobsStore := jobs.NewStore(rc)
-	api.HandleFunc("/tasks:batch_filtered", newBulkFilteredTasksHandlerFunc(inspector, rc, payloadFmt, jobsStore)).Methods("POST")
+	api.HandleFunc("/tasks:batch_filtered", newBulkFilteredTasksHandlerFunc(inspector, rc, payloadFmt, jobsStore, scans)).Methods("POST")
 
 	// Groups endponts
 	api.HandleFunc("/queues/{qname}/groups", newListGroupsHandlerFunc(inspector)).Methods("GET")
