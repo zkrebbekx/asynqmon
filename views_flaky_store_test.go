@@ -44,6 +44,28 @@ func (s *flakyViewStore) Put(ctx context.Context, v View) error {
 	return nil
 }
 
+// CompareAndPut satisfies viewStore. The seeder never calls it, so the double
+// implements the same fail-then-succeed rule as Put and reports a version
+// mismatch when the stored view moved on.
+func (s *flakyViewStore) CompareAndPut(ctx context.Context, v View, expect int) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.tries++
+	if s.failures > 0 {
+		s.failures--
+		return false, errors.New("view store unavailable")
+	}
+	cur, ok := s.views[v.ID]
+	if !ok {
+		return false, errViewGone
+	}
+	if cur.Version != expect {
+		return false, nil
+	}
+	s.views[v.ID] = v
+	return true, nil
+}
+
 func (s *flakyViewStore) Delete(ctx context.Context, id string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
