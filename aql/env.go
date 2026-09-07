@@ -50,6 +50,7 @@ func envQueueKeyPrefix(qname string) string { return fmt.Sprintf("asynq:{%s}:", 
 func envTaskKey(qname, id string) string    { return envQueueKeyPrefix(qname) + "t:" + id }
 func envLeaseKey(qname string) string       { return envQueueKeyPrefix(qname) + "lease" }
 func envGroupKey(qname, g string) string    { return envQueueKeyPrefix(qname) + "g:" + g }
+func envArchivedKey(qname string) string    { return envQueueKeyPrefix(qname) + "archived" }
 
 // EnvBuilder builds per-execution env sessions. Zero-value fields default
 // sensibly; RC and Inspector are required for sessions whose plan needs env
@@ -126,7 +127,8 @@ func (s *Session) PendingSinceUnknown() int { return s.env.PendingSinceUnknown }
 // (pending_since, group scores) for exactly the tasks given.
 func (s *Session) Prepare(ctx context.Context, batch []*asynq.TaskInfo) error {
 	plan := s.plan
-	if !plan.NeedsWorkers && !plan.NeedsOrphans && !plan.NeedsPendingSince && !plan.NeedsGroupScores {
+	if !plan.NeedsWorkers && !plan.NeedsOrphans && !plan.NeedsPendingSince &&
+		!plan.NeedsGroupScores && !plan.NeedsArchivedScores {
 		return nil
 	}
 	now := s.b.now()
@@ -210,6 +212,35 @@ func (s *Session) Prepare(ctx context.Context, batch []*asynq.TaskInfo) error {
 				s.env.PendingSince[EnvKey(batch[i].Queue, batch[i].ID)] = time.Unix(0, ns)
 			} else {
 				s.env.PendingSinceUnknown++
+			}
+		}
+	}
+
+	// Archived scores per batch: one ZMSCORE per queue present. The score is
+	// the archive time, which `died>` compares against; it agrees with the
+	// cursor mode's ZRANGEBYSCORE even for a task archived by hand (#54.3).
+	if plan.NeedsArchivedScores && len(batch) > 0 && s.b.RC != nil {
+		if s.env.ArchivedAt == nil {
+			s.env.ArchivedAt = make(map[string]time.Time)
+		}
+		byQueue := map[string][]*asynq.TaskInfo{}
+		for _, ti := range batch {
+			byQueue[ti.Queue] = append(byQueue[ti.Queue], ti)
+		}
+		for qname, tis := range byQueue {
+			members := make([]string, len(tis))
+			for i, ti := range tis {
+				members[i] = ti.ID
+			}
+			scores, err := s.b.RC.ZMScore(ctx, envArchivedKey(qname), members...).Result()
+			if err != nil && !errors.Is(err, redis.Nil) {
+				return fmt.Errorf("reading archived scores for env: %w", err)
+			}
+			for i, sc := range scores {
+				if i >= len(tis) || sc == 0 {
+					continue
+				}
+				s.env.ArchivedAt[EnvKey(tis[i].Queue, tis[i].ID)] = time.Unix(int64(sc), 0)
 			}
 		}
 	}

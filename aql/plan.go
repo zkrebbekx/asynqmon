@@ -65,6 +65,13 @@ type Env struct {
 
 	// GroupEnteredAt: aggregating task → group zset score.
 	GroupEnteredAt map[string]time.Time
+
+	// ArchivedAt: archived task → archived zset score, which asynq sets to
+	// the archive time. It is the SAME value the cursor mode's
+	// ZRANGEBYSCORE reads, so both modes answer `died>` from one number.
+	// TaskInfo.LastFailedAt is zero on a task archived by hand
+	// (Inspector.ArchiveTask), and would otherwise disagree (#54.3).
+	ArchivedAt map[string]time.Time
 }
 
 // WorkerObs is the slice of WorkerInfo a predicate needs.
@@ -96,6 +103,13 @@ type Plan struct {
 	NeedsOrphans      bool // orphaned
 	NeedsPendingSince bool // pending_age>
 	NeedsGroupScores  bool // group_age>
+	// NeedsArchivedScores marks a `died>` plan: the executor fills
+	// Env.ArchivedAt from the archived zset so the scan-mode predicate reads
+	// the same score the cursor mode ranges over (#54.3). Unlike the flags
+	// above this one is an ACCURACY input, not a hard requirement — without
+	// it the predicate falls back to LastFailedAt, so CompileMatcher stays
+	// available to env-free callers.
+	NeedsArchivedScores bool
 
 	// Group is the `group=` clause value ("" = all groups; aggregating only).
 	Group string
@@ -176,6 +190,9 @@ func Compile(q *Query, state string, now time.Time) (*Plan, *ParseError) {
 			lo, hi := scoreRange(&c, state, now)
 			p.ScoreMin = math.Max(p.ScoreMin, lo)
 			p.ScoreMax = math.Min(p.ScoreMax, hi)
+			if c.Field == "died" {
+				p.NeedsArchivedScores = true
+			}
 			preds = append(preds, scorePredicate(&c, state, now))
 			continue
 		}
@@ -268,9 +285,25 @@ func scorePredicate(c *Clause, state string, now time.Time) func(*Env, *asynq.Ta
 			return !ti.NextProcessAt.IsZero() && !ti.NextProcessAt.After(envNow(env, now))
 		}
 	case "died":
-		// Archived died-at == LastFailedAt (the archive zset scores by it).
+		// died-at is the archived zset score — the exact value cursor mode
+		// ranges over. asynq writes LastFailedAt only on a task that failed;
+		// a task archived by hand (Inspector.ArchiveTask) keeps a zero
+		// LastFailedAt with a live zset score, so reading LastFailedAt alone
+		// made scan mode and cursor mode disagree (#54.3).
+		bound := now.Add(-cc.Dur)
 		return func(env *Env, ti *asynq.TaskInfo) bool {
-			return !ti.LastFailedAt.IsZero() && !ti.LastFailedAt.After(now.Add(-cc.Dur))
+			if env != nil && env.ArchivedAt != nil {
+				if at, ok := env.ArchivedAt[EnvKey(ti.Queue, ti.ID)]; ok {
+					return !at.After(bound)
+				}
+			}
+			if !ti.LastFailedAt.IsZero() {
+				return !ti.LastFailedAt.After(bound)
+			}
+			// No score and no failure stamp: the died-at is unknown. Cursor
+			// mode listed the task from its score, so agree with it instead
+			// of dropping the row at re-verification time.
+			return true
 		}
 	case "expires":
 		bound := cc.Time
