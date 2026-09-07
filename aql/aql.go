@@ -160,7 +160,8 @@ var fieldSpecs = map[string]fieldSpec{
 	"id":      {ops: []Op{OpEq}, kind: kindString, scan: true, backing: "matches the task id"},
 	"payload": {ops: []Op{OpSub}, kind: kindString, scan: true, backing: "substring-matches the raw payload (msg decode)"},
 	"meta": {ops: []Op{OpEq}, kind: kindString, scan: true,
-		backing: "matches a top-level JSON payload key (msg decode); numbers compare numerically (10 = 10.0 = 1e1), integers beyond 2^53 cannot match"},
+		backing: "matches a top-level JSON payload key (msg decode); numbers compare numerically (10 = 10.0 = 1e1), " +
+			"but an integer beyond 2^53 cannot match exactly because the payload decodes to float64"},
 	"retries": {
 		ops:    []Op{OpGe, OpLt, OpEq},
 		states: []string{"pending", "active", "scheduled", "retry", "archived", "aggregating"},

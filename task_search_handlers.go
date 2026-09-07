@@ -314,8 +314,9 @@ func taskMatchesSearch(t *searchTask, q string) bool {
 // taskMatchesMeta reports whether the task's JSON payload contains every
 // required key=value pair (AND). Non-JSON payloads only match an empty filter.
 // A numeric payload value compares numerically against the filter value
-// (10 = 10.0 = 1e1), like the AQL meta.KEY= clause; integers beyond 2^53
-// lose precision in the JSON decode and cannot match (review #54.6).
+// (10 = 10.0 = 1e1), like the AQL meta.KEY= clause. An integer beyond 2^53
+// cannot match exactly: the JSON decode is float64, so neighbouring integers
+// share one value (review #54.6).
 func taskMatchesMeta(payload string, filters []metaFilter) bool {
 	if len(filters) == 0 {
 		return true

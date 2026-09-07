@@ -2,6 +2,8 @@ package asynqmon
 
 import (
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	. "github.com/smartystreets/goconvey/convey"
@@ -57,6 +59,53 @@ func TestTaskMatchesMeta(t *testing.T) {
 		Convey("Non-JSON payloads only match an empty filter set", func() {
 			So(taskMatchesMeta("plain text", nil), ShouldBeTrue)
 			So(taskMatchesMeta("plain text", []metaFilter{{"a", "b"}}), ShouldBeFalse)
+		})
+	})
+}
+
+func TestTaskMatchesMetaNumericCoercion(t *testing.T) {
+	Convey("Given a payload with numeric values", t, func() {
+		payload := `{"x":10,"y":1000,"f":2.5,"big":12345678901234567890}`
+
+		Convey("An integer value matches every spelling of the same number", func() {
+			So(taskMatchesMeta(payload, []metaFilter{{"x", "10"}}), ShouldBeTrue)
+			So(taskMatchesMeta(payload, []metaFilter{{"x", "10.0"}}), ShouldBeTrue)
+			So(taskMatchesMeta(payload, []metaFilter{{"x", "1e1"}}), ShouldBeTrue)
+			So(taskMatchesMeta(payload, []metaFilter{{"y", "1e3"}}), ShouldBeTrue)
+		})
+		Convey("A fractional value still compares numerically", func() {
+			So(taskMatchesMeta(payload, []metaFilter{{"f", "2.5"}}), ShouldBeTrue)
+			So(taskMatchesMeta(payload, []metaFilter{{"f", "2.50"}}), ShouldBeTrue)
+		})
+		Convey("A different number does not match", func() {
+			So(taskMatchesMeta(payload, []metaFilter{{"x", "11"}}), ShouldBeFalse)
+			So(taskMatchesMeta(payload, []metaFilter{{"x", "eu"}}), ShouldBeFalse)
+		})
+		Convey("An integer beyond 2^53 cannot match exactly: the JSON decode is float64", func() {
+			// 12345678901234567890 and 12345678901234567891 share one
+			// float64, so the comparison cannot tell them apart.
+			So(taskMatchesMeta(payload, []metaFilter{{"big", "12345678901234567891"}}), ShouldBeTrue)
+			// Only a difference wider than one float64 step (about 2048 at
+			// this magnitude) is still visible.
+			So(taskMatchesMeta(payload, []metaFilter{{"big", "12345678901234500000"}}), ShouldBeFalse)
+		})
+	})
+}
+
+func TestClampedPageSize(t *testing.T) {
+	Convey("Given a legacy list request", t, func() {
+		req := func(query string) *http.Request {
+			return httptest.NewRequest("GET", "/api/queues/q/pending_tasks"+query, nil)
+		}
+		Convey("No size parameter means no clamp to report", func() {
+			So(clampedPageSize(req(""), defaultPageSize), ShouldEqual, 0)
+		})
+		Convey("A clamped size reports the size actually applied", func() {
+			So(clampedPageSize(req("?size=0"), defaultPageSize), ShouldEqual, defaultPageSize)
+			So(clampedPageSize(req("?size=5000"), maxPageSize), ShouldEqual, maxPageSize)
+		})
+		Convey("An honored size reports nothing", func() {
+			So(clampedPageSize(req("?size=10"), 10), ShouldEqual, 0)
 		})
 	})
 }

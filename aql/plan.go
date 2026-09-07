@@ -438,8 +438,8 @@ func clausePredicate(c *Clause, now time.Time) func(*Env, *asynq.TaskInfo) bool 
 // nested values render "" and therefore never match. Mirrors the search
 // endpoint's semantics exactly. Numbers are compared numerically before
 // this renderer runs (see the meta predicate); it stays the fallback for a
-// non-numeric clause value. Integers beyond 2^53 lose precision in the
-// float64 JSON decode and cannot match exactly (review #54.6).
+// non-numeric clause value. An integer beyond 2^53 cannot match exactly:
+// the float64 JSON decode gives neighbouring integers one value (#54.6).
 func metaScalarString(v interface{}) string {
 	switch val := v.(type) {
 	case nil:

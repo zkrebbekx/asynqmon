@@ -22,6 +22,11 @@ import (
 type listActiveTasksResponse struct {
 	Tasks []*activeTask       `json:"tasks"`
 	Stats *queueStateSnapshot `json:"stats"`
+
+	// PageSizeApplied reports the page size the handler actually used when
+	// it clamped the requested size; absent when the request got exactly
+	// what it asked for (review #47).
+	PageSizeApplied int `json:"page_size_applied,omitempty"`
 }
 
 func newListActiveTasksHandlerFunc(inspector *asynq.Inspector, pf PayloadFormatter) http.HandlerFunc {
@@ -68,8 +73,9 @@ func newListActiveTasksHandlerFunc(inspector *asynq.Inspector, pf PayloadFormatt
 		}
 
 		resp := listActiveTasksResponse{
-			Tasks: activeTasks,
-			Stats: toQueueStateSnapshot(qinfo),
+			Tasks:           activeTasks,
+			Stats:           toQueueStateSnapshot(qinfo),
+			PageSizeApplied: clampedPageSize(r, pageSize),
 		}
 		writeResponseJSON(w, resp)
 	}
@@ -193,6 +199,9 @@ func newListPendingTasksHandlerFunc(inspector *asynq.Inspector, rc redis.Univers
 			payload["tasks"] = pendingTasks
 		}
 		payload["stats"] = toQueueStateSnapshot(qinfo)
+		if applied := clampedPageSize(r, pageSize); applied > 0 {
+			payload["page_size_applied"] = applied
+		}
 		writeResponseJSON(w, payload)
 	}
 }
@@ -221,6 +230,9 @@ func newListScheduledTasksHandlerFunc(inspector *asynq.Inspector, pf PayloadForm
 			payload["tasks"] = toScheduledTasks(tasks, pf)
 		}
 		payload["stats"] = toQueueStateSnapshot(qinfo)
+		if applied := clampedPageSize(r, pageSize); applied > 0 {
+			payload["page_size_applied"] = applied
+		}
 		writeResponseJSON(w, payload)
 	}
 }
@@ -249,6 +261,9 @@ func newListRetryTasksHandlerFunc(inspector *asynq.Inspector, pf PayloadFormatte
 			payload["tasks"] = toRetryTasks(tasks, pf)
 		}
 		payload["stats"] = toQueueStateSnapshot(qinfo)
+		if applied := clampedPageSize(r, pageSize); applied > 0 {
+			payload["page_size_applied"] = applied
+		}
 		writeResponseJSON(w, payload)
 	}
 }
@@ -277,6 +292,9 @@ func newListArchivedTasksHandlerFunc(inspector *asynq.Inspector, pf PayloadForma
 			payload["tasks"] = toArchivedTasks(tasks, pf)
 		}
 		payload["stats"] = toQueueStateSnapshot(qinfo)
+		if applied := clampedPageSize(r, pageSize); applied > 0 {
+			payload["page_size_applied"] = applied
+		}
 		writeResponseJSON(w, payload)
 	}
 }
@@ -304,6 +322,9 @@ func newListCompletedTasksHandlerFunc(inspector *asynq.Inspector, pf PayloadForm
 			payload["tasks"] = toCompletedTasks(tasks, pf, rf)
 		}
 		payload["stats"] = toQueueStateSnapshot(qinfo)
+		if applied := clampedPageSize(r, pageSize); applied > 0 {
+			payload["page_size_applied"] = applied
+		}
 		writeResponseJSON(w, payload)
 	}
 }
@@ -341,6 +362,9 @@ func newListAggregatingTasksHandlerFunc(inspector *asynq.Inspector, pf PayloadFo
 			payload["tasks"] = toAggregatingTasks(tasks, pf)
 		}
 		payload["stats"] = toQueueStateSnapshot(qinfo)
+		if applied := clampedPageSize(r, pageSize); applied > 0 {
+			payload["page_size_applied"] = applied
+		}
 		payload["groups"] = toGroupInfos(groups)
 		writeResponseJSON(w, payload)
 	}
@@ -754,6 +778,25 @@ func getPageOptions(r *http.Request) (pageSize, pageNum int) {
 		pageNum = 1
 	}
 	return pageSize, pageNum
+}
+
+// clampedPageSize reports the page size the handler actually applied when
+// getPageOptions clamped the requested one (size <= 0 or size > maxPageSize),
+// and 0 when the request got exactly the size it asked for. Legacy list
+// payloads carry it as "page_size_applied", so a script that asks for
+// ?size=0 or ?size=50000 sees the clamp instead of acting on a silent prefix
+// (review #47). asynq itself treats size <= 0 as "every task", which the
+// fork refuses for the DoS reason documented on maxPageSize.
+func clampedPageSize(r *http.Request, applied int) int {
+	s := r.URL.Query().Get("size")
+	if s == "" {
+		return 0
+	}
+	n, err := strconv.Atoi(s)
+	if err != nil || n == applied {
+		return 0
+	}
+	return applied
 }
 
 func newGetTaskHandlerFunc(inspector *asynq.Inspector, pf PayloadFormatter, rf ResultFormatter) http.HandlerFunc {
