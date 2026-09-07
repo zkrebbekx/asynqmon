@@ -453,6 +453,10 @@ func TestHygieneSchedulePassAndWebhook(t *testing.T) {
 	rep3, _ := hygiene.ReadReport(ctx, env.rc, hygiene.KindSchedulerHealth)
 	invAfter, _ := hygiene.ReadReport(ctx, env.rc, hygiene.KindInventory)
 
+	// Webhook delivery is asynchronous (#53.3: the engine releases runMu
+	// before it POSTs), so wait for the in-flight deliveries.
+	engine.WaitForWebhooks()
+
 	whMu.Lock()
 	deliveredCopy := append([]string(nil), delivered...)
 	whMu.Unlock()

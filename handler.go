@@ -764,8 +764,14 @@ func muxRouter(opts Options, rc redis.UniversalClient, inspector *asynq.Inspecto
 	api.HandleFunc("/hygiene", newListHygieneHandlerFunc(rc)).Methods("GET")
 	api.HandleFunc("/hygiene/{kind}", newGetHygieneReportHandlerFunc(rc)).Methods("GET")
 	api.HandleFunc("/hygiene/{kind}/config", newPutHygieneConfigHandlerFunc(rc, jobsStore)).Methods("PUT")
-	router.Handle("/api/hygiene/{kind}/run",
-		newActorMiddleware(opts)(newRunHygieneHandlerFunc(hygieneEng, jobsStore))).Methods("POST")
+	// Run-now bypasses the read-only method filter only when the operator
+	// opts in with Options.HygieneRunInReadOnly (#53); by default a
+	// read-only replica refuses it like every other mutation.
+	var runHygiene http.Handler = newActorMiddleware(opts)(newRunHygieneHandlerFunc(hygieneEng, rc, jobsStore))
+	if opts.ReadOnly && !opts.HygieneRunInReadOnly {
+		runHygiene = restrictToReadOnly(runHygiene)
+	}
+	router.Handle("/api/hygiene/{kind}/run", runHygiene).Methods("POST")
 	// --------------------------- end phase 15 --------------------------
 
 	// ------------------------------------------------------------------

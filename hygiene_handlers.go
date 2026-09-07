@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/gorilla/mux"
@@ -103,11 +104,17 @@ func newGetHygieneReportHandlerFunc(rc redis.UniversalClient) http.HandlerFunc {
 	}
 }
 
+// hygieneRunMinInterval throttles Run-now per kind: a report younger than
+// this is served by GET /api/hygiene/{kind}, so regenerating it only costs
+// Redis a repeated read burst. A refused run writes no audit entry — it
+// triggered no work.
+const hygieneRunMinInterval = 30 * time.Second
+
 // newRunHygieneHandlerFunc generates a report synchronously (generation is a
 // bounded read burst — sub-second on tier-1 fleets) and returns it. The
 // trigger is audit-logged BEFORE generation so an operator-induced load spike
 // is attributable even if generation then fails.
-func newRunHygieneHandlerFunc(engine *hygiene.Engine, store *jobs.Store) http.HandlerFunc {
+func newRunHygieneHandlerFunc(engine *hygiene.Engine, rc redis.UniversalClient, store *jobs.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		kind := mux.Vars(r)["kind"]
 		if !hygiene.ValidKind(kind) {
@@ -117,6 +124,22 @@ func newRunHygieneHandlerFunc(engine *hygiene.Engine, store *jobs.Store) http.Ha
 		if engine == nil {
 			writeErrorMsg(w, http.StatusServiceUnavailable, "hygiene engine is not running on this replica")
 			return
+		}
+		// Throttle: refuse (429) while the persisted report is fresh, and
+		// write no audit row — a refused run is not a trigger.
+		if rc != nil {
+			rep, err := hygiene.ReadReport(r.Context(), rc, kind)
+			if err == nil && rep != nil {
+				if age := time.Since(rep.GeneratedAt); age < hygieneRunMinInterval {
+					wait := hygieneRunMinInterval - age
+					w.Header().Set("Retry-After", strconv.Itoa(int(wait.Seconds())+1))
+					writeErrorMsg(w, http.StatusTooManyRequests,
+						"the "+kind+" report was generated "+age.Truncate(time.Second).String()+
+							" ago — read it with GET /api/hygiene/"+kind+" or run again in "+
+							wait.Truncate(time.Second).String())
+					return
+				}
+			}
 		}
 		actor := actorFromContext(r.Context())
 		if err := store.AppendAudit(r.Context(), jobs.AuditEntry{
