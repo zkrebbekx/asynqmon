@@ -390,7 +390,10 @@ func splitWide(cmds []Cmd) []Cmd {
 			if len(pieces) == 1 {
 				continue
 			}
-			out = make([]Cmd, 0, len(cmds)+len(pieces))
+			// No capacity hint: both lengths are data-derived, and
+			// CodeQL's allocation-size-overflow query flags the sum as a
+			// potentially overflowing allocation size. append grows the
+			// slice instead.
 			out = append(out, cmds[:i]...)
 		}
 		out = append(out, pieces...)
@@ -437,13 +440,16 @@ func splitOne(c Cmd) []Cmd {
 	}
 	prefix := c[:prefixLen]
 	step := maxMembers * shape.fixed
-	pieces := make([]Cmd, 0, (len(members)+step-1)/step)
+	// No capacity hints here or on each piece: the sizes are derived from
+	// the caller's data, and CodeQL's allocation-size-overflow query flags
+	// that arithmetic. append grows both slices.
+	var pieces []Cmd
 	for start := 0; start < len(members); start += step {
 		end := start + step
 		if end > len(members) {
 			end = len(members)
 		}
-		piece := make(Cmd, 0, prefixLen+(end-start))
+		var piece Cmd
 		piece = append(piece, prefix...)
 		piece = append(piece, members[start:end]...)
 		pieces = append(pieces, piece)
