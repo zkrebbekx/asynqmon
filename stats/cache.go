@@ -114,7 +114,10 @@ func (m *memoryStore) getAttention() (*FleetSnapshot, *AttentionReport) {
 
 // hashArgs flattens a field map into HSET arguments after the key.
 func hashArgs(key string, fields map[string]interface{}) leasefence.Cmd {
-	cmd := make(leasefence.Cmd, 0, 2+2*len(fields))
+	// No capacity hint: len(fields) is data-derived, and CodeQL's
+	// allocation-size-overflow query flags 2+2*len(...) as a potentially
+	// overflowing allocation size. append grows the slice for us.
+	var cmd leasefence.Cmd
 	cmd = append(cmd, "HSET", key)
 	for f, v := range fields {
 		cmd = append(cmd, f, v)
