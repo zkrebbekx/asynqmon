@@ -16,7 +16,7 @@ import (
 	"github.com/redis/go-redis/v9"
 	. "github.com/smartystreets/goconvey/convey"
 
-	"github.com/hibiken/asynqmon/observe"
+	"github.com/zkrebbekx/asynqmon/observe"
 )
 
 // ****************************************************************************
@@ -43,8 +43,7 @@ import (
 // ****************************************************************************
 
 const (
-	observedTestRedisAddr = "127.0.0.1:6379"
-	observedTestRedisDB   = 4
+	observedTestRedisDB = 4
 )
 
 type observedTestEnv struct {
@@ -395,3 +394,5 @@ func TestObservedEndpoint(t *testing.T) {
 		})
 	})
 }
+
+var observedTestRedisAddr = testRedisAddrFromEnv()

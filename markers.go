@@ -12,7 +12,7 @@ import (
 
 	"github.com/redis/go-redis/v9"
 
-	"github.com/hibiken/asynqmon/jobs"
+	"github.com/zkrebbekx/asynqmon/jobs"
 )
 
 // ****************************************************************************

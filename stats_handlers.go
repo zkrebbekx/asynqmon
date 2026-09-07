@@ -6,7 +6,7 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/hibiken/asynqmon/stats"
+	"github.com/zkrebbekx/asynqmon/stats"
 )
 
 // ****************************************************************************

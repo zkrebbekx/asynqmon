@@ -9,7 +9,7 @@ import (
 	"github.com/hibiken/asynq"
 	. "github.com/smartystreets/goconvey/convey"
 
-	"github.com/hibiken/asynqmon/jobs"
+	"github.com/zkrebbekx/asynqmon/jobs"
 )
 
 // ****************************************************************************

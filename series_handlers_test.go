@@ -12,7 +12,7 @@ import (
 
 	. "github.com/smartystreets/goconvey/convey"
 
-	"github.com/hibiken/asynqmon/stats"
+	"github.com/zkrebbekx/asynqmon/stats"
 )
 
 // ****************************************************************************

@@ -21,9 +21,9 @@ func TestTaskMatchesSearch(t *testing.T) {
 			So(taskMatchesSearch(task, ""), ShouldBeTrue)
 		})
 		Convey("It matches case-insensitively across id/type/queue/payload", func() {
-			So(taskMatchesSearch(task, "WELCOME"), ShouldBeTrue)   // type
-			So(taskMatchesSearch(task, "critical"), ShouldBeTrue)  // queue
-			So(taskMatchesSearch(task, "abc-1"), ShouldBeTrue)     // id
+			So(taskMatchesSearch(task, "WELCOME"), ShouldBeTrue)     // type
+			So(taskMatchesSearch(task, "critical"), ShouldBeTrue)    // queue
+			So(taskMatchesSearch(task, "abc-1"), ShouldBeTrue)       // id
 			So(taskMatchesSearch(task, "example.com"), ShouldBeTrue) // payload
 		})
 		Convey("It fails when the substring is absent", func() {

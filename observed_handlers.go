@@ -8,7 +8,7 @@ import (
 	"github.com/gorilla/mux"
 	"github.com/redis/go-redis/v9"
 
-	"github.com/hibiken/asynqmon/observe"
+	"github.com/zkrebbekx/asynqmon/observe"
 )
 
 // ****************************************************************************
@@ -17,7 +17,7 @@ import (
 //   GET /api/queues/{qname}/tasks/{task_id}/observed
 //
 // It surfaces data written by the OPT-IN worker-side middleware
-// github.com/hibiken/asynqmon/observe — the run durations and per-attempt
+// github.com/zkrebbekx/asynqmon/observe — the run durations and per-attempt
 // history asynq itself does not store (LastErr is overwritten per retry,
 // pending_since is deleted at dequeue, completed tasks carry no start/end).
 //

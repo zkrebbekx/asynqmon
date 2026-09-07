@@ -434,11 +434,11 @@ dequeue, and completed tasks carry no start/end. The dashboard therefore
 cannot honestly show "how long did this run" or "what happened on attempt 2"
 — unless your workers opt in.
 
-The `github.com/hibiken/asynqmon/observe` package provides an asynq server
+The `github.com/zkrebbekx/asynqmon/observe` package provides an asynq server
 middleware that records exactly that:
 
 ```go
-import "github.com/hibiken/asynqmon/observe"
+import "github.com/zkrebbekx/asynqmon/observe"
 
 rc := redis.NewClient(&redis.Options{Addr: "localhost:6379"}) // same Redis/DB as the asynq server
 mux := asynq.NewServeMux()
@@ -478,7 +478,7 @@ management, and the console-health diagnostics:
 
 ## Import as a Library
 
-[![GoDoc](https://godoc.org/github.com/hibiken/asynqmon?status.svg)](https://godoc.org/github.com/hibiken/asynqmon)
+[![GoDoc](https://pkg.go.dev/badge/github.com/zkrebbekx/asynqmon.svg)](https://pkg.go.dev/github.com/zkrebbekx/asynqmon)
 
 Asynqmon is also a library which can be imported into an existing web application.
 
@@ -492,7 +492,7 @@ import (
 	"net/http"
 
 	"github.com/hibiken/asynq"
-	"github.com/hibiken/asynqmon"
+	"github.com/zkrebbekx/asynqmon"
 )
 
 func main() {
@@ -520,7 +520,7 @@ import (
 
 	"github.com/gorilla/mux"
 	"github.com/hibiken/asynq"
-	"github.com/hibiken/asynqmon"
+	"github.com/zkrebbekx/asynqmon"
 )
 
 func main() {
@@ -551,7 +551,7 @@ package main
 import (
 	"github.com/labstack/echo/v4"
 	"github.com/hibiken/asynq"
-	"github.com/hibiken/asynqmon"
+	"github.com/zkrebbekx/asynqmon"
 )
 
 func main() {

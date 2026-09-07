@@ -18,7 +18,7 @@ import (
 	"github.com/hibiken/asynq"
 	"github.com/redis/go-redis/v9"
 
-	"github.com/hibiken/asynqmon/aql"
+	"github.com/zkrebbekx/asynqmon/aql"
 )
 
 // ****************************************************************************

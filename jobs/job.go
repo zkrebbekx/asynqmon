@@ -14,7 +14,7 @@ import (
 
 	"github.com/hibiken/asynq"
 
-	"github.com/hibiken/asynqmon/aql"
+	"github.com/zkrebbekx/asynqmon/aql"
 )
 
 // ****************************************************************************

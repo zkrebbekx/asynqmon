@@ -27,8 +27,7 @@ import (
 // ****************************************************************************
 
 const (
-	testRedisAddr = "127.0.0.1:6379"
-	testRedisDB   = 14
+	testRedisDB = 14
 )
 
 // testRedis returns a flushed DB-14 client, skipping the test when Redis is
@@ -524,3 +523,5 @@ func TestEngineLifecycle(t *testing.T) {
 		})
 	})
 }
+
+var testRedisAddr = testRedisAddrFromEnv()

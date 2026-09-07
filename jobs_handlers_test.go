@@ -14,7 +14,7 @@ import (
 	"github.com/redis/go-redis/v9"
 	. "github.com/smartystreets/goconvey/convey"
 
-	"github.com/hibiken/asynqmon/jobs"
+	"github.com/zkrebbekx/asynqmon/jobs"
 )
 
 // ****************************************************************************
@@ -35,8 +35,7 @@ import (
 // ****************************************************************************
 
 const (
-	jobsTestRedisAddr = "127.0.0.1:6379"
-	jobsTestRedisDB   = 12
+	jobsTestRedisDB = 12
 )
 
 type jobsTestEnv struct {
@@ -626,7 +625,8 @@ func TestJobJSONContract(t *testing.T) {
 					"id", "verb", "scope", "phase", "state", "throttle", "reason", "actor",
 					"counts", "cost_class", "cost_list_len", "preview_complete",
 					"proceed_on_partial", "created_at", "started_at", "finished_at",
-					"fence", "error", "failures_overflow", "ctl_pending",
+					"preview_completed_at", "fence", "error", "failures_overflow",
+					"ctl_pending",
 				} {
 					_, ok := body[key]
 					So(ok, ShouldBeTrue)
@@ -746,3 +746,5 @@ func TestBulkJobPauseParksUnclaimed(t *testing.T) {
 		})
 	})
 }
+
+var jobsTestRedisAddr = testRedisAddrFromEnv()

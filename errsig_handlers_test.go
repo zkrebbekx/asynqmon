@@ -13,7 +13,7 @@ import (
 	"github.com/redis/go-redis/v9"
 	. "github.com/smartystreets/goconvey/convey"
 
-	"github.com/hibiken/asynqmon/errsig"
+	"github.com/zkrebbekx/asynqmon/errsig"
 )
 
 // ****************************************************************************
@@ -42,8 +42,7 @@ import (
 // ****************************************************************************
 
 const (
-	errsigTestRedisAddr = "127.0.0.1:6379"
-	errsigTestRedisDB   = 9
+	errsigTestRedisDB = 9
 )
 
 type errsigTestEnv struct {
@@ -541,3 +540,5 @@ func TestErrSigTrimLowerBound(t *testing.T) {
 		})
 	})
 }
+
+var errsigTestRedisAddr = testRedisAddrFromEnv()

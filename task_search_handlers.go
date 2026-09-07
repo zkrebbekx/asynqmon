@@ -14,9 +14,9 @@ import (
 	"github.com/hibiken/asynq"
 	"github.com/redis/go-redis/v9"
 
-	"github.com/hibiken/asynqmon/aql"
-	"github.com/hibiken/asynqmon/jobs"
-	"github.com/hibiken/asynqmon/stats"
+	"github.com/zkrebbekx/asynqmon/aql"
+	"github.com/zkrebbekx/asynqmon/jobs"
+	"github.com/zkrebbekx/asynqmon/stats"
 )
 
 // ****************************************************************************
@@ -116,9 +116,9 @@ type searchTasksResponse struct {
 	Size      int           `json:"size"`
 
 	// Phase 6 additions (§3.4, §5.3, §5.9). Zero-valued on the legacy path.
-	Mode              string `json:"mode,omitempty"`  // "cursor" | "scan" | "legacy"
-	Exact             bool   `json:"exact"`           // total is exact (cursor mode)
-	State             string `json:"state,omitempty"` // resolved state
+	Mode              string `json:"mode,omitempty"`        // "cursor" | "scan" | "legacy"
+	Exact             bool   `json:"exact"`                 // total is exact (cursor mode)
+	State             string `json:"state,omitempty"`       // resolved state
 	Cursor            string `json:"cursor,omitempty"`      // cursor-mode next page ("" = last page)
 	ScanCursor        string `json:"scan_cursor,omitempty"` // scan-mode resume ("" = scan complete)
 	CandidateEstimate int64  `json:"candidate_estimate,omitempty"`

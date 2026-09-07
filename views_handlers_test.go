@@ -13,7 +13,7 @@ import (
 	"github.com/redis/go-redis/v9"
 	. "github.com/smartystreets/goconvey/convey"
 
-	"github.com/hibiken/asynqmon/jobs"
+	"github.com/zkrebbekx/asynqmon/jobs"
 )
 
 // ****************************************************************************
@@ -25,8 +25,7 @@ import (
 // ****************************************************************************
 
 const (
-	viewsTestRedisAddr = "127.0.0.1:6379"
-	viewsTestRedisDB   = 13
+	viewsTestRedisDB = 13
 )
 
 // newViewsTestStore flushes DB 13 and returns the production store, the jobs
@@ -392,3 +391,5 @@ func doViewReqRO(h http.Handler, method, url string, body interface{}) *httptest
 	h.ServeHTTP(w, req)
 	return w
 }
+
+var viewsTestRedisAddr = testRedisAddrFromEnv()

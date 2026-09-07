@@ -24,7 +24,7 @@ import (
 
 	"github.com/redis/go-redis/v9"
 
-	"github.com/hibiken/asynqmon/internal/leasefence"
+	"github.com/zkrebbekx/asynqmon/internal/leasefence"
 )
 
 // Report kinds (URL slugs — frozen frontend contract, ui/src/api-hygiene.ts).

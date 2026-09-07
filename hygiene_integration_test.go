@@ -16,9 +16,9 @@ import (
 	"github.com/redis/go-redis/v9"
 	. "github.com/smartystreets/goconvey/convey"
 
-	"github.com/hibiken/asynqmon/errsig"
-	"github.com/hibiken/asynqmon/hygiene"
-	"github.com/hibiken/asynqmon/stats"
+	"github.com/zkrebbekx/asynqmon/errsig"
+	"github.com/zkrebbekx/asynqmon/hygiene"
+	"github.com/zkrebbekx/asynqmon/stats"
 )
 
 // ****************************************************************************
@@ -75,7 +75,7 @@ func TestHygieneReportsIntegration(t *testing.T) {
 	t.Cleanup(srv.Shutdown)
 
 	// ---- Scheduler B: registers one entry, then dies (the GONE corpse). ----
-	schedB := asynq.NewScheduler(opt, nil)
+	schedB := asynq.NewScheduler(opt, &asynq.SchedulerOpts{HeartbeatInterval: time.Second})
 	if _, err := schedB.Register("@every 1h", asynq.NewTask("cron:dead", nil), asynq.Queue("orders")); err != nil {
 		t.Fatalf("registering cron:dead: %v", err)
 	}
@@ -85,7 +85,7 @@ func TestHygieneReportsIntegration(t *testing.T) {
 
 	// ---- Scheduler A: stays alive — retention-less + zero-consumer entry,
 	// and a fully-healthy traceable entry. ----
-	schedA := asynq.NewScheduler(opt, nil)
+	schedA := asynq.NewScheduler(opt, &asynq.SchedulerOpts{HeartbeatInterval: time.Second})
 	if _, err := schedA.Register("@every 1h", asynq.NewTask("cron:noretention", nil), asynq.Queue("maintenance")); err != nil {
 		t.Fatalf("registering cron:noretention: %v", err)
 	}

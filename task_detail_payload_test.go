@@ -30,8 +30,7 @@ import (
 // ****************************************************************************
 
 const (
-	detailTestRedisAddr = "127.0.0.1:6379"
-	detailTestRedisDB   = 13
+	detailTestRedisDB = 13
 
 	// The list-cell cap and the detail safety cap used by this suite,
 	// standing in for --max-payload-length / --max-detail-payload-length.
@@ -195,3 +194,5 @@ func TestTaskDetailFullPayload(t *testing.T) {
 		})
 	})
 }
+
+var detailTestRedisAddr = testRedisAddrFromEnv()
