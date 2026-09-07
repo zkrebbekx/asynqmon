@@ -121,6 +121,24 @@ func TestScalarString(t *testing.T) {
 	})
 }
 
+// foldFacets and foldAggregate drive the streaming aggregators the handlers
+// use, so these pure tests exercise exactly the production folding code.
+func foldFacets(matches []*searchTask, limit int) []metaFacet {
+	a := newFacetAgg()
+	for _, t := range matches {
+		a.add(t)
+	}
+	return a.result(limit)
+}
+
+func foldAggregate(matches []*searchTask, by string, limit int) []aggregateGroup {
+	a := newAggregateAgg(by)
+	for _, t := range matches {
+		a.add(t)
+	}
+	return a.result(limit)
+}
+
 func TestCollectFacets(t *testing.T) {
 	Convey("Given a set of matched tasks", t, func() {
 		matches := []*searchTask{
@@ -130,15 +148,15 @@ func TestCollectFacets(t *testing.T) {
 			{rawPayload: `not json`},
 		}
 
-		Convey("collectFacets aggregates distinct key=value with counts, most frequent first", func() {
-			facets := collectFacets(matches, 50)
+		Convey("The facet aggregator folds distinct key=value with counts, most frequent first", func() {
+			facets := foldFacets(matches, 50)
 			So(facets[0], ShouldResemble, metaFacet{Key: "region", Value: "eu", Count: 2})
 			So(facets, ShouldContain, metaFacet{Key: "tier", Value: "gold", Count: 1})
 			So(facets, ShouldContain, metaFacet{Key: "region", Value: "us", Count: 1})
 		})
 
 		Convey("It skips nested objects/arrays and non-JSON payloads", func() {
-			facets := collectFacets(matches, 50)
+			facets := foldFacets(matches, 50)
 			for _, f := range facets {
 				So(f.Key, ShouldNotEqual, "nested")
 				So(f.Key, ShouldNotEqual, "list")
@@ -146,7 +164,7 @@ func TestCollectFacets(t *testing.T) {
 		})
 
 		Convey("It respects the limit", func() {
-			So(collectFacets(matches, 1), ShouldHaveLength, 1)
+			So(foldFacets(matches, 1), ShouldHaveLength, 1)
 		})
 	})
 }
@@ -161,12 +179,12 @@ func TestAggregateBy(t *testing.T) {
 		}
 
 		Convey("by=type groups and ranks by count", func() {
-			g := aggregateBy(matches, "type", 50)
+			g := foldAggregate(matches, "type", 50)
 			So(g[0], ShouldResemble, aggregateGroup{Label: "email:welcome", Count: 2})
 			So(g, ShouldContain, aggregateGroup{Label: "image:resize", Count: 2})
 		})
 		Convey("by=error groups by error message and skips empty errors", func() {
-			g := aggregateBy(matches, "error", 50)
+			g := foldAggregate(matches, "error", 50)
 			So(g[0], ShouldResemble, aggregateGroup{Label: "timeout", Count: 2})
 			So(g, ShouldContain, aggregateGroup{Label: "boom", Count: 1})
 			for _, x := range g {
@@ -174,11 +192,11 @@ func TestAggregateBy(t *testing.T) {
 			}
 		})
 		Convey("by=queue groups by queue", func() {
-			g := aggregateBy(matches, "queue", 50)
+			g := foldAggregate(matches, "queue", 50)
 			So(g[0], ShouldResemble, aggregateGroup{Label: "default", Count: 3})
 		})
 		Convey("respects the limit", func() {
-			So(aggregateBy(matches, "type", 1), ShouldHaveLength, 1)
+			So(foldAggregate(matches, "type", 1), ShouldHaveLength, 1)
 		})
 	})
 }
@@ -237,7 +255,7 @@ func TestCollectFacetsHighCardinalityGuard(t *testing.T) {
 				rawPayload: fmt.Sprintf(`{"collection":"articles","doc_id":"doc_%06d"}`, i),
 			})
 		}
-		facets := collectFacets(matches, 50)
+		facets := foldFacets(matches, 50)
 
 		Convey("The repeated value keeps its chip with the full count", func() {
 			So(len(facets), ShouldBeGreaterThan, 0)

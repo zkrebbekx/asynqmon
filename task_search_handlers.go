@@ -1015,16 +1015,6 @@ func (a *facetAgg) result(limit int) []metaFacet {
 	return out
 }
 
-// collectFacets aggregates distinct top-level scalar key=value pairs across
-// the matched tasks, most frequent first, capped at limit.
-func collectFacets(matches []*searchTask, limit int) []metaFacet {
-	a := newFacetAgg()
-	for _, t := range matches {
-		a.add(t)
-	}
-	return a.result(limit)
-}
-
 type aggregateGroup struct {
 	Label string `json:"label"`
 	Count int    `json:"count"`
@@ -1084,16 +1074,6 @@ func (a *aggregateAgg) result(limit int) []aggregateGroup {
 		out = out[:limit]
 	}
 	return out
-}
-
-// aggregateBy groups the matched tasks by a chosen field (type/error/queue) and
-// returns counts, most frequent first, capped at limit.
-func aggregateBy(matches []*searchTask, by string, limit int) []aggregateGroup {
-	a := newAggregateAgg(by)
-	for _, t := range matches {
-		a.add(t)
-	}
-	return a.result(limit)
 }
 
 // newTaskAggregateHandlerFunc groups the filtered task set by type, error, or
