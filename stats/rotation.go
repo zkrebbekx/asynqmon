@@ -83,6 +83,19 @@ const (
 
 	// viewedKeyTTL keeps the viewed zset from outliving an idle console.
 	viewedKeyTTL = 5 * time.Minute
+
+	// viewedSetCap bounds the shared viewed zset at 4x the largest default
+	// hot-set K. Every GET of a queue workspace publishes a member, so an
+	// unauthenticated client could otherwise grow the key by one member per
+	// request. Members above the cap are the oldest views, which readViewed
+	// would drop at the next window anyway.
+	viewedSetCap = 4 * defaultHotSetKTier3
+
+	// viewedTrackerCap bounds the in-process throttle map. Past the cap the
+	// tracker evicts the oldest entry on every insert, whatever its age, so
+	// a flood of distinct names costs O(n) once per insert instead of
+	// growing without bound.
+	viewedTrackerCap = 4096
 )
 
 // tickCommandBudgets splits one tick's total command allowance
@@ -407,6 +420,9 @@ func NewViewTracker(rc redis.UniversalClient, now func() time.Time) *ViewTracker
 
 // MarkViewed records that a queue was requested (directory name= filter or a
 // workspace endpoint). Throttled per queue; best-effort (errors ignored).
+// Callers must mark only AFTER the request produced a 2xx, so an unknown
+// queue name never reaches the shared zset. Both the zset (viewedSetCap) and
+// the in-process throttle map (viewedTrackerCap) are bounded.
 func (v *ViewTracker) MarkViewed(ctx context.Context, qname string) {
 	if v == nil || qname == "" {
 		return
@@ -419,17 +435,34 @@ func (v *ViewTracker) MarkViewed(ctx context.Context, qname string) {
 	}
 	v.last[qname] = now
 	// Opportunistic in-process GC so the throttle map cannot grow unbounded.
-	if len(v.last) > 4096 {
+	if len(v.last) > viewedTrackerCap {
 		for q, at := range v.last {
 			if now.Sub(at) > viewedWindow {
 				delete(v.last, q)
 			}
+		}
+		// A fast flood of distinct names produces no entries old enough for
+		// the age-based pass. Evict the oldest entries until the map is back
+		// at the cap, so len(v.last) <= viewedTrackerCap always holds.
+		for len(v.last) > viewedTrackerCap {
+			var oldestName string
+			var oldestAt time.Time
+			for q, at := range v.last {
+				if oldestName == "" || at.Before(oldestAt) {
+					oldestName, oldestAt = q, at
+				}
+			}
+			delete(v.last, oldestName)
 		}
 	}
 	v.mu.Unlock()
 
 	pipe := v.rc.Pipeline()
 	pipe.ZAdd(ctx, viewedKey, redis.Z{Score: float64(now.Unix()), Member: qname})
+	// Cap the shared zset in the same round trip: a client that requests
+	// thousands of distinct (possibly nonexistent) queue names must not grow
+	// a key in the production Redis one member per request.
+	pipe.ZRemRangeByRank(ctx, viewedKey, 0, -(viewedSetCap + 1))
 	pipe.PExpire(ctx, viewedKey, viewedKeyTTL)
 	_, _ = pipe.Exec(ctx) // best-effort by design
 }

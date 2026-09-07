@@ -479,13 +479,20 @@ func muxRouter(opts Options, rc redis.UniversalClient, inspector *asynq.Inspecto
 	// replica folds recent views into the hot set on tiered fleets.
 	// Best-effort by design (rotation press on regardless); markViewed wraps
 	// the workspace routes so their handler signatures stay untouched.
+	//
+	// The mark happens AFTER the wrapped handler answered 2xx: an
+	// unauthenticated GET of a nonexistent queue name would otherwise write
+	// that name into the shared asynqmon:viewed zset (one member per
+	// request).
 	viewTracker := stats.NewViewTracker(rc, nil)
 	markViewed := func(h http.HandlerFunc) http.HandlerFunc {
 		return func(w http.ResponseWriter, r *http.Request) {
-			if qname := mux.Vars(r)["qname"]; qname != "" {
+			qname := mux.Vars(r)["qname"]
+			sw := &statusRecorder{ResponseWriter: w}
+			h(sw, r)
+			if qname != "" && sw.is2xx() {
 				viewTracker.MarkViewed(r.Context(), qname)
 			}
-			h(w, r)
 		}
 	}
 	// ── end phase-12 view tracking ──
@@ -828,6 +835,50 @@ func muxRouter(opts Options, rc redis.UniversalClient, inspector *asynq.Inspecto
 	}
 
 	return router
+}
+
+// statusRecorder captures the status code a handler wrote while passing the
+// response through untouched. It forwards Flush (SSE and any streaming
+// handler must keep working) and Unwrap (http.ResponseController and the
+// canFlushResponse walk find the real writer).
+type statusRecorder struct {
+	http.ResponseWriter
+	status int
+}
+
+func (s *statusRecorder) WriteHeader(code int) {
+	if s.status == 0 {
+		s.status = code
+	}
+	s.ResponseWriter.WriteHeader(code)
+}
+
+func (s *statusRecorder) Write(b []byte) (int, error) {
+	if s.status == 0 {
+		s.status = http.StatusOK // implicit 200 on the first write
+	}
+	return s.ResponseWriter.Write(b)
+}
+
+// Flush keeps the writer usable for streaming handlers. It is a no-op when
+// the wrapped writer cannot flush.
+func (s *statusRecorder) Flush() {
+	if f, ok := s.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+// Unwrap exposes the wrapped writer to http.ResponseController.
+func (s *statusRecorder) Unwrap() http.ResponseWriter { return s.ResponseWriter }
+
+// is2xx reports whether the handler answered with a 2xx status. A handler
+// that wrote nothing at all counts as 200, matching net/http.
+func (s *statusRecorder) is2xx() bool {
+	code := s.status
+	if code == 0 {
+		code = http.StatusOK
+	}
+	return code >= 200 && code < 300
 }
 
 // restrictToReadOnly is a middleware function to restrict users to perform only GET requests.
