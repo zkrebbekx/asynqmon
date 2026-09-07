@@ -1,7 +1,39 @@
-import { initialState as settingsInitialState } from "./reducers/settingsReducer"
+import { initialState as settingsInitialState, SettingsState, ThemePreference } from "./reducers/settingsReducer"
+import { rowsPerPageOptions } from "./constants";
 import { AppState } from "./store";
 
 const LOCAL_STORAGE_KEY = "asynqmon:state";
+
+// Bounds for the poll interval in seconds. They match the settings slider.
+export const POLL_INTERVAL_MIN = 2;
+export const POLL_INTERVAL_MAX = 20;
+
+const isInt = (v: unknown): v is number => typeof v === "number" && Number.isInteger(v);
+
+// sanitizeSettings validates every persisted settings field and returns a
+// complete SettingsState. An invalid or missing field falls back to its
+// default. The localStorage key is shared with upstream asynqmon 0.7.2, so
+// a legacy payload (different field set, unvalidated numbers) must load
+// without producing setInterval(tick, 0) or a page size no table offers.
+export function sanitizeSettings(raw: unknown): SettingsState {
+  const out: SettingsState = { ...settingsInitialState };
+  if (raw === null || typeof raw !== "object") return out;
+  const s = raw as Record<string, unknown>;
+
+  if (isInt(s.pollInterval) && s.pollInterval >= POLL_INTERVAL_MIN && s.pollInterval <= POLL_INTERVAL_MAX) {
+    out.pollInterval = s.pollInterval;
+  }
+  if (isInt(s.taskRowsPerPage) && (rowsPerPageOptions as readonly number[]).includes(s.taskRowsPerPage)) {
+    out.taskRowsPerPage = s.taskRowsPerPage;
+  }
+  if (isInt(s.themePreference) && Object.values(ThemePreference).includes(s.themePreference)) {
+    out.themePreference = s.themePreference as ThemePreference;
+  }
+  if (typeof s.isDrawerOpen === "boolean") out.isDrawerOpen = s.isDrawerOpen;
+  if (typeof s.pollingActive === "boolean") out.pollingActive = s.pollingActive;
+  // lastUpdatedAt is session-only and is never restored (see SESSION_ONLY_SETTINGS).
+  return out;
+}
 
 export function loadState(): Partial<AppState> {
   try {
@@ -11,13 +43,10 @@ export function loadState(): Partial<AppState> {
     }
     const savedState = JSON.parse(serializedState);
     return {
-      settings: {
-        ...settingsInitialState,
-        ...(savedState.settings || {}),
-      }
-    }
+      settings: sanitizeSettings(savedState?.settings),
+    };
   } catch (err) {
-    console.log("loadState: could not load state ", err)
+    console.error("loadState: could not load state ", err);
     return {};
   }
 }
