@@ -1,3 +1,5 @@
+{{- include "asynqmon.validateValues" . -}}
+{{- $urlFromSecret := include "asynqmon.redisUrlFromSecret" . -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -22,6 +24,7 @@ spec:
       {{- end }}
     spec:
       serviceAccountName: {{ include "asynqmon.serviceAccountName" . }}
+      automountServiceAccountToken: {{ .Values.automountServiceAccountToken }}
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
@@ -34,15 +37,17 @@ spec:
         - name: {{ .Chart.Name }}
           image: {{ include "asynqmon.image" . | quote }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
+          # Secrets travel as env vars only, never as args: args are visible
+          # in `kubectl get pod` and in the process argv.
           args:
             - "--port=8080"
-            {{- if .Values.redis.url }}
+            {{- if or .Values.redis.url $urlFromSecret }}
             - "--redis-url=$(REDIS_URL)"
             {{- end }}
             {{- if .Values.redis.clusterNodes }}
             - "--redis-cluster-nodes=$(REDIS_CLUSTER_NODES)"
             {{- end }}
-            {{- if and (not .Values.redis.url) (not .Values.redis.clusterNodes) .Values.redis.addr }}
+            {{- if and (not .Values.redis.url) (not $urlFromSecret) (not .Values.redis.clusterNodes) .Values.redis.addr }}
             - "--redis-addr=$(REDIS_ADDR)"
             - "--redis-db={{ .Values.redis.db }}"
             {{- end }}
@@ -52,8 +57,32 @@ spec:
             {{- if .Values.redis.insecureTLS }}
             - "--redis-insecure-tls"
             {{- end }}
+            {{- if .Values.redis.timeout }}
+            - "--redis-timeout={{ .Values.redis.timeout }}"
+            {{- end }}
             {{- if .Values.readOnly }}
             - "--read-only"
+            {{- end }}
+            {{- if .Values.enableEnqueue }}
+            - "--enable-enqueue"
+            {{- end }}
+            {{- if .Values.purgeOwnedKeys }}
+            - "--purge-owned-keys"
+            {{- end }}
+            {{- if .Values.auth.header }}
+            - "--auth-header={{ .Values.auth.header }}"
+            {{- end }}
+            {{- if .Values.auth.trustedProxies }}
+            - "--trusted-proxies={{ .Values.auth.trustedProxies }}"
+            {{- end }}
+            {{- if .Values.auth.requireIdentity }}
+            - "--require-identity"
+            {{- end }}
+            {{- if .Values.auth.trustBasicAuthUser }}
+            - "--trust-basic-auth-user"
+            {{- end }}
+            {{- if .Values.auth.allowUntrustedAuthHeader }}
+            - "--allow-untrusted-auth-header"
             {{- end }}
             {{- if .Values.prometheus.enableExporter }}
             - "--enable-metrics-exporter"
@@ -61,11 +90,74 @@ spec:
             {{- if .Values.prometheus.address }}
             - "--prometheus-addr={{ .Values.prometheus.address }}"
             {{- end }}
+            {{- if .Values.corsAllowedOrigins }}
+            - "--cors-allowed-origins={{ .Values.corsAllowedOrigins }}"
+            {{- end }}
+            {{- with .Values.ui.maxPayloadLength }}
+            - "--max-payload-length={{ . }}"
+            {{- end }}
+            {{- with .Values.ui.maxResultLength }}
+            - "--max-result-length={{ . }}"
+            {{- end }}
+            {{- with .Values.ui.maxDetailPayloadLength }}
+            - "--max-detail-payload-length={{ . }}"
+            {{- end }}
+            {{- with .Values.ui.correlationKeys }}
+            - "--correlation-keys={{ . }}"
+            {{- end }}
+            {{- with .Values.stats.interval }}
+            - "--stats-interval={{ . }}"
+            {{- end }}
+            {{- if .Values.stats.disabled }}
+            - "--disable-stats"
+            {{- end }}
+            {{- with .Values.scans.maxConcurrent }}
+            - "--max-concurrent-scans={{ . }}"
+            {{- end }}
+            {{- with .Values.scans.maxCeiling }}
+            - "--max-scan-ceiling={{ . }}"
+            {{- end }}
+            {{- with .Values.scans.maxSSEConnections }}
+            - "--max-sse-connections={{ . }}"
+            {{- end }}
+            {{- if .Values.jobs.disabled }}
+            - "--disable-jobs"
+            {{- end }}
+            {{- with .Values.jobs.concurrency }}
+            - "--job-concurrency={{ . }}"
+            {{- end }}
+            {{- if .Values.errorIndex.disabled }}
+            - "--disable-error-index"
+            {{- end }}
+            {{- if .Values.hygiene.disabled }}
+            - "--disable-hygiene"
+            {{- end }}
+            {{- if .Values.hygiene.runInReadOnly }}
+            - "--hygiene-run-in-read-only"
+            {{- end }}
+            {{- with .Values.attention.pendingAgeSlo }}
+            - "--attention-pending-age-slo={{ . }}"
+            {{- end }}
+            {{- with .Values.attention.retryStormThreshold }}
+            - "--attention-retry-storm-threshold={{ . }}"
+            {{- end }}
+            {{- with .Values.attention.pausedLongAfter }}
+            - "--attention-paused-long-after={{ . }}"
+            {{- end }}
+            {{- with .Values.attention.groupStallAfter }}
+            - "--attention-group-stall-after={{ . }}"
+            {{- end }}
             {{- with .Values.extraArgs }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
           env:
-            {{- if .Values.redis.url }}
+            {{- if $urlFromSecret }}
+            - name: REDIS_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.redis.existingSecret }}
+                  key: {{ .Values.redis.existingSecretUrlKey }}
+            {{- else if .Values.redis.url }}
             - name: REDIS_URL
               value: {{ .Values.redis.url | quote }}
             {{- end }}
@@ -77,12 +169,56 @@ spec:
             - name: REDIS_CLUSTER_NODES
               value: {{ .Values.redis.clusterNodes | quote }}
             {{- end }}
-            {{- if or .Values.redis.password .Values.redis.existingSecret }}
+            {{- if .Values.redis.username }}
+            - name: REDIS_USERNAME
+              value: {{ .Values.redis.username | quote }}
+            {{- end }}
+            {{- if and (or .Values.redis.password .Values.redis.existingSecret) (not $urlFromSecret) }}
             - name: REDIS_PASSWORD
               valueFrom:
                 secretKeyRef:
-                  name: {{ .Values.redis.existingSecret | default (printf "%s-redis" (include "asynqmon.fullname" .)) }}
+                  name: {{ include "asynqmon.redisSecretName" . }}
                   key: {{ .Values.redis.existingSecretPasswordKey }}
+            {{- end }}
+            {{- if or .Values.redis.sentinelPassword .Values.redis.existingSecretSentinelPasswordKey }}
+            - name: REDIS_SENTINEL_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  {{- if .Values.redis.existingSecretSentinelPasswordKey }}
+                  name: {{ .Values.redis.existingSecret }}
+                  key: {{ .Values.redis.existingSecretSentinelPasswordKey }}
+                  {{- else }}
+                  name: {{ include "asynqmon.appSecretName" . }}
+                  key: redis-sentinel-password
+                  {{- end }}
+            {{- end }}
+            {{- if or .Values.prometheus.basicAuth .Values.prometheus.existingSecret }}
+            - name: PROMETHEUS_BASIC_AUTH
+              valueFrom:
+                secretKeyRef:
+                  {{- if .Values.prometheus.existingSecret }}
+                  name: {{ .Values.prometheus.existingSecret }}
+                  key: {{ .Values.prometheus.existingSecretBasicAuthKey }}
+                  {{- else }}
+                  name: {{ include "asynqmon.appSecretName" . }}
+                  key: prometheus-basic-auth
+                  {{- end }}
+            {{- end }}
+            {{- if or .Values.hygiene.webhookUrl .Values.hygiene.existingSecret }}
+            - name: HYGIENE_WEBHOOK_URL
+              valueFrom:
+                secretKeyRef:
+                  {{- if .Values.hygiene.existingSecret }}
+                  name: {{ .Values.hygiene.existingSecret }}
+                  key: {{ .Values.hygiene.existingSecretWebhookUrlKey }}
+                  {{- else }}
+                  name: {{ include "asynqmon.appSecretName" . }}
+                  key: hygiene-webhook-url
+                  {{- end }}
+            {{- end }}
+            {{- with .Values.goMemLimit }}
+            - name: GOMEMLIMIT
+              value: {{ . | quote }}
             {{- end }}
             {{- with .Values.extraEnv }}
             {{- toYaml . | nindent 12 }}
@@ -107,6 +243,10 @@ spec:
           resources:
             {{- toYaml . | nindent 12 }}
           {{- end }}
+      {{- with .Values.topologySpreadConstraints }}
+      topologySpreadConstraints:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}
