@@ -2,6 +2,11 @@ package main
 
 import (
 	"crypto/tls"
+	"flag"
+	"os"
+	"path/filepath"
+	"regexp"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -569,6 +574,68 @@ func TestRedisPasswordAppliesAfterURL(t *testing.T) {
 				opt, ok := sentinel.(asynq.RedisFailoverClientOpt)
 				So(ok, ShouldBeTrue)
 				So(opt.Password, ShouldEqual, "s3cret")
+			})
+		})
+	})
+}
+
+// Every flag the Helm chart README documents must exist in the binary. The
+// chart renders those flags into the container args, so a documented flag
+// that the flag set does not define makes flag.Parse fail, main exit 1, and
+// the Deployment crash-loop (review issue #43: the chart README documented
+// five IAM flags that were never merged).
+// pendingChartFlags names flags the chart README documents that the binary
+// does not define yet, for the window while a branch is unmerged. It is empty:
+// every flag the chart documents now exists. The test also fails when a
+// pending flag IS defined, so a stale entry cannot go unnoticed.
+var pendingChartFlags = map[string]bool{}
+
+func TestChartReadmeFlagsExist(t *testing.T) {
+	readme, readErr := os.ReadFile(filepath.Join("..", "..", "charts", "asynqmon", "README.md"))
+
+	// The flag set prints one usage line per flag, "  -name type".
+	_, usage, usageErr := parseFlags("asynqmon", []string{"-h"})
+	defined := map[string]bool{}
+	for _, m := range regexp.MustCompile(`(?m)^\s+-([a-zA-Z0-9-]+)`).FindAllStringSubmatch(usage, -1) {
+		defined["--"+m[1]] = true
+	}
+
+	documented := map[string]bool{}
+	for _, m := range regexp.MustCompile("`(--[a-z0-9-]+)`").FindAllStringSubmatch(string(readme), -1) {
+		documented[m[1]] = true
+	}
+
+	var missing, stalePending []string
+	for f := range documented {
+		if defined[f] {
+			continue
+		}
+		if pendingChartFlags[f] {
+			continue
+		}
+		missing = append(missing, f)
+	}
+	for f := range pendingChartFlags {
+		if defined[f] {
+			stalePending = append(stalePending, f)
+		}
+	}
+	sort.Strings(missing)
+	sort.Strings(stalePending)
+
+	Convey("Given the flags documented in the Helm chart README", t, func() {
+		So(readErr, ShouldBeNil)
+		So(usageErr, ShouldEqual, flag.ErrHelp)
+		So(len(documented), ShouldBeGreaterThan, 20)
+
+		Convey("When each documented flag is looked up in the flag set", func() {
+			Convey("Then every flag exists, so the rendered pod does not crash-loop", func() {
+				So(missing, ShouldBeEmpty)
+			})
+		})
+		Convey("When a pending flag has landed in the flag set", func() {
+			Convey("Then it must be removed from pendingChartFlags", func() {
+				So(stalePending, ShouldBeEmpty)
 			})
 		})
 	})
