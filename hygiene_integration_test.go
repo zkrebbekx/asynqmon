@@ -207,7 +207,15 @@ func TestHygieneReportsIntegration(t *testing.T) {
 	}
 
 	// ---- Error-signature index feed (real read path for the digest). ----
-	indexer := errsig.NewIndexer(errsig.Config{RedisClient: env.rc, Inspector: env.insp, Logf: t.Logf})
+	// The archived tail deliberately stops one safety lag short of the
+	// current second, so this sweep runs on a clock past that lag instead of
+	// sleeping; otherwise it would miss the tasks archived a moment ago.
+	indexer := errsig.NewIndexer(errsig.Config{
+		RedisClient: env.rc,
+		Inspector:   env.insp,
+		Now:         func() time.Time { return time.Now().Add(5 * time.Second) },
+		Logf:        t.Logf,
+	})
 	if err := indexer.SweepTailNow(ctx); err != nil {
 		t.Fatalf("errsig tail sweep: %v", err)
 	}
