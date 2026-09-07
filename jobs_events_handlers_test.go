@@ -223,7 +223,7 @@ func TestJobsSSEDelivery(t *testing.T) {
 
 	// A jobs-only broker: engine nil (stats disabled) — the stream must still
 	// carry jobs events. Same production construction path as handler.go.
-	broker := newFleetEventsBroker(nil, env.rc, env.store)
+	broker := newFleetEventsBroker(nil, env.rc, env.store, 0)
 	broker.start(ctx)
 	t.Cleanup(broker.stop)
 	ts := httptest.NewServer(newFleetEventsHandlerFunc(broker))

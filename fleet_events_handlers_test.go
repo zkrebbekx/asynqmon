@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -156,7 +157,8 @@ func (c *sseClient) nextFrame(t *testing.T) sseFrame {
 	}
 }
 
-// nextEvent skips comment frames (heartbeats) until a named event arrives.
+// nextEvent skips comment frames (heartbeats) and `ping` liveness frames
+// until a named event arrives.
 func (c *sseClient) nextEvent(t *testing.T, name string) sseFrame {
 	t.Helper()
 	for {
@@ -164,10 +166,10 @@ func (c *sseClient) nextEvent(t *testing.T, name string) sseFrame {
 		if fr.event == name {
 			return fr
 		}
-		if fr.event != "" {
+		if fr.event != "" && fr.event != "ping" {
 			t.Fatalf("expected event %q, got %q (data: %s)", name, fr.event, fr.data)
 		}
-		// comment frame: keep reading
+		// comment or ping frame: keep reading
 	}
 }
 
@@ -179,6 +181,19 @@ func (c *sseClient) nextComment(t *testing.T) sseFrame {
 		t.Fatalf("expected a comment frame, got %+v", fr)
 	}
 	return fr
+}
+
+// nextPing reads frames until the `ping` liveness event arrives (#51).
+func (c *sseClient) nextPing(t *testing.T) sseFrame {
+	t.Helper()
+	for i := 0; i < 50; i++ {
+		fr := c.nextFrame(t)
+		if fr.event == "ping" {
+			return fr
+		}
+	}
+	t.Fatal("no ping event arrived within 50 frames")
+	return sseFrame{}
 }
 
 // noFlushWriter hides http.Flusher (and offers no Unwrap), simulating a
@@ -200,7 +215,7 @@ func eventuallyTrue(timeout time.Duration, cond func() bool) bool {
 
 func TestFleetEventsHandler(t *testing.T) {
 	engine := newStatsTestEngine(t)
-	broker := newFleetEventsBroker(engine, nil, nil)
+	broker := newFleetEventsBroker(engine, nil, nil, 0)
 	broker.heartbeatEvery = 40 * time.Millisecond // testable heartbeat cadence
 	broker.start(context.Background())
 	t.Cleanup(broker.stop)
@@ -295,7 +310,7 @@ func TestFleetEventsHandler(t *testing.T) {
 
 func TestFleetEventsHandlerUnavailable(t *testing.T) {
 	engine := newStatsTestEngine(t)
-	broker := newFleetEventsBroker(engine, nil, nil)
+	broker := newFleetEventsBroker(engine, nil, nil, 0)
 	broker.start(context.Background())
 	t.Cleanup(broker.stop)
 
@@ -317,6 +332,108 @@ func TestFleetEventsHandlerUnavailable(t *testing.T) {
 				So(rec.Code, ShouldEqual, http.StatusServiceUnavailable)
 				So(rec.Body.String(), ShouldContainSubstring, "streaming unsupported")
 				So(rec.Header().Get("Content-Type"), ShouldStartWith, "application/json")
+			})
+		})
+	})
+}
+
+// ----------------------------------------------------------------------------
+// #35: the subscriber cap, and #51: the server-side `ping` liveness event.
+// ----------------------------------------------------------------------------
+
+func TestFleetEventsConnectionCap(t *testing.T) {
+	engine := newStatsTestEngine(t)
+	const cap = 2
+	broker := newFleetEventsBroker(engine, nil, nil, cap)
+	broker.start(context.Background())
+	t.Cleanup(broker.stop)
+
+	ts := httptest.NewServer(newFleetEventsHandlerFunc(broker))
+	t.Cleanup(ts.Close)
+
+	// Fill the cap: each client reads its on-connect burst, so the
+	// subscription is registered before the next one connects.
+	var clients []*sseClient
+	for i := 0; i < cap; i++ {
+		c := openSSE(t, ts.URL)
+		clients = append(clients, c)
+		c.nextComment(t)
+	}
+	t.Cleanup(func() {
+		for _, c := range clients {
+			c.close()
+		}
+	})
+	registered := eventuallyTrue(5*time.Second, func() bool { return broker.subscriberCount() == cap })
+
+	// One more subscriber: refused.
+	resp, err := http.Get(ts.URL)
+	if err != nil {
+		t.Fatalf("connecting the over-cap subscriber: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+
+	// After one client disconnects a slot frees up again.
+	clients[0].close()
+	freed := eventuallyTrue(5*time.Second, func() bool { return broker.subscriberCount() == cap-1 })
+	after := openSSE(t, ts.URL)
+	t.Cleanup(after.close)
+	afterHello := after.nextComment(t)
+
+	Convey("Given a broker capped at 2 concurrent SSE subscribers", t, func() {
+		Convey("When the cap is filled", func() {
+			Convey("Then both streams are registered", func() {
+				So(registered, ShouldBeTrue)
+			})
+		})
+		Convey("When one more client subscribes", func() {
+			Convey("Then it is refused with 503 and Retry-After", func() {
+				So(resp.StatusCode, ShouldEqual, http.StatusServiceUnavailable)
+				So(resp.Header.Get("Retry-After"), ShouldEqual, "5")
+				So(resp.Header.Get("Content-Type"), ShouldStartWith, "application/json")
+				So(string(body), ShouldContainSubstring, "too many live event streams")
+			})
+		})
+		Convey("When a connected client disconnects", func() {
+			Convey("Then the freed slot accepts a new stream", func() {
+				So(freed, ShouldBeTrue)
+				So(afterHello.comment, ShouldEqual, "connected")
+			})
+		})
+	})
+}
+
+func TestFleetEventsPing(t *testing.T) {
+	engine := newStatsTestEngine(t)
+	broker := newFleetEventsBroker(engine, nil, nil, 0)
+	broker.heartbeatEvery = 40 * time.Millisecond
+	broker.start(context.Background())
+	t.Cleanup(broker.stop)
+
+	ts := httptest.NewServer(newFleetEventsHandlerFunc(broker))
+	t.Cleanup(ts.Close)
+
+	c := openSSE(t, ts.URL)
+	defer c.close()
+	c.nextComment(t)
+	c.nextEvent(t, "overview")
+	c.nextEvent(t, "attention")
+	ping := c.nextPing(t)
+
+	var pingBody struct {
+		T int64 `json:"t"`
+	}
+	pingErr := json.Unmarshal([]byte(ping.data), &pingBody)
+	sentAt := time.Now().UnixMilli()
+
+	Convey("Given an idle SSE stream (#51 liveness watchdog)", t, func() {
+		Convey("When the heartbeat fires", func() {
+			Convey("Then a named ping event carries the server time in unix milliseconds", func() {
+				So(ping.event, ShouldEqual, "ping")
+				So(pingErr, ShouldBeNil)
+				So(pingBody.T, ShouldBeGreaterThan, sentAt-60000)
+				So(pingBody.T, ShouldBeLessThanOrEqualTo, sentAt)
 			})
 		})
 	})

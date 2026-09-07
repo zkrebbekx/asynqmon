@@ -326,7 +326,7 @@ func New(opts Options) *HTTPHandler {
 	// (asynqmon:events:jobs) as `jobs` events, so it runs even when the
 	// stats engine is disabled (the stream then carries jobs + heartbeats
 	// only). Stopped (prepended) before the redis client it uses closes.
-	eventsBroker := newFleetEventsBroker(statsEngine, rc, jobs.NewStore(rc))
+	eventsBroker := newFleetEventsBroker(statsEngine, rc, jobs.NewStore(rc), opts.MaxSSEConnections)
 	eventsBroker.start(context.Background())
 	closers = append([]func() error{
 		func() error { eventsBroker.stop(); return nil },

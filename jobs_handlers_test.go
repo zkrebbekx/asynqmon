@@ -562,7 +562,17 @@ func TestJobsIdentityChain(t *testing.T) {
 				r.SetBasicAuth("mira", "pw")
 			})
 
-			Convey("Then the header is ignored and basic-auth wins", func() {
+			Convey("Then both the header and the unverified basic-auth user are ignored (#32)", func() {
+				So(w.Code, ShouldEqual, http.StatusCreated)
+				So(actorOf(w), ShouldStartWith, "anonymous@")
+			})
+		})
+
+		Convey("When the operator opts in to the basic-auth username", func() {
+			router := env.newRouter(Options{TrustBasicAuthUser: true})
+			w := createWith(router, func(r *http.Request) { r.SetBasicAuth("mira", "pw") })
+
+			Convey("Then basic-auth names the actor", func() {
 				So(w.Code, ShouldEqual, http.StatusCreated)
 				So(actorOf(w), ShouldEqual, "mira")
 			})
