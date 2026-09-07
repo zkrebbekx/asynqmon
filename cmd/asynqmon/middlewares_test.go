@@ -1,9 +1,12 @@
 package main
 
 import (
+	"io"
+	"log"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"testing"
 
 	. "github.com/smartystreets/goconvey/convey"
@@ -174,6 +177,103 @@ func TestCSRFForwardedHost(t *testing.T) {
 		Convey("When a trusted proxy forwards a host the origin does not match", func() {
 			Convey("Then the mutation is rejected", func() {
 				So(do(withProxies, "10.1.2.3:5000", "https://evil.example", "asynqmon.example.com"), ShouldEqual, http.StatusForbidden)
+			})
+		})
+	})
+}
+
+// TestRecoverPanics guards the outermost middleware: a panicking handler must
+// answer 500 with a JSON body instead of taking the process down or closing
+// the connection with no response.
+func TestRecoverPanics(t *testing.T) {
+	Convey("Given the recover middleware around a panicking handler", t, func() {
+		log.SetOutput(io.Discard)
+		defer log.SetOutput(os.Stderr)
+		h := recoverPanics(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			panic("handler is broken")
+		}))
+
+		Convey("When a request reaches it", func() {
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/queues", nil))
+
+			Convey("Then it answers 500 with a generic JSON error", func() {
+				So(rec.Code, ShouldEqual, http.StatusInternalServerError)
+				So(rec.Header().Get("Content-Type"), ShouldEqual, "application/json; charset=utf-8")
+				So(rec.Body.String(), ShouldEqual, `{"error":"internal error"}`)
+			})
+		})
+	})
+
+	Convey("Given the recover middleware around a healthy handler", t, func() {
+		h := recoverPanics(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusAccepted)
+			io.WriteString(w, "fine")
+		}))
+
+		Convey("When a request reaches it", func() {
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/queues", nil))
+
+			Convey("Then the response passes through unchanged", func() {
+				So(rec.Code, ShouldEqual, http.StatusAccepted)
+				So(rec.Body.String(), ShouldEqual, "fine")
+			})
+		})
+	})
+
+	Convey("Given a handler that panics after it started the response", t, func() {
+		log.SetOutput(io.Discard)
+		defer log.SetOutput(os.Stderr)
+		h := recoverPanics(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+			io.WriteString(w, "partial")
+			panic("too late")
+		}))
+
+		Convey("When a request reaches it", func() {
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/queues", nil))
+
+			Convey("Then the started response keeps its status and body", func() {
+				So(rec.Code, ShouldEqual, http.StatusOK)
+				So(rec.Body.String(), ShouldEqual, "partial")
+			})
+		})
+	})
+
+	Convey("Given a handler that panics with http.ErrAbortHandler", t, func() {
+		h := recoverPanics(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			panic(http.ErrAbortHandler)
+		}))
+
+		Convey("When a request reaches it", func() {
+			var got any
+			func() {
+				defer func() { got = recover() }()
+				h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/api/fleet/events", nil))
+			}()
+
+			Convey("Then the middleware re-raises it for net/http", func() {
+				So(got, ShouldEqual, http.ErrAbortHandler)
+			})
+		})
+	})
+
+	Convey("Given the recover middleware around a streaming handler", t, func() {
+		var flushed bool
+		h := recoverPanics(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			So(http.NewResponseController(w).Flush(), ShouldBeNil)
+			flushed = true
+		}))
+
+		Convey("When the handler flushes through http.ResponseController", func() {
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/fleet/events", nil))
+
+			Convey("Then the flush reaches the underlying writer", func() {
+				So(flushed, ShouldBeTrue)
+				So(rec.Flushed, ShouldBeTrue)
 			})
 		})
 	})

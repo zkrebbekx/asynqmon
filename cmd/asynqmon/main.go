@@ -25,6 +25,7 @@ import (
 	"github.com/redis/go-redis/v9"
 	"github.com/rs/cors"
 	"github.com/zkrebbekx/asynqmon"
+	"github.com/zkrebbekx/asynqmon/internal/safego"
 )
 
 // version is the build version stamped at link time:
@@ -579,7 +580,7 @@ func run(ctx context.Context, cfg *Config, onListen func(net.Addr)) error {
 	}
 
 	srv := &http.Server{
-		Handler:      loggingMiddleware(securityHeaders(mux)),
+		Handler:      recoverPanics(loggingMiddleware(securityHeaders(mux))),
 		WriteTimeout: 10 * time.Second,
 		ReadTimeout:  10 * time.Second,
 		BaseContext:  func(net.Listener) context.Context { return ctx },
@@ -594,7 +595,13 @@ func run(ctx context.Context, cfg *Config, onListen func(net.Addr)) error {
 	}
 
 	errCh := make(chan error, 1)
-	go func() { errCh <- srv.Serve(ln) }()
+	safego.Go("http: serve", func() {
+		// The shutdown path below reads errCh, so the send must happen even
+		// when Serve panics. The pre-set error is what a panic reports.
+		err := errors.New("the HTTP serve goroutine panicked")
+		defer func() { errCh <- err }()
+		err = srv.Serve(ln)
+	})
 
 	select {
 	case err := <-errCh:
