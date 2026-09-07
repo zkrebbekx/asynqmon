@@ -29,3 +29,11 @@ WARNING: no Redis connection configured. Set one of redis.url, redis.addr, or
 redis.clusterNodes. asynqmon defaults to 127.0.0.1:6379 which will not resolve
 inside the pod.
 {{- end }}
+
+Upgrading from upstream asynqmon 0.7.2, or running more than one replica?
+Read docs/UPGRADING.md first:
+  https://github.com/zkrebbekx/asynqmon/blob/master/docs/UPGRADING.md
+
+It states the Redis ACL this fork needs (it writes under asynqmon:*, which
+0.7.2 never did), the keys it creates and their TTLs, how the background
+roles are leased across replicas, and the rollback recipe.
