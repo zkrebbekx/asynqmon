@@ -47,6 +47,15 @@ func TestParseFlags(t *testing.T) {
 				DisableStats:          false,
 				CorrelationKeys:       "trace_id,correlation_id,request_id",
 
+				// Redis socket budget (#39) and the library-only options
+				// that gained flags (#43).
+				RedisTimeout:                 2 * time.Second,
+				AttentionGroupStallAfter:     5 * time.Minute,
+				AttentionPausedLongAfter:     7 * 24 * time.Hour,
+				AttentionPendingAgeSLO:       5 * time.Minute,
+				AttentionRetryStormThreshold: 1000,
+				JobConcurrency:               2,
+
 				Args: []string{},
 			},
 		},
@@ -279,9 +288,13 @@ func TestMakeRedisConnOpt(t *testing.T) {
 				RedisPassword: "foo",
 			},
 			want: asynq.RedisClientOpt{
-				Addr:     "localhost:6380",
-				DB:       1,
-				Password: "foo",
+				Addr:         "localhost:6380",
+				DB:           1,
+				Password:     "foo",
+				DialTimeout:  2 * time.Second,
+				ReadTimeout:  2 * time.Second,
+				WriteTimeout: 2 * time.Second,
+				PoolSize:     20,
 			},
 		},
 		{
@@ -291,8 +304,12 @@ func TestMakeRedisConnOpt(t *testing.T) {
 				RedisTLS:  "foobar",
 			},
 			want: asynq.RedisClientOpt{
-				Addr:      "localhost:6379",
-				TLSConfig: &tls.Config{ServerName: "foobar"},
+				Addr:         "localhost:6379",
+				TLSConfig:    &tls.Config{ServerName: "foobar"},
+				DialTimeout:  2 * time.Second,
+				ReadTimeout:  2 * time.Second,
+				WriteTimeout: 2 * time.Second,
+				PoolSize:     20,
 			},
 		},
 		{
@@ -301,9 +318,13 @@ func TestMakeRedisConnOpt(t *testing.T) {
 				RedisURL: "redis://:bar@localhost:6381/2",
 			},
 			want: asynq.RedisClientOpt{
-				Addr:     "localhost:6381",
-				DB:       2,
-				Password: "bar",
+				Addr:         "localhost:6381",
+				DB:           2,
+				Password:     "bar",
+				DialTimeout:  2 * time.Second,
+				ReadTimeout:  2 * time.Second,
+				WriteTimeout: 2 * time.Second,
+				PoolSize:     20,
 			},
 		},
 		{
@@ -318,6 +339,10 @@ func TestMakeRedisConnOpt(t *testing.T) {
 				// The userinfo password in a redis-sentinel:// URL authenticates
 				// to the sentinel nodes, so asynq maps it to SentinelPassword.
 				SentinelPassword: "secretpassword",
+				DialTimeout:      2 * time.Second,
+				ReadTimeout:      2 * time.Second,
+				WriteTimeout:     2 * time.Second,
+				PoolSize:         20,
 			},
 		},
 		{
@@ -328,12 +353,17 @@ func TestMakeRedisConnOpt(t *testing.T) {
 			want: asynq.RedisClusterClientOpt{
 				Addrs: []string{
 					"localhost:5000", "localhost:5001", "localhost:5002", "localhost:5003", "localhost:5004", "localhost:5005"},
+				DialTimeout:  2 * time.Second,
+				ReadTimeout:  2 * time.Second,
+				WriteTimeout: 2 * time.Second,
 			},
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.desc, func(t *testing.T) {
+			// The configs above leave RedisTimeout zero, so the wants
+			// above also assert the defaultRedisTimeout fallback.
 			got, err := makeRedisConnOpt(tc.cfg)
 			if err != nil {
 				t.Fatalf("makeRedisConnOpt returned error: %v", err)

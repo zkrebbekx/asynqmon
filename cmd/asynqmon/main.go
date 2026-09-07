@@ -2,22 +2,50 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/tls"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"os"
+	"os/signal"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/hibiken/asynq"
 	"github.com/hibiken/asynq/x/metrics"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"github.com/redis/go-redis/v9"
 	"github.com/rs/cors"
 	"github.com/zkrebbekx/asynqmon"
+)
+
+// version is the build version stamped at link time:
+//
+//	go build -ldflags "-X main.version=v0.9.0"
+//
+// It is printed by --version, logged at startup, and served by
+// GET /api/features as "version". "devel" means an unstamped build.
+var version = "devel"
+
+// Lifecycle budgets.
+const (
+	// shutdownTimeout bounds srv.Shutdown on SIGINT/SIGTERM. In-flight
+	// requests older than this are cut with srv.Close.
+	shutdownTimeout = 10 * time.Second
+	// startupProbeTimeout bounds the INFO server call at boot.
+	startupProbeTimeout = 3 * time.Second
+	// defaultRedisTimeout is the --redis-timeout default: dial, read, and
+	// write. It must not exceed the 2s /healthz PING budget.
+	defaultRedisTimeout = 2 * time.Second
+	// redisPoolSize is the go-redis connection pool size per client.
+	redisPoolSize = 20
 )
 
 // Config holds configurations for the program provided via the command line.
@@ -33,6 +61,11 @@ type Config struct {
 	RedisURL          string
 	RedisInsecureTLS  bool
 	RedisClusterNodes string
+
+	// RedisTimeout is the dial, read, and write timeout of every Redis
+	// connection. Default 2s. Bounded so a hung Redis fails a request
+	// within the /healthz budget instead of the go-redis 3s default.
+	RedisTimeout time.Duration
 
 	// RedisUsername is the Redis 6 ACL username sent alongside RedisPassword
 	// in single, cluster, and sentinel modes (upstream hibiken/asynqmon#273).
@@ -65,6 +98,21 @@ type Config struct {
 	StatsInterval time.Duration
 	DisableStats  bool
 
+	// Attention-engine detector thresholds (Options.Attention*). Zero
+	// means the library default.
+	AttentionGroupStallAfter     time.Duration
+	AttentionPausedLongAfter     time.Duration
+	AttentionPendingAgeSLO       time.Duration
+	AttentionRetryStormThreshold int
+
+	// Background-role switches and knobs for the error-signature indexer,
+	// the hygiene scheduler, and the bulk-job runner.
+	DisableErrorIndex bool
+	DisableHygiene    bool
+	DisableJobs       bool
+	HygieneWebhookURL string
+	JobConcurrency    int
+
 	// Identity & audit configs (Fleet Console §5.11)
 	AuthHeader      string
 	TrustedProxies  string
@@ -90,6 +138,13 @@ type Config struct {
 	// query proxied to PrometheusServerAddr (upstream hibiken/asynqmon#248).
 	// Never logged.
 	PrometheusBasicAuth string
+
+	// PurgeOwnedKeys makes the binary delete every asynqmon:* key in the
+	// configured Redis database and exit instead of serving.
+	PurgeOwnedKeys bool
+
+	// ShowVersion makes the binary print its version and exit.
+	ShowVersion bool
 
 	// Args are the positional (non-flag) command line arguments
 	Args []string
@@ -117,6 +172,7 @@ func parseFlags(progname string, args []string) (cfg *Config, output string, err
 	flags.StringVar(&conf.RedisURL, "redis-url", getEnvDefaultString("REDIS_URL", ""), "URL to redis server")
 	flags.BoolVar(&conf.RedisInsecureTLS, "redis-insecure-tls", getEnvOrDefaultBool("REDIS_INSECURE_TLS", false), "disable TLS certificate host checks")
 	flags.StringVar(&conf.RedisClusterNodes, "redis-cluster-nodes", getEnvDefaultString("REDIS_CLUSTER_NODES", ""), "comma separated list of host:port addresses of cluster nodes")
+	flags.DurationVar(&conf.RedisTimeout, "redis-timeout", getEnvOrDefaultDuration("REDIS_TIMEOUT", defaultRedisTimeout), "dial, read, and write timeout of every redis connection (e.g. 2s, 500ms)")
 	flags.IntVar(&conf.MaxPayloadLength, "max-payload-length", getEnvOrDefaultInt("MAX_PAYLOAD_LENGTH", 200), "maximum number of utf8 characters printed in the payload cell in the Web UI")
 	flags.IntVar(&conf.MaxResultLength, "max-result-length", getEnvOrDefaultInt("MAX_RESULT_LENGTH", 200), "maximum number of utf8 characters printed in the result cell in the Web UI")
 	flags.IntVar(&conf.MaxDetailPayloadLength, "max-detail-payload-length", getEnvOrDefaultInt("MAX_DETAIL_PAYLOAD_LENGTH", 262144), "maximum number of utf8 characters of formatted payload/result served on the task DETAIL endpoint (upstream #301); list cells stay capped by --max-payload-length/--max-result-length; 0 = unlimited")
@@ -128,12 +184,23 @@ func parseFlags(progname string, args []string) (cfg *Config, output string, err
 	flags.BoolVar(&conf.ReadOnly, "read-only", getEnvOrDefaultBool("READ_ONLY", false), "restrict to read-only mode")
 	flags.DurationVar(&conf.StatsInterval, "stats-interval", getEnvOrDefaultDuration("STATS_INTERVAL", 5*time.Second), "interval between stats sweeps (e.g. 5s, 30s)")
 	flags.BoolVar(&conf.DisableStats, "disable-stats", getEnvOrDefaultBool("DISABLE_STATS", false), "disable the background fleet stats sweeper and /api/fleet endpoints")
+	flags.DurationVar(&conf.AttentionGroupStallAfter, "attention-group-stall-after", getEnvOrDefaultDuration("ATTENTION_GROUP_STALL_AFTER", 5*time.Minute), "raise a GROUP_STALL finding when the oldest member of a group has aggregated longer than this")
+	flags.DurationVar(&conf.AttentionPausedLongAfter, "attention-paused-long-after", getEnvOrDefaultDuration("ATTENTION_PAUSED_LONG_AFTER", 7*24*time.Hour), "raise a PAUSED_LONG finding when a queue has been paused longer than this")
+	flags.DurationVar(&conf.AttentionPendingAgeSLO, "attention-pending-age-slo", getEnvOrDefaultDuration("ATTENTION_PENDING_AGE_SLO", 5*time.Minute), "raise a PENDING_AGE finding when a queue's oldest pending task has waited longer than this")
+	flags.IntVar(&conf.AttentionRetryStormThreshold, "attention-retry-storm-threshold", getEnvOrDefaultInt("ATTENTION_RETRY_STORM_THRESHOLD", 1000), "raise a RETRY_STORM finding when at least this many retries fire within the next 5 minutes")
+	flags.BoolVar(&conf.DisableErrorIndex, "disable-error-index", getEnvOrDefaultBool("DISABLE_ERROR_INDEX", false), "disable this replica's error-signature indexer (/api/errors still serves the shared index)")
+	flags.BoolVar(&conf.DisableHygiene, "disable-hygiene", getEnvOrDefaultBool("DISABLE_HYGIENE", false), "disable this replica's scheduled hygiene reports (/api/hygiene still serves persisted reports)")
+	flags.BoolVar(&conf.DisableJobs, "disable-jobs", getEnvOrDefaultBool("DISABLE_JOBS", false), "disable this replica's bulk-job runner (/api/jobs still works; another replica runs the jobs)")
+	flags.StringVar(&conf.HygieneWebhookURL, "hygiene-webhook-url", getEnvDefaultString("HYGIENE_WEBHOOK_URL", ""), "URL that receives a POST of every generated hygiene report (best effort, one attempt)")
+	flags.IntVar(&conf.JobConcurrency, "job-concurrency", getEnvOrDefaultInt("JOB_CONCURRENCY", 2), "maximum number of bulk jobs this replica works at once")
 	flags.StringVar(&conf.AuthHeader, "auth-header", getEnvDefaultString("AUTH_HEADER", ""), "reverse-proxy header resolved as the acting user for the audit log (e.g. X-Auth-Request-User)")
 	flags.StringVar(&conf.TrustedProxies, "trusted-proxies", getEnvDefaultString("TRUSTED_PROXIES", ""), "comma separated CIDRs the auth header is trusted from (empty: trusted from any peer)")
 	flags.BoolVar(&conf.RequireIdentity, "require-identity", getEnvOrDefaultBool("REQUIRE_IDENTITY", false), "refuse mutating requests that carry no resolvable identity")
 	flags.BoolVar(&conf.EnableEnqueue, "enable-enqueue", getEnvOrDefaultBool("ENABLE_ENQUEUE", false), "enable creating tasks from the web ui (POST /api/queues/{qname}/tasks); always excluded in read-only mode")
 	flags.StringVar(&conf.CorrelationKeys, "correlation-keys", getEnvDefaultString("CORRELATION_KEYS", "trace_id,correlation_id,request_id"), "comma separated list of payload keys the task drawer's Flow view recognizes as correlation ids, in priority order")
 	flags.StringVar(&conf.CorsAllowedOrigins, "cors-allowed-origins", getEnvDefaultString("CORS_ALLOWED_ORIGINS", ""), "comma separated list of origins allowed to make cross-origin requests (default: same-origin only)")
+	flags.BoolVar(&conf.PurgeOwnedKeys, "purge-owned-keys", getEnvOrDefaultBool("PURGE_OWNED_KEYS", false), "delete every asynqmon:* key in the configured redis database, print the counts, and exit (rollback helper; never touches asynq:* keys)")
+	flags.BoolVar(&conf.ShowVersion, "version", false, "print the asynqmon version and exit")
 
 	err = flags.Parse(args)
 	if err != nil {
@@ -153,14 +220,34 @@ func makeTLSConfig(cfg *Config) *tls.Config {
 	}
 }
 
+// redisTimeout returns the configured per-connection timeout, or the
+// default when the config carries none.
+func redisTimeout(cfg *Config) time.Duration {
+	if cfg.RedisTimeout <= 0 {
+		return defaultRedisTimeout
+	}
+	return cfg.RedisTimeout
+}
+
+// makeRedisConnOpt converts the config into an asynq.RedisConnOpt. Every
+// opt type gets DialTimeout, ReadTimeout, and WriteTimeout from
+// --redis-timeout and a fixed PoolSize, so a hung Redis fails a request
+// within the /healthz budget instead of the go-redis defaults.
 func makeRedisConnOpt(cfg *Config) (asynq.RedisConnOpt, error) {
+	timeout := redisTimeout(cfg)
+
 	// Connecting to redis-cluster
 	if len(cfg.RedisClusterNodes) > 0 {
 		return asynq.RedisClusterClientOpt{
-			Addrs:     strings.Split(cfg.RedisClusterNodes, ","),
-			Username:  cfg.RedisUsername, // ACL username (upstream #273)
-			Password:  cfg.RedisPassword,
-			TLSConfig: makeTLSConfig(cfg),
+			Addrs:        strings.Split(cfg.RedisClusterNodes, ","),
+			Username:     cfg.RedisUsername, // ACL username (upstream #273)
+			Password:     cfg.RedisPassword,
+			TLSConfig:    makeTLSConfig(cfg),
+			DialTimeout:  timeout,
+			ReadTimeout:  timeout,
+			WriteTimeout: timeout,
+			// asynq.RedisClusterClientOpt carries no PoolSize field; the
+			// cluster client keeps the go-redis per-node default.
 		}, nil
 	}
 
@@ -188,6 +275,10 @@ func makeRedisConnOpt(cfg *Config) (asynq.RedisConnOpt, error) {
 			connOpt.Password = cfg.RedisPassword
 		}
 		connOpt.TLSConfig = makeTLSConfig(cfg)
+		connOpt.DialTimeout = timeout
+		connOpt.ReadTimeout = timeout
+		connOpt.WriteTimeout = timeout
+		connOpt.PoolSize = redisPoolSize
 		return connOpt, nil
 	}
 
@@ -209,54 +300,41 @@ func makeRedisConnOpt(cfg *Config) (asynq.RedisConnOpt, error) {
 	if cfg.RedisUsername != "" {
 		connOpt.Username = cfg.RedisUsername
 	}
+	// --redis-password / REDIS_PASSWORD applies when the URL carried no
+	// password, so a secret-backed REDIS_PASSWORD next to a password-less
+	// REDIS_URL authenticates instead of failing with NOAUTH. A password in
+	// the URL keeps precedence.
+	if connOpt.Password == "" && cfg.RedisPassword != "" {
+		connOpt.Password = cfg.RedisPassword
+	}
 	if connOpt.TLSConfig == nil {
 		connOpt.TLSConfig = makeTLSConfig(cfg)
 	}
+	connOpt.DialTimeout = timeout
+	connOpt.ReadTimeout = timeout
+	connOpt.WriteTimeout = timeout
+	connOpt.PoolSize = redisPoolSize
 	return connOpt, nil
 }
 
-func main() {
-	cfg, output, err := parseFlags(os.Args[0], os.Args[1:])
-	if err == flag.ErrHelp {
-		fmt.Println(output)
-		os.Exit(2)
-	} else if err != nil {
-		fmt.Printf("error: %v\n", err)
-		fmt.Println(output)
-		os.Exit(1)
+// splitList splits a comma separated flag value. An empty value gives nil.
+func splitList(s string) []string {
+	if s == "" {
+		return nil
 	}
+	return strings.Split(s, ",")
+}
 
-	// A spoofable identity must not satisfy --require-identity: with
-	// --auth-header set and no --trusted-proxies, the header is trusted from
-	// EVERY peer, so any client that can reach the listener directly can
-	// forge the audit actor AND pass the identity requirement. The library
-	// keeps the permissive single-proxy default (with a loud warning); the
-	// binary refuses the misconfiguration outright.
-	if cfg.RequireIdentity && cfg.AuthHeader != "" && strings.TrimSpace(cfg.TrustedProxies) == "" {
-		log.Fatal("--require-identity with --auth-header needs --trusted-proxies: " +
-			"without it the identity header is trusted from every peer, so any direct " +
-			"client can forge the audit actor and still satisfy the identity requirement. " +
-			"Set --trusted-proxies to your reverse proxy's CIDRs (e.g. --trusted-proxies=10.0.0.0/8).")
-	}
+// clusterGateNotice is logged once when --redis-cluster-nodes forces the
+// write features off.
+const clusterGateNotice = "redis cluster: the console's write features (fleet stats, error index, hygiene reports, bulk jobs) are unavailable on Redis Cluster in this version; StatsDisabled, ErrorIndexDisabled, HygieneDisabled, and JobsDisabled are forced on"
 
-	redisConnOpt, err := makeRedisConnOpt(cfg)
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	var trustedProxies []string
-	if cfg.TrustedProxies != "" {
-		trustedProxies = strings.Split(cfg.TrustedProxies, ",")
-	}
-
-	// Whitespace and empty entries are normalized (and an all-empty list
-	// falls back to the defaults) inside the asynqmon library.
-	var correlationKeys []string
-	if cfg.CorrelationKeys != "" {
-		correlationKeys = strings.Split(cfg.CorrelationKeys, ",")
-	}
-
-	h := asynqmon.New(asynqmon.Options{
+// buildOptions converts the config into asynqmon.Options. When
+// --redis-cluster-nodes is set, the background writers are forced off: their
+// fenced Lua batches touch keys outside the declared KEYS, which Redis
+// Cluster rejects. The gate logs clusterGateNotice once.
+func buildOptions(cfg *Config, redisConnOpt asynq.RedisConnOpt) asynqmon.Options {
+	opts := asynqmon.Options{
 		RedisConnOpt:     redisConnOpt,
 		PayloadFormatter: asynqmon.PayloadFormatterFunc(payloadFormatterFunc(cfg)),
 		ResultFormatter:  asynqmon.ResultFormatterFunc(resultFormatterFunc(cfg)),
@@ -272,21 +350,139 @@ func main() {
 		PrometheusAddress:      cfg.PrometheusServerAddr,
 		// Basic-auth credentials for the Prometheus proxy (upstream #248).
 		// Passed through verbatim and never logged.
-		PrometheusBasicAuth: cfg.PrometheusBasicAuth,
-		ReadOnly:            cfg.ReadOnly,
-		StatsInterval:       cfg.StatsInterval,
-		StatsDisabled:       cfg.DisableStats,
-		AuthHeader:          cfg.AuthHeader,
-		TrustedProxies:      trustedProxies,
-		RequireIdentity:     cfg.RequireIdentity,
-		EnableEnqueue:       cfg.EnableEnqueue,
-		CorrelationKeys:     correlationKeys,
+		PrometheusBasicAuth:          cfg.PrometheusBasicAuth,
+		ReadOnly:                     cfg.ReadOnly,
+		Version:                      version,
+		StatsInterval:                cfg.StatsInterval,
+		StatsDisabled:                cfg.DisableStats,
+		AttentionPendingAgeSLO:       cfg.AttentionPendingAgeSLO,
+		AttentionRetryStormThreshold: cfg.AttentionRetryStormThreshold,
+		AttentionPausedLongAfter:     cfg.AttentionPausedLongAfter,
+		AttentionGroupStallAfter:     cfg.AttentionGroupStallAfter,
+		AuthHeader:                   cfg.AuthHeader,
+		// Whitespace and empty entries are normalized (and an all-empty
+		// list falls back to the defaults) inside the asynqmon library.
+		TrustedProxies:     splitList(cfg.TrustedProxies),
+		RequireIdentity:    cfg.RequireIdentity,
+		JobConcurrency:     cfg.JobConcurrency,
+		JobsDisabled:       cfg.DisableJobs,
+		ErrorIndexDisabled: cfg.DisableErrorIndex,
+		EnableEnqueue:      cfg.EnableEnqueue,
+		CorrelationKeys:    splitList(cfg.CorrelationKeys),
+		HygieneWebhookURL:  cfg.HygieneWebhookURL,
+		HygieneDisabled:    cfg.DisableHygiene,
+	}
+	if cfg.RedisClusterNodes != "" {
+		opts.StatsDisabled = true
+		opts.ErrorIndexDisabled = true
+		opts.HygieneDisabled = true
+		opts.JobsDisabled = true
+		log.Print(clusterGateNotice)
+	}
+	return opts
+}
+
+func main() {
+	cfg, output, err := parseFlags(os.Args[0], os.Args[1:])
+	if err == flag.ErrHelp {
+		fmt.Println(output)
+		os.Exit(2)
+	} else if err != nil {
+		fmt.Printf("error: %v\n", err)
+		fmt.Println(output)
+		os.Exit(1)
+	}
+	if cfg.ShowVersion {
+		fmt.Printf("asynqmon %s\n", version)
+		return
+	}
+	if err := validateConfig(cfg); err != nil {
+		log.Fatal(err)
+	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	if cfg.PurgeOwnedKeys {
+		if err := runPurge(ctx, cfg, os.Stdout); err != nil {
+			log.Fatal(err)
+		}
+		return
+	}
+
+	err = run(ctx, cfg, func(addr net.Addr) {
+		fmt.Printf("Asynq Monitoring WebUI server %s is listening on %s\n", version, addr)
 	})
+	if err != nil {
+		log.Fatal(err)
+	}
+}
+
+// validateConfig rejects flag combinations the binary refuses to run with.
+func validateConfig(cfg *Config) error {
+	// A spoofable identity must not satisfy --require-identity: with
+	// --auth-header set and no --trusted-proxies, the header is trusted from
+	// EVERY peer, so any client that can reach the listener directly can
+	// forge the audit actor AND pass the identity requirement. The library
+	// keeps the permissive single-proxy default (with a loud warning); the
+	// binary refuses the misconfiguration outright.
+	if cfg.RequireIdentity && cfg.AuthHeader != "" && strings.TrimSpace(cfg.TrustedProxies) == "" {
+		return errors.New("--require-identity with --auth-header needs --trusted-proxies: " +
+			"without it the identity header is trusted from every peer, so any direct " +
+			"client can forge the audit actor and still satisfy the identity requirement. " +
+			"Set --trusted-proxies to your reverse proxy's CIDRs (e.g. --trusted-proxies=10.0.0.0/8).")
+	}
+	if _, err := parseTrustedProxyCIDRs(splitList(cfg.TrustedProxies)); err != nil {
+		return err
+	}
+	return nil
+}
+
+// runPurge implements --purge-owned-keys: it deletes every asynqmon:* key in
+// the configured Redis database, prints the counts to out, and returns.
+func runPurge(ctx context.Context, cfg *Config, out *os.File) error {
+	redisConnOpt, err := makeRedisConnOpt(cfg)
+	if err != nil {
+		return err
+	}
+	rc, ok := redisConnOpt.MakeRedisClient().(redis.UniversalClient)
+	if !ok {
+		return fmt.Errorf("unsupported redis connection type %T", redisConnOpt)
+	}
+	defer rc.Close()
+	res, err := purgeOwnedKeys(ctx, rc)
+	if err != nil {
+		return fmt.Errorf("purge refused: %w (deleted 0 keys)", err)
+	}
+	fmt.Fprintf(out, "purged %d asynqmon-owned keys (%d matched by SCAN)\n", res.Deleted, res.Matched)
+	return nil
+}
+
+// run builds the handler and serves HTTP until ctx is canceled or the
+// listener fails. onListen is called once with the bound address.
+//
+// Shutdown order on cancel:
+//  1. srv.Shutdown with shutdownTimeout. The server's BaseContext is ctx,
+//     so a long-lived SSE handler sees its request context canceled and
+//     returns; Shutdown then completes as soon as in-flight requests end.
+//  2. srv.Close when the budget is exhausted.
+//  3. h.Close, which stops every background engine while the Redis client
+//     is still open, so each Stop releases its lease at once instead of
+//     leaving it to expire.
+func run(ctx context.Context, cfg *Config, onListen func(net.Addr)) error {
+	redisConnOpt, err := makeRedisConnOpt(cfg)
+	if err != nil {
+		return err
+	}
+	logRedisVersion(ctx, redisConnOpt)
+
+	h := asynqmon.New(buildOptions(cfg, redisConnOpt))
 	defer h.Close()
 
-	var allowedOrigins []string
-	if cfg.CorsAllowedOrigins != "" {
-		allowedOrigins = strings.Split(cfg.CorsAllowedOrigins, ",")
+	allowedOrigins := splitList(cfg.CorsAllowedOrigins)
+	trustedProxies, err := parseTrustedProxyCIDRs(splitList(cfg.TrustedProxies))
+	if err != nil {
+		return err
 	}
 
 	// Reject cross-origin mutations (CSRF protection). The previous behavior —
@@ -294,11 +490,11 @@ func main() {
 	// the operator visited fire mutating requests at a localhost/intranet
 	// dashboard. The SPA is served same-origin, so CORS is only enabled when
 	// origins are explicitly allowed via -cors-allowed-origins.
-	var handler http.Handler = csrfProtection(allowedOrigins)(h)
+	var handler http.Handler = csrfProtection(allowedOrigins, trustedProxies)(h)
 	if len(allowedOrigins) > 0 {
 		c := cors.New(cors.Options{
 			AllowedOrigins: allowedOrigins,
-			AllowedMethods: []string{"GET", "POST", "DELETE"},
+			AllowedMethods: []string{"GET", "POST", "PUT", "DELETE"},
 		})
 		handler = c.Handler(handler)
 	}
@@ -309,6 +505,7 @@ func main() {
 		reg := prometheus.NewPedanticRegistry()
 
 		inspector := asynq.NewInspector(redisConnOpt)
+		defer inspector.Close()
 
 		reg.MustRegister(
 			metrics.NewQueueMetricsCollector(inspector),
@@ -320,14 +517,37 @@ func main() {
 	}
 
 	srv := &http.Server{
-		Handler:      loggingMiddleware(mux),
-		Addr:         fmt.Sprintf(":%d", cfg.Port),
+		Handler:      loggingMiddleware(securityHeaders(mux)),
 		WriteTimeout: 10 * time.Second,
 		ReadTimeout:  10 * time.Second,
+		BaseContext:  func(net.Listener) context.Context { return ctx },
 	}
 
-	fmt.Printf("Asynq Monitoring WebUI server is listening on port %d\n", cfg.Port)
-	log.Fatal(srv.ListenAndServe())
+	ln, err := net.Listen("tcp", fmt.Sprintf(":%d", cfg.Port))
+	if err != nil {
+		return err
+	}
+	if onListen != nil {
+		onListen(ln.Addr())
+	}
+
+	errCh := make(chan error, 1)
+	go func() { errCh <- srv.Serve(ln) }()
+
+	select {
+	case err := <-errCh:
+		return err
+	case <-ctx.Done():
+	}
+	log.Print("shutdown: signal received, draining HTTP")
+	shCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+	defer cancel()
+	if err := srv.Shutdown(shCtx); err != nil {
+		log.Printf("shutdown: drain budget exhausted, closing connections: %v", err)
+		_ = srv.Close()
+	}
+	<-errCh // Serve returns http.ErrServerClosed
+	return nil
 }
 
 func payloadFormatterFunc(cfg *Config) func(string, []byte) string {
