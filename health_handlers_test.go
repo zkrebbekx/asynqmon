@@ -63,12 +63,15 @@ func TestHealthzEndpoint(t *testing.T) {
 			})
 		})
 		Convey("When redis does not answer (closed client)", func() {
-			Convey("Then it reports 503 unavailable with the error", func() {
+			// The raw redis error carries the server address, so the probe
+			// logs it and answers with the status alone.
+			Convey("Then it reports 503 unavailable and echoes no redis error", func() {
 				So(downW.Code, ShouldEqual, http.StatusServiceUnavailable)
 				So(downW.Header().Get("Content-Type"), ShouldContainSubstring, "application/json")
 				So(downDecodeErr, ShouldBeNil)
 				So(downBody.Status, ShouldEqual, "unavailable")
-				So(downBody.Error, ShouldNotBeEmpty)
+				So(downBody.Error, ShouldBeEmpty)
+				So(downW.Body.String(), ShouldNotContainSubstring, statsTestRedisAddr)
 			})
 		})
 	})

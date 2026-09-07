@@ -47,6 +47,15 @@ func TestParseFlags(t *testing.T) {
 				DisableStats:          false,
 				CorrelationKeys:       "trace_id,correlation_id,request_id",
 
+				// Redis socket budget (#39) and the library-only options
+				// that gained flags (#43).
+				RedisTimeout:                 2 * time.Second,
+				AttentionGroupStallAfter:     5 * time.Minute,
+				AttentionPausedLongAfter:     7 * 24 * time.Hour,
+				AttentionPendingAgeSLO:       5 * time.Minute,
+				AttentionRetryStormThreshold: 1000,
+				JobConcurrency:               2,
+
 				Args: []string{},
 			},
 		},
@@ -279,9 +288,13 @@ func TestMakeRedisConnOpt(t *testing.T) {
 				RedisPassword: "foo",
 			},
 			want: asynq.RedisClientOpt{
-				Addr:     "localhost:6380",
-				DB:       1,
-				Password: "foo",
+				Addr:         "localhost:6380",
+				DB:           1,
+				Password:     "foo",
+				DialTimeout:  2 * time.Second,
+				ReadTimeout:  2 * time.Second,
+				WriteTimeout: 2 * time.Second,
+				PoolSize:     20,
 			},
 		},
 		{
@@ -291,8 +304,12 @@ func TestMakeRedisConnOpt(t *testing.T) {
 				RedisTLS:  "foobar",
 			},
 			want: asynq.RedisClientOpt{
-				Addr:      "localhost:6379",
-				TLSConfig: &tls.Config{ServerName: "foobar"},
+				Addr:         "localhost:6379",
+				TLSConfig:    &tls.Config{ServerName: "foobar"},
+				DialTimeout:  2 * time.Second,
+				ReadTimeout:  2 * time.Second,
+				WriteTimeout: 2 * time.Second,
+				PoolSize:     20,
 			},
 		},
 		{
@@ -301,9 +318,13 @@ func TestMakeRedisConnOpt(t *testing.T) {
 				RedisURL: "redis://:bar@localhost:6381/2",
 			},
 			want: asynq.RedisClientOpt{
-				Addr:     "localhost:6381",
-				DB:       2,
-				Password: "bar",
+				Addr:         "localhost:6381",
+				DB:           2,
+				Password:     "bar",
+				DialTimeout:  2 * time.Second,
+				ReadTimeout:  2 * time.Second,
+				WriteTimeout: 2 * time.Second,
+				PoolSize:     20,
 			},
 		},
 		{
@@ -318,6 +339,10 @@ func TestMakeRedisConnOpt(t *testing.T) {
 				// The userinfo password in a redis-sentinel:// URL authenticates
 				// to the sentinel nodes, so asynq maps it to SentinelPassword.
 				SentinelPassword: "secretpassword",
+				DialTimeout:      2 * time.Second,
+				ReadTimeout:      2 * time.Second,
+				WriteTimeout:     2 * time.Second,
+				PoolSize:         20,
 			},
 		},
 		{
@@ -328,12 +353,17 @@ func TestMakeRedisConnOpt(t *testing.T) {
 			want: asynq.RedisClusterClientOpt{
 				Addrs: []string{
 					"localhost:5000", "localhost:5001", "localhost:5002", "localhost:5003", "localhost:5004", "localhost:5005"},
+				DialTimeout:  2 * time.Second,
+				ReadTimeout:  2 * time.Second,
+				WriteTimeout: 2 * time.Second,
 			},
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.desc, func(t *testing.T) {
+			// The configs above leave RedisTimeout zero, so the wants
+			// above also assert the defaultRedisTimeout fallback.
 			got, err := makeRedisConnOpt(tc.cfg)
 			if err != nil {
 				t.Fatalf("makeRedisConnOpt returned error: %v", err)
@@ -345,4 +375,200 @@ func TestMakeRedisConnOpt(t *testing.T) {
 			}
 		})
 	}
+}
+
+// Library-only options that gained flags and env vars (#43): the background
+// role switches, the bulk-job concurrency, the hygiene webhook, and the four
+// attention thresholds. Parsing runs imperatively before the Convey tree
+// (the repo's goconvey discipline); the tree only reads captured results.
+func TestBackgroundRoleFlagParsing(t *testing.T) {
+	defCfg, _, defErr := parseFlags("asynqmon", []string{})
+
+	flagCfg, flagOut, flagErr := parseFlags("asynqmon", []string{
+		"--job-concurrency", "8",
+		"--disable-jobs",
+		"--disable-error-index",
+		"--disable-hygiene",
+		"--hygiene-webhook-url", "https://hooks.example/asynqmon",
+		"--attention-pending-age-slo", "90s",
+		"--attention-retry-storm-threshold", "250",
+		"--attention-paused-long-after", "48h",
+		"--attention-group-stall-after", "3m",
+		"--redis-timeout", "750ms",
+	})
+
+	t.Setenv("JOB_CONCURRENCY", "5")
+	t.Setenv("DISABLE_JOBS", "true")
+	t.Setenv("DISABLE_ERROR_INDEX", "true")
+	t.Setenv("DISABLE_HYGIENE", "true")
+	t.Setenv("HYGIENE_WEBHOOK_URL", "https://env.example/hook")
+	t.Setenv("ATTENTION_PENDING_AGE_SLO", "11m")
+	t.Setenv("ATTENTION_RETRY_STORM_THRESHOLD", "77")
+	t.Setenv("ATTENTION_PAUSED_LONG_AFTER", "72h")
+	t.Setenv("ATTENTION_GROUP_STALL_AFTER", "12m")
+	t.Setenv("REDIS_TIMEOUT", "4s")
+	envCfg, envOut, envErr := parseFlags("asynqmon", []string{})
+	bothCfg, _, bothErr := parseFlags("asynqmon", []string{"--job-concurrency", "3"})
+
+	Convey("Given the flags for the library-only options (#43)", t, func() {
+		Convey("When nothing is provided", func() {
+			Convey("Then the library defaults apply", func() {
+				So(defErr, ShouldBeNil)
+				So(defCfg.JobConcurrency, ShouldEqual, 2)
+				So(defCfg.DisableJobs, ShouldBeFalse)
+				So(defCfg.DisableErrorIndex, ShouldBeFalse)
+				So(defCfg.DisableHygiene, ShouldBeFalse)
+				So(defCfg.HygieneWebhookURL, ShouldBeEmpty)
+				So(defCfg.AttentionPendingAgeSLO, ShouldEqual, 5*time.Minute)
+				So(defCfg.AttentionRetryStormThreshold, ShouldEqual, 1000)
+				So(defCfg.AttentionPausedLongAfter, ShouldEqual, 7*24*time.Hour)
+				So(defCfg.AttentionGroupStallAfter, ShouldEqual, 5*time.Minute)
+				So(defCfg.RedisTimeout, ShouldEqual, 2*time.Second)
+			})
+		})
+		Convey("When the flags are passed", func() {
+			Convey("Then each value lands on its Config field", func() {
+				So(flagErr, ShouldBeNil)
+				So(flagOut, ShouldBeEmpty)
+				So(flagCfg.JobConcurrency, ShouldEqual, 8)
+				So(flagCfg.DisableJobs, ShouldBeTrue)
+				So(flagCfg.DisableErrorIndex, ShouldBeTrue)
+				So(flagCfg.DisableHygiene, ShouldBeTrue)
+				So(flagCfg.HygieneWebhookURL, ShouldEqual, "https://hooks.example/asynqmon")
+				So(flagCfg.AttentionPendingAgeSLO, ShouldEqual, 90*time.Second)
+				So(flagCfg.AttentionRetryStormThreshold, ShouldEqual, 250)
+				So(flagCfg.AttentionPausedLongAfter, ShouldEqual, 48*time.Hour)
+				So(flagCfg.AttentionGroupStallAfter, ShouldEqual, 3*time.Minute)
+				So(flagCfg.RedisTimeout, ShouldEqual, 750*time.Millisecond)
+			})
+		})
+		Convey("When only the env vars are set", func() {
+			Convey("Then the env values apply", func() {
+				So(envErr, ShouldBeNil)
+				So(envOut, ShouldBeEmpty)
+				So(envCfg.JobConcurrency, ShouldEqual, 5)
+				So(envCfg.DisableJobs, ShouldBeTrue)
+				So(envCfg.DisableErrorIndex, ShouldBeTrue)
+				So(envCfg.DisableHygiene, ShouldBeTrue)
+				So(envCfg.HygieneWebhookURL, ShouldEqual, "https://env.example/hook")
+				So(envCfg.AttentionPendingAgeSLO, ShouldEqual, 11*time.Minute)
+				So(envCfg.AttentionRetryStormThreshold, ShouldEqual, 77)
+				So(envCfg.AttentionPausedLongAfter, ShouldEqual, 72*time.Hour)
+				So(envCfg.AttentionGroupStallAfter, ShouldEqual, 12*time.Minute)
+				So(envCfg.RedisTimeout, ShouldEqual, 4*time.Second)
+			})
+		})
+		Convey("When both a flag and its env var are set", func() {
+			Convey("Then the flag wins and untouched flags keep their env values", func() {
+				So(bothErr, ShouldBeNil)
+				So(bothCfg.JobConcurrency, ShouldEqual, 3)
+				So(bothCfg.HygieneWebhookURL, ShouldEqual, "https://env.example/hook")
+			})
+		})
+	})
+}
+
+// Every flag value reaches asynqmon.Options (#43): a flag with no wiring is
+// as useless as a missing flag.
+func TestBuildOptionsCarriesEveryFlag(t *testing.T) {
+	cfg := &Config{
+		RedisAddr:                    "127.0.0.1:6379",
+		ReadOnly:                     true,
+		MaxDetailPayloadLength:       1234,
+		PrometheusServerAddr:         "http://prom:9090",
+		PrometheusBasicAuth:          "u:p",
+		StatsInterval:                7 * time.Second,
+		AuthHeader:                   "X-Auth-Request-User",
+		TrustedProxies:               "10.0.0.0/8,192.168.0.0/16",
+		RequireIdentity:              true,
+		EnableEnqueue:                true,
+		CorrelationKeys:              "job_id,trace_id",
+		JobConcurrency:               6,
+		DisableJobs:                  true,
+		DisableErrorIndex:            true,
+		DisableHygiene:               true,
+		HygieneWebhookURL:            "https://hooks.example/h",
+		AttentionPendingAgeSLO:       90 * time.Second,
+		AttentionRetryStormThreshold: 250,
+		AttentionPausedLongAfter:     48 * time.Hour,
+		AttentionGroupStallAfter:     3 * time.Minute,
+	}
+	opts := buildOptions(cfg, asynq.RedisClientOpt{Addr: cfg.RedisAddr})
+
+	Convey("Given a fully populated command-line config (#43)", t, func() {
+		Convey("When it is converted into asynqmon.Options", func() {
+			Convey("Then the background-role knobs are carried through", func() {
+				So(opts.JobConcurrency, ShouldEqual, 6)
+				So(opts.JobsDisabled, ShouldBeTrue)
+				So(opts.ErrorIndexDisabled, ShouldBeTrue)
+				So(opts.HygieneDisabled, ShouldBeTrue)
+				So(opts.HygieneWebhookURL, ShouldEqual, "https://hooks.example/h")
+			})
+			Convey("Then the attention thresholds are carried through", func() {
+				So(opts.AttentionPendingAgeSLO, ShouldEqual, 90*time.Second)
+				So(opts.AttentionRetryStormThreshold, ShouldEqual, 250)
+				So(opts.AttentionPausedLongAfter, ShouldEqual, 48*time.Hour)
+				So(opts.AttentionGroupStallAfter, ShouldEqual, 3*time.Minute)
+			})
+			Convey("Then the identity and UI options are carried through", func() {
+				So(opts.ReadOnly, ShouldBeTrue)
+				So(opts.DetailPayloadLimit, ShouldEqual, 1234)
+				So(opts.PrometheusAddress, ShouldEqual, "http://prom:9090")
+				So(opts.PrometheusBasicAuth, ShouldEqual, "u:p")
+				So(opts.StatsInterval, ShouldEqual, 7*time.Second)
+				So(opts.AuthHeader, ShouldEqual, "X-Auth-Request-User")
+				So(opts.TrustedProxies, ShouldResemble, []string{"10.0.0.0/8", "192.168.0.0/16"})
+				So(opts.RequireIdentity, ShouldBeTrue)
+				So(opts.EnableEnqueue, ShouldBeTrue)
+				So(opts.CorrelationKeys, ShouldResemble, []string{"job_id", "trace_id"})
+			})
+		})
+	})
+}
+
+// A REDIS_URL that carries no password must still authenticate with
+// --redis-password / REDIS_PASSWORD (#43): the chart emits both when
+// redis.url meets redis.existingSecret, and the old code dropped the
+// password, failing at runtime with NOAUTH.
+func TestRedisPasswordAppliesAfterURL(t *testing.T) {
+	fromFlag, fromFlagErr := makeRedisConnOpt(&Config{
+		RedisURL:      "redis://redis.example:6379/1",
+		RedisPassword: "s3cret",
+	})
+	urlWins, urlWinsErr := makeRedisConnOpt(&Config{
+		RedisURL:      "redis://:in-url@redis.example:6379/1",
+		RedisPassword: "flag-pass",
+	})
+	sentinel, sentinelErr := makeRedisConnOpt(&Config{
+		RedisURL:      "redis-sentinel://localhost:5000?master=mymaster",
+		RedisPassword: "s3cret",
+	})
+
+	Convey("Given a redis URL carrying no password (#43)", t, func() {
+		Convey("When --redis-password is set beside it", func() {
+			Convey("Then the password is applied to the connection", func() {
+				So(fromFlagErr, ShouldBeNil)
+				opt, ok := fromFlag.(asynq.RedisClientOpt)
+				So(ok, ShouldBeTrue)
+				So(opt.Password, ShouldEqual, "s3cret")
+				So(opt.DB, ShouldEqual, 1)
+			})
+		})
+		Convey("When the URL does carry a password", func() {
+			Convey("Then the URL keeps precedence", func() {
+				So(urlWinsErr, ShouldBeNil)
+				opt, ok := urlWins.(asynq.RedisClientOpt)
+				So(ok, ShouldBeTrue)
+				So(opt.Password, ShouldEqual, "in-url")
+			})
+		})
+		Convey("When the URL is a sentinel URL", func() {
+			Convey("Then the password authenticates to the servers behind it", func() {
+				So(sentinelErr, ShouldBeNil)
+				opt, ok := sentinel.(asynq.RedisFailoverClientOpt)
+				So(ok, ShouldBeTrue)
+				So(opt.Password, ShouldEqual, "s3cret")
+			})
+		})
+	})
 }

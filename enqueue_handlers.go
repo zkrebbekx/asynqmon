@@ -126,6 +126,9 @@ type featuresResponse struct {
 	// hibiken/asynqmon#301); 0 = unlimited/unknown. The drawer uses it to
 	// render an honest "truncated at N chars" note on capped payloads.
 	PayloadDetailLimit int `json:"payload_detail_limit"`
+	// Version is the build version of the serving binary (Options.Version);
+	// "" when the embedder did not set it.
+	Version string `json:"version"`
 }
 
 // defaultCorrelationKeys is the Flow view's correlation-key list when
@@ -160,12 +163,13 @@ func normalizeCorrelationKeys(keys []string) []string {
 // Deliberately not part of /api/fleet/overview — that endpoint 503s whenever
 // the stats engine is disabled or has not swept yet, and capability
 // discovery must not depend on it.
-func newFeaturesHandlerFunc(enqueueEnabled bool, correlationKeys []string, payloadDetailLimit int) http.HandlerFunc {
+func newFeaturesHandlerFunc(enqueueEnabled bool, correlationKeys []string, payloadDetailLimit int, version string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var resp featuresResponse
 		resp.Features.Enqueue = enqueueEnabled
 		resp.CorrelationKeys = correlationKeys
 		resp.PayloadDetailLimit = payloadDetailLimit
+		resp.Version = version
 		writeResponseJSON(w, resp)
 	}
 }

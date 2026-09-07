@@ -90,3 +90,39 @@ func TestMetricsProxyBasicAuth(t *testing.T) {
 		})
 	})
 }
+
+// A Prometheus transport failure must not echo the query URL (#53 item 1).
+// Verified upstream: GET /api/metrics with no Prometheus configured returned
+// `Get "/api/v1/query_range?...": unsupported protocol scheme ""`.
+func TestMetricsProxyHidesTransportErrors(t *testing.T) {
+	// No Prometheus address: every proxied request fails in the transport.
+	unconfigured := newGetMetricsHandlerFunc(http.DefaultClient, "", nil)
+	unconfiguredW := getJSON(t, unconfigured, "/api/metrics?queues=default", nil)
+
+	// A Prometheus that refuses connections.
+	downSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	downURL := downSrv.URL
+	downSrv.Close()
+	down := newGetMetricsHandlerFunc(http.DefaultClient, downURL, nil)
+	downW := getJSON(t, down, "/api/metrics?queues=default", nil)
+
+	Convey("Given the Prometheus proxy with an unreachable server (#53)", t, func() {
+		Convey("When no prometheus address is configured", func() {
+			Convey("Then it answers 502 with a generic body", func() {
+				So(unconfiguredW.Code, ShouldEqual, http.StatusBadGateway)
+				So(unconfiguredW.Body.String(), ShouldContainSubstring, "prometheus unreachable")
+			})
+			Convey("Then the body leaks no query URL", func() {
+				So(unconfiguredW.Body.String(), ShouldNotContainSubstring, "query_range")
+				So(unconfiguredW.Body.String(), ShouldNotContainSubstring, "asynq_queue_size")
+			})
+		})
+		Convey("When the prometheus server refuses the connection", func() {
+			Convey("Then it answers 502 and names no address", func() {
+				So(downW.Code, ShouldEqual, http.StatusBadGateway)
+				So(downW.Body.String(), ShouldContainSubstring, "prometheus unreachable")
+				So(downW.Body.String(), ShouldNotContainSubstring, downURL)
+			})
+		})
+	})
+}

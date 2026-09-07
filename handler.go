@@ -80,6 +80,11 @@ type Options struct {
 	// Set ReadOnly to true to restrict user to view-only mode.
 	ReadOnly bool
 
+	// Version is the build version string reported by GET /api/features as
+	// "version". The asynqmon binary sets it from its -ldflags stamp.
+	// Optional; empty means unknown.
+	Version string
+
 	// StatsInterval is how often the background fleet-stats sweeper refreshes
 	// the shared snapshot cache backing the /api/fleet endpoints.
 	//
@@ -256,6 +261,18 @@ func New(opts Options) *HTTPHandler {
 	opts.RootPath = strings.TrimSuffix(opts.RootPath, "/")
 
 	closers := []func() error{rc.Close, i.Close}
+
+	// Seed the shipped system views off the constructor path. New must not
+	// block on Redis: with Redis unreachable the process could not bind
+	// its port for the whole dial-and-retry window. The goroutine retries
+	// with backoff until the seed succeeds or the handler closes; the
+	// canceling closer runs first so the goroutine stops before the redis
+	// client closes.
+	seedCtx, cancelSeed := context.WithCancel(context.Background())
+	seedDone := seedSystemViewsInBackground(seedCtx, newRedisViewStore(rc))
+	closers = append([]func() error{
+		func() error { cancelSeed(); <-seedDone; return nil },
+	}, closers...)
 
 	// The stats engine runs its sweeper only on the replica that wins the
 	// Redis lease; every other replica's engine stands by and serves reads
@@ -661,16 +678,15 @@ func muxRouter(opts Options, rc redis.UniversalClient, inspector *asynq.Inspecto
 	// Fleet Console phase 11 — §4.2 saved views (views.go /
 	// views_handlers.go). Server-side team assets in shared Redis (§5.13:
 	// plain shared structures, any replica serves/writes). System views
-	// are seeded idempotently at boot — best-effort, since a transient
-	// Redis error at boot must not take the whole handler down; the next
-	// boot self-heals. They are undeletable/unmodifiable (400 + reason).
+	// are seeded idempotently by a goroutine New starts (see
+	// seedSystemViewsInBackground); the router itself never touches Redis
+	// at build time. They are undeletable/unmodifiable (400 + reason).
 	// Mutations are actor-attributed (§5.11) and audit-logged via the
 	// phase-5 store; the read-only method filter below blocks them. State
 	// JSON is stored and served VERBATIM — relative→absolute time
 	// conversion at share time is a frontend concern (§4.2).
 	// ------------------------------------------------------------------
 	viewSt := newRedisViewStore(rc)
-	_ = seedSystemViews(context.Background(), viewSt)
 	api.HandleFunc("/views", newListViewsHandlerFunc(viewSt)).Methods("GET")
 	api.HandleFunc("/views", newCreateViewHandlerFunc(viewSt, jobsStore)).Methods("POST")
 	api.HandleFunc("/views/{view_id}", newUpdateViewHandlerFunc(viewSt, jobsStore)).Methods("PUT")
@@ -730,7 +746,7 @@ func muxRouter(opts Options, rc redis.UniversalClient, inspector *asynq.Inspecto
 	// ------------------------------------------------------------------
 	enqueueEnabled := opts.EnableEnqueue && !opts.ReadOnly
 	api.HandleFunc("/features",
-		newFeaturesHandlerFunc(enqueueEnabled, normalizeCorrelationKeys(opts.CorrelationKeys), opts.DetailPayloadLimit)).Methods("GET")
+		newFeaturesHandlerFunc(enqueueEnabled, normalizeCorrelationKeys(opts.CorrelationKeys), opts.DetailPayloadLimit, opts.Version)).Methods("GET")
 	if enqueueEnabled {
 		ec := opts.enqueueClient
 		if ec == nil {

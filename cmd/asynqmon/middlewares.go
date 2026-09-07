@@ -9,6 +9,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/zkrebbekx/asynqmon"
 )
 
 // A responseRecorderWriter records response status and size.
@@ -54,12 +56,84 @@ func (w *responseRecorderWriter) Flush() {
 	}
 }
 
+// securityHeaders sets the dashboard's security response headers
+// (X-Content-Type-Options, X-Frame-Options, Referrer-Policy,
+// Content-Security-Policy) on every response of the binary, including
+// /metrics and the CSRF rejection bodies. The asynqmon handler sets the
+// same set on its own SPA responses (and the index page replaces the CSP
+// with a nonce-bearing one), so a header set here is overwritten only by
+// the handler's own values.
+func securityHeaders(h http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		asynqmon.SetSecurityHeaders(w.Header())
+		h.ServeHTTP(w, r)
+	})
+}
+
+// parseTrustedProxyCIDRs parses the --trusted-proxies entries. An entry is
+// a CIDR ("10.0.0.0/8") or a bare IP ("10.0.0.1", read as /32 or /128).
+// Entries are trimmed and empty entries are skipped. A malformed entry is
+// an error.
+func parseTrustedProxyCIDRs(entries []string) ([]*net.IPNet, error) {
+	var nets []*net.IPNet
+	for _, e := range entries {
+		e = strings.TrimSpace(e)
+		if e == "" {
+			continue
+		}
+		if !strings.Contains(e, "/") {
+			ip := net.ParseIP(e)
+			if ip == nil {
+				return nil, fmt.Errorf("--trusted-proxies: invalid entry %q", e)
+			}
+			bits := 32
+			if ip.To4() == nil {
+				bits = 128
+			}
+			nets = append(nets, &net.IPNet{IP: ip, Mask: net.CIDRMask(bits, bits)})
+			continue
+		}
+		_, ipnet, err := net.ParseCIDR(e)
+		if err != nil {
+			return nil, fmt.Errorf("--trusted-proxies: invalid entry %q: %w", e, err)
+		}
+		nets = append(nets, ipnet)
+	}
+	return nets, nil
+}
+
+// peerIsTrustedProxy reports whether the request's RemoteAddr is inside one
+// of the trusted proxy networks. An empty list trusts no peer.
+func peerIsTrustedProxy(r *http.Request, trusted []*net.IPNet) bool {
+	if len(trusted) == 0 {
+		return false
+	}
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		host = r.RemoteAddr
+	}
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return false
+	}
+	for _, n := range trusted {
+		if n.Contains(ip) {
+			return true
+		}
+	}
+	return false
+}
+
 // csrfProtection rejects cross-origin mutating requests. Browsers attach an
 // Origin header to every cross-origin request — including simple form POSTs
 // that never trigger a CORS preflight — so checking it here blocks CSRF
 // against the unauthenticated dashboard. Requests without an Origin header
 // (curl, scripts, same-origin GET navigations) are unaffected.
-func csrfProtection(allowedOrigins []string) func(http.Handler) http.Handler {
+//
+// The Origin host is compared with the request Host. When the peer is one of
+// trustedProxies, the X-Forwarded-Host header is accepted as well, so a
+// reverse proxy that rewrites Host does not turn every mutation into a 403.
+func csrfProtection(allowedOrigins []string, trustedProxies []*net.IPNet) func(http.Handler) http.Handler {
 	allowed := make(map[string]bool, len(allowedOrigins))
 	for _, o := range allowedOrigins {
 		allowed[strings.ToLower(strings.TrimSuffix(strings.TrimSpace(o), "/"))] = true
@@ -70,7 +144,7 @@ func csrfProtection(allowedOrigins []string) func(http.Handler) http.Handler {
 			case http.MethodGet, http.MethodHead, http.MethodOptions:
 			default:
 				origin := r.Header.Get("Origin")
-				if origin != "" && !allowed[strings.ToLower(origin)] && !sameOrigin(origin, r) {
+				if origin != "" && !allowed[strings.ToLower(origin)] && !sameOrigin(origin, r, trustedProxies) {
 					http.Error(w, "cross-origin request rejected", http.StatusForbidden)
 					return
 				}
@@ -81,13 +155,24 @@ func csrfProtection(allowedOrigins []string) func(http.Handler) http.Handler {
 }
 
 // sameOrigin reports whether the given Origin header value points at the host
-// this request was addressed to.
-func sameOrigin(origin string, r *http.Request) bool {
+// this request was addressed to: the Host header, or X-Forwarded-Host when
+// the peer is a trusted proxy.
+func sameOrigin(origin string, r *http.Request, trustedProxies []*net.IPNet) bool {
 	u, err := url.Parse(origin)
 	if err != nil {
 		return false
 	}
-	return strings.EqualFold(u.Host, r.Host)
+	if strings.EqualFold(u.Host, r.Host) {
+		return true
+	}
+	if !peerIsTrustedProxy(r, trustedProxies) {
+		return false
+	}
+	// A proxy chain may append several hosts; the first one is the host
+	// the browser addressed.
+	fwd, _, _ := strings.Cut(r.Header.Get("X-Forwarded-Host"), ",")
+	fwd = strings.TrimSpace(fwd)
+	return fwd != "" && strings.EqualFold(u.Host, fwd)
 }
 
 func loggingMiddleware(h http.Handler) http.Handler {

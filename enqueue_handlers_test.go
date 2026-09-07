@@ -257,7 +257,7 @@ func TestFeaturesCorrelationKeys(t *testing.T) {
 	probe := func(keys []string) featuresResponse {
 		w := httptest.NewRecorder()
 		r := httptest.NewRequest("GET", "/api/features", nil)
-		newFeaturesHandlerFunc(false, normalizeCorrelationKeys(keys), 0)(w, r)
+		newFeaturesHandlerFunc(false, normalizeCorrelationKeys(keys), 0, "")(w, r)
 		var f featuresResponse
 		if err := json.Unmarshal(w.Body.Bytes(), &f); err != nil {
 			t.Fatalf("decoding features response: %v", err)
