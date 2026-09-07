@@ -1,6 +1,29 @@
 import axios from "axios";
 import queryString from "query-string";
 
+// http is the one axios instance every api module uses. The 15 s timeout
+// bounds a request against a hung Redis or pod: without it each poll tick
+// adds one more pending XHR until the browser's per-host connection pool is
+// full and the EventSource can no longer reconnect.
+export const http = axios.create({ timeout: 15_000 });
+
+// seg escapes one URL path segment. Queue, group and task names are
+// producer-controlled; unescaped, "a#b" is cut at "#" by the URL parser and
+// "a?x" starts a query string, so a request lands on a different queue.
+export const seg = encodeURIComponent;
+
+// isAddressableName reports whether a queue or group name fits one path
+// segment of the API. The server matches "/queues/{qname}" on the decoded
+// path, so a name that contains "/" never matches a route, not even when
+// escaped as "%2F". Callers show a notice and disable the mutating actions
+// for such a name.
+export function isAddressableName(name: string): boolean {
+  return !name.includes("/");
+}
+
+export const UNADDRESSABLE_NAME_NOTICE =
+  "This queue name contains '/' and cannot be addressed by the API; actions are disabled.";
+
 // In production build, API server is on listening on the same port as
 // the static file server.
 // In developement, we assume that the API server is listening on port 8080.
@@ -416,7 +439,7 @@ export interface PaginationOptions extends Record<string, number | undefined> {
 }
 
 export async function listQueues(): Promise<ListQueuesResponse> {
-  const resp = await axios({
+  const resp = await http({
     method: "get",
     url: `${getBaseUrl()}/queues`,
   });
@@ -441,38 +464,38 @@ export interface GetQueueResponse {
 }
 
 export async function getQueue(qname: string): Promise<GetQueueResponse> {
-  const resp = await axios({
+  const resp = await http({
     method: "get",
-    url: `${getBaseUrl()}/queues/${qname}`,
+    url: `${getBaseUrl()}/queues/${seg(qname)}`,
   });
   return resp.data;
 }
 
 export async function deleteQueue(qname: string): Promise<void> {
-  await axios({
+  await http({
     method: "delete",
-    url: `${getBaseUrl()}/queues/${qname}`,
+    url: `${getBaseUrl()}/queues/${seg(qname)}`,
   });
 }
 
 export async function pauseQueue(qname: string): Promise<void> {
-  await axios({
+  await http({
     method: "post",
-    url: `${getBaseUrl()}/queues/${qname}:pause`,
+    url: `${getBaseUrl()}/queues/${seg(qname)}:pause`,
   });
 }
 
 export async function resumeQueue(qname: string): Promise<void> {
-  await axios({
+  await http({
     method: "post",
-    url: `${getBaseUrl()}/queues/${qname}:resume`,
+    url: `${getBaseUrl()}/queues/${seg(qname)}:resume`,
   });
 }
 
 export async function listGroups(qname: string): Promise<ListGroupsResponse> {
-  const resp = await axios({
+  const resp = await http({
     method: "get",
-    url: `${getBaseUrl()}/queues/${qname}/groups`,
+    url: `${getBaseUrl()}/queues/${seg(qname)}/groups`,
   });
   return resp.data;
 }
@@ -498,7 +521,7 @@ export async function searchTasks(params: {
   if (params.maxScan) usp.set("max_scan", String(params.maxScan));
   if (params.cursor) usp.set("cursor", params.cursor);
   if (params.scanCursor) usp.set("scan_cursor", params.scanCursor);
-  const resp = await axios({
+  const resp = await http({
     method: "get",
     url: `${getBaseUrl()}/tasks?${usp.toString()}`,
   });
@@ -511,7 +534,7 @@ export async function taskStateCounts(queue?: string): Promise<StateCountsRespon
   const usp = new URLSearchParams();
   if (queue && queue !== "all") usp.set("queue", queue);
   const qs = usp.toString();
-  const resp = await axios({
+  const resp = await http({
     method: "get",
     url: `${getBaseUrl()}/tasks/state_counts${qs ? `?${qs}` : ""}`,
   });
@@ -533,7 +556,7 @@ export async function taskMetadata(params: {
   (params.meta ?? []).forEach((m) => usp.append("meta", m));
   if (params.maxScan) usp.set("max_scan", String(params.maxScan));
   if (params.limit) usp.set("limit", String(params.limit));
-  const resp = await axios({
+  const resp = await http({
     method: "get",
     url: `${getBaseUrl()}/task_metadata?${usp.toString()}`,
   });
@@ -557,7 +580,7 @@ export async function taskAggregate(params: {
   usp.set("by", params.by);
   if (params.maxScan) usp.set("max_scan", String(params.maxScan));
   if (params.limit) usp.set("limit", String(params.limit));
-  const resp = await axios({
+  const resp = await http({
     method: "get",
     url: `${getBaseUrl()}/task_aggregate?${usp.toString()}`,
   });
@@ -572,7 +595,7 @@ export async function bulkFilteredTasks(body: {
   action: "delete" | "run" | "archive" | "cancel";
   maxScan?: number;
 }): Promise<BulkFilteredResponse> {
-  const resp = await axios({
+  const resp = await http({
     method: "post",
     url: `${getBaseUrl()}/tasks:batch_filtered`,
     data: {
@@ -591,8 +614,8 @@ export async function getTaskInfo(
   qname: string,
   id: string
 ): Promise<TaskInfo> {
-  const url = `${getBaseUrl()}/queues/${qname}/tasks/${id}`;
-  const resp = await axios({
+  const url = `${getBaseUrl()}/queues/${seg(qname)}/tasks/${seg(id)}`;
+  const resp = await http({
     method: "get",
     url,
   });
@@ -634,9 +657,9 @@ export async function getObservedTask(
   id: string
 ): Promise<ObservedTaskResponse | null> {
   try {
-    const resp = await axios({
+    const resp = await http({
       method: "get",
-      url: `${getBaseUrl()}/queues/${qname}/tasks/${id}/observed`,
+      url: `${getBaseUrl()}/queues/${seg(qname)}/tasks/${seg(id)}/observed`,
     });
     return resp.data;
   } catch (error) {
@@ -671,9 +694,9 @@ export async function enqueueTask(
   qname: string,
   body: EnqueueTaskRequest
 ): Promise<TaskInfo> {
-  const resp = await axios({
+  const resp = await http({
     method: "post",
-    url: `${getBaseUrl()}/queues/${qname}/tasks`,
+    url: `${getBaseUrl()}/queues/${seg(qname)}/tasks`,
     data: body,
   });
   return resp.data;
@@ -698,7 +721,7 @@ export interface FeaturesResponse {
 }
 
 export async function getFeatures(): Promise<FeaturesResponse> {
-  const resp = await axios({
+  const resp = await http({
     method: "get",
     url: `${getBaseUrl()}/features`,
   });
@@ -709,11 +732,11 @@ export async function listActiveTasks(
   qname: string,
   pageOpts?: PaginationOptions
 ): Promise<ListTasksResponse> {
-  let url = `${getBaseUrl()}/queues/${qname}/active_tasks`;
+  let url = `${getBaseUrl()}/queues/${seg(qname)}/active_tasks`;
   if (pageOpts) {
     url += `?${queryString.stringify(pageOpts)}`;
   }
-  const resp = await axios({
+  const resp = await http({
     method: "get",
     url,
   });
@@ -724,16 +747,16 @@ export async function cancelActiveTask(
   qname: string,
   taskId: string
 ): Promise<void> {
-  await axios({
+  await http({
     method: "post",
-    url: `${getBaseUrl()}/queues/${qname}/active_tasks/${taskId}:cancel`,
+    url: `${getBaseUrl()}/queues/${seg(qname)}/active_tasks/${seg(taskId)}:cancel`,
   });
 }
 
 export async function cancelAllActiveTasks(qname: string): Promise<void> {
-  await axios({
+  await http({
     method: "post",
-    url: `${getBaseUrl()}/queues/${qname}/active_tasks:cancel_all`,
+    url: `${getBaseUrl()}/queues/${seg(qname)}/active_tasks:cancel_all`,
   });
 }
 
@@ -741,9 +764,9 @@ export async function batchCancelActiveTasks(
   qname: string,
   taskIds: string[]
 ): Promise<BatchCancelTasksResponse> {
-  const resp = await axios({
+  const resp = await http({
     method: "post",
-    url: `${getBaseUrl()}/queues/${qname}/active_tasks:batch_cancel`,
+    url: `${getBaseUrl()}/queues/${seg(qname)}/active_tasks:batch_cancel`,
     data: {
       task_ids: taskIds,
     },
@@ -755,11 +778,11 @@ export async function listPendingTasks(
   qname: string,
   pageOpts?: PaginationOptions
 ): Promise<ListTasksResponse> {
-  let url = `${getBaseUrl()}/queues/${qname}/pending_tasks`;
+  let url = `${getBaseUrl()}/queues/${seg(qname)}/pending_tasks`;
   if (pageOpts) {
     url += `?${queryString.stringify(pageOpts)}`;
   }
-  const resp = await axios({
+  const resp = await http({
     method: "get",
     url,
   });
@@ -770,11 +793,11 @@ export async function listScheduledTasks(
   qname: string,
   pageOpts?: PaginationOptions
 ): Promise<ListTasksResponse> {
-  let url = `${getBaseUrl()}/queues/${qname}/scheduled_tasks`;
+  let url = `${getBaseUrl()}/queues/${seg(qname)}/scheduled_tasks`;
   if (pageOpts) {
     url += `?${queryString.stringify(pageOpts)}`;
   }
-  const resp = await axios({
+  const resp = await http({
     method: "get",
     url,
   });
@@ -785,11 +808,11 @@ export async function listRetryTasks(
   qname: string,
   pageOpts?: PaginationOptions
 ): Promise<ListTasksResponse> {
-  let url = `${getBaseUrl()}/queues/${qname}/retry_tasks`;
+  let url = `${getBaseUrl()}/queues/${seg(qname)}/retry_tasks`;
   if (pageOpts) {
     url += `?${queryString.stringify(pageOpts)}`;
   }
-  const resp = await axios({
+  const resp = await http({
     method: "get",
     url,
   });
@@ -800,11 +823,11 @@ export async function listArchivedTasks(
   qname: string,
   pageOpts?: PaginationOptions
 ): Promise<ListTasksResponse> {
-  let url = `${getBaseUrl()}/queues/${qname}/archived_tasks`;
+  let url = `${getBaseUrl()}/queues/${seg(qname)}/archived_tasks`;
   if (pageOpts) {
     url += `?${queryString.stringify(pageOpts)}`;
   }
-  const resp = await axios({
+  const resp = await http({
     method: "get",
     url,
   });
@@ -815,11 +838,11 @@ export async function listCompletedTasks(
   qname: string,
   pageOpts?: PaginationOptions
 ): Promise<ListTasksResponse> {
-  let url = `${getBaseUrl()}/queues/${qname}/completed_tasks`;
+  let url = `${getBaseUrl()}/queues/${seg(qname)}/completed_tasks`;
   if (pageOpts) {
     url += `?${queryString.stringify(pageOpts)}`;
   }
-  const resp = await axios({
+  const resp = await http({
     method: "get",
     url,
   });
@@ -831,11 +854,11 @@ export async function listAggregatingTasks(
   gname: string,
   pageOpts?: PaginationOptions
 ): Promise<ListAggregatingTasksResponse> {
-  let url = `${getBaseUrl()}/queues/${qname}/groups/${gname}/aggregating_tasks`;
+  let url = `${getBaseUrl()}/queues/${seg(qname)}/groups/${seg(gname)}/aggregating_tasks`;
   if (pageOpts) {
     url += `?${queryString.stringify(pageOpts)}`;
   }
-  const resp = await axios({
+  const resp = await http({
     method: "get",
     url,
   });
@@ -846,9 +869,9 @@ export async function archivePendingTask(
   qname: string,
   taskId: string
 ): Promise<void> {
-  await axios({
+  await http({
     method: "post",
-    url: `${getBaseUrl()}/queues/${qname}/pending_tasks/${taskId}:archive`,
+    url: `${getBaseUrl()}/queues/${seg(qname)}/pending_tasks/${seg(taskId)}:archive`,
   });
 }
 
@@ -856,9 +879,9 @@ export async function batchArchivePendingTasks(
   qname: string,
   taskIds: string[]
 ): Promise<BatchArchiveTasksResponse> {
-  const resp = await axios({
+  const resp = await http({
     method: "post",
-    url: `${getBaseUrl()}/queues/${qname}/pending_tasks:batch_archive`,
+    url: `${getBaseUrl()}/queues/${seg(qname)}/pending_tasks:batch_archive`,
     data: {
       task_ids: taskIds,
     },
@@ -867,9 +890,9 @@ export async function batchArchivePendingTasks(
 }
 
 export async function archiveAllPendingTasks(qname: string): Promise<void> {
-  await axios({
+  await http({
     method: "post",
-    url: `${getBaseUrl()}/queues/${qname}/pending_tasks:archive_all`,
+    url: `${getBaseUrl()}/queues/${seg(qname)}/pending_tasks:archive_all`,
   });
 }
 
@@ -877,9 +900,9 @@ export async function deletePendingTask(
   qname: string,
   taskId: string
 ): Promise<void> {
-  await axios({
+  await http({
     method: "delete",
-    url: `${getBaseUrl()}/queues/${qname}/pending_tasks/${taskId}`,
+    url: `${getBaseUrl()}/queues/${seg(qname)}/pending_tasks/${seg(taskId)}`,
   });
 }
 
@@ -887,9 +910,9 @@ export async function batchDeletePendingTasks(
   qname: string,
   taskIds: string[]
 ): Promise<BatchDeleteTasksResponse> {
-  const resp = await axios({
+  const resp = await http({
     method: "post",
-    url: `${getBaseUrl()}/queues/${qname}/pending_tasks:batch_delete`,
+    url: `${getBaseUrl()}/queues/${seg(qname)}/pending_tasks:batch_delete`,
     data: {
       task_ids: taskIds,
     },
@@ -900,9 +923,9 @@ export async function batchDeletePendingTasks(
 export async function deleteAllPendingTasks(
   qname: string
 ): Promise<DeleteAllTasksResponse> {
-  const resp = await axios({
+  const resp = await http({
     method: "delete",
-    url: `${getBaseUrl()}/queues/${qname}/pending_tasks:delete_all`,
+    url: `${getBaseUrl()}/queues/${seg(qname)}/pending_tasks:delete_all`,
   });
   return resp.data;
 }
@@ -912,9 +935,9 @@ export async function deleteAggregatingTask(
   gname: string,
   taskId: string
 ): Promise<void> {
-  await axios({
+  await http({
     method: "delete",
-    url: `${getBaseUrl()}/queues/${qname}/groups/${gname}/aggregating_tasks/${taskId}`,
+    url: `${getBaseUrl()}/queues/${seg(qname)}/groups/${seg(gname)}/aggregating_tasks/${seg(taskId)}`,
   });
 }
 
@@ -923,9 +946,9 @@ export async function batchDeleteAggregatingTasks(
   gname: string,
   taskIds: string[]
 ): Promise<BatchDeleteTasksResponse> {
-  const resp = await axios({
+  const resp = await http({
     method: "post",
-    url: `${getBaseUrl()}/queues/${qname}/groups/${gname}/aggregating_tasks:batch_delete`,
+    url: `${getBaseUrl()}/queues/${seg(qname)}/groups/${seg(gname)}/aggregating_tasks:batch_delete`,
     data: {
       task_ids: taskIds,
     },
@@ -937,9 +960,9 @@ export async function deleteAllAggregatingTasks(
   qname: string,
   gname: string
 ): Promise<DeleteAllTasksResponse> {
-  const resp = await axios({
+  const resp = await http({
     method: "delete",
-    url: `${getBaseUrl()}/queues/${qname}/groups/${gname}/aggregating_tasks:delete_all`,
+    url: `${getBaseUrl()}/queues/${seg(qname)}/groups/${seg(gname)}/aggregating_tasks:delete_all`,
   });
   return resp.data;
 }
@@ -949,9 +972,9 @@ export async function runAggregatingTask(
   gname: string,
   taskId: string
 ): Promise<void> {
-  await axios({
+  await http({
     method: "post",
-    url: `${getBaseUrl()}/queues/${qname}/groups/${gname}/aggregating_tasks/${taskId}:run`,
+    url: `${getBaseUrl()}/queues/${seg(qname)}/groups/${seg(gname)}/aggregating_tasks/${seg(taskId)}:run`,
   });
 }
 
@@ -960,9 +983,9 @@ export async function batchRunAggregatingTasks(
   gname: string,
   taskIds: string[]
 ): Promise<BatchRunTasksResponse> {
-  const resp = await axios({
+  const resp = await http({
     method: "post",
-    url: `${getBaseUrl()}/queues/${qname}/groups/${gname}/aggregating_tasks:batch_run`,
+    url: `${getBaseUrl()}/queues/${seg(qname)}/groups/${seg(gname)}/aggregating_tasks:batch_run`,
     data: {
       task_ids: taskIds,
     },
@@ -974,9 +997,9 @@ export async function runAllAggregatingTasks(
   qname: string,
   gname: string
 ): Promise<RunAllTasksResponse> {
-  const resp = await axios({
+  const resp = await http({
     method: "post",
-    url: `${getBaseUrl()}/queues/${qname}/groups/${gname}/aggregating_tasks:run_all`,
+    url: `${getBaseUrl()}/queues/${seg(qname)}/groups/${seg(gname)}/aggregating_tasks:run_all`,
   });
   return resp.data;
 }
@@ -986,9 +1009,9 @@ export async function archiveAggregatingTask(
   gname: string,
   taskId: string
 ): Promise<void> {
-  await axios({
+  await http({
     method: "post",
-    url: `${getBaseUrl()}/queues/${qname}/groups/${gname}/aggregating_tasks/${taskId}:archive`,
+    url: `${getBaseUrl()}/queues/${seg(qname)}/groups/${seg(gname)}/aggregating_tasks/${seg(taskId)}:archive`,
   });
 }
 
@@ -997,9 +1020,9 @@ export async function batchArchiveAggregatingTasks(
   gname: string,
   taskIds: string[]
 ): Promise<BatchArchiveTasksResponse> {
-  const resp = await axios({
+  const resp = await http({
     method: "post",
-    url: `${getBaseUrl()}/queues/${qname}/groups/${gname}/aggregating_tasks:batch_archive`,
+    url: `${getBaseUrl()}/queues/${seg(qname)}/groups/${seg(gname)}/aggregating_tasks:batch_archive`,
     data: {
       task_ids: taskIds,
     },
@@ -1011,9 +1034,9 @@ export async function archiveAllAggregatingTasks(
   qname: string,
   gname: string
 ): Promise<ArchiveAllTasksResponse> {
-  const resp = await axios({
+  const resp = await http({
     method: "post",
-    url: `${getBaseUrl()}/queues/${qname}/groups/${gname}/aggregating_tasks:archive_all`,
+    url: `${getBaseUrl()}/queues/${seg(qname)}/groups/${seg(gname)}/aggregating_tasks:archive_all`,
   });
   return resp.data;
 }
@@ -1022,9 +1045,9 @@ export async function runScheduledTask(
   qname: string,
   taskId: string
 ): Promise<void> {
-  await axios({
+  await http({
     method: "post",
-    url: `${getBaseUrl()}/queues/${qname}/scheduled_tasks/${taskId}:run`,
+    url: `${getBaseUrl()}/queues/${seg(qname)}/scheduled_tasks/${seg(taskId)}:run`,
   });
 }
 
@@ -1032,9 +1055,9 @@ export async function archiveScheduledTask(
   qname: string,
   taskId: string
 ): Promise<void> {
-  await axios({
+  await http({
     method: "post",
-    url: `${getBaseUrl()}/queues/${qname}/scheduled_tasks/${taskId}:archive`,
+    url: `${getBaseUrl()}/queues/${seg(qname)}/scheduled_tasks/${seg(taskId)}:archive`,
   });
 }
 
@@ -1042,9 +1065,9 @@ export async function deleteScheduledTask(
   qname: string,
   taskId: string
 ): Promise<void> {
-  await axios({
+  await http({
     method: "delete",
-    url: `${getBaseUrl()}/queues/${qname}/scheduled_tasks/${taskId}`,
+    url: `${getBaseUrl()}/queues/${seg(qname)}/scheduled_tasks/${seg(taskId)}`,
   });
 }
 
@@ -1052,9 +1075,9 @@ export async function batchDeleteScheduledTasks(
   qname: string,
   taskIds: string[]
 ): Promise<BatchDeleteTasksResponse> {
-  const resp = await axios({
+  const resp = await http({
     method: "post",
-    url: `${getBaseUrl()}/queues/${qname}/scheduled_tasks:batch_delete`,
+    url: `${getBaseUrl()}/queues/${seg(qname)}/scheduled_tasks:batch_delete`,
     data: {
       task_ids: taskIds,
     },
@@ -1065,9 +1088,9 @@ export async function batchDeleteScheduledTasks(
 export async function deleteAllScheduledTasks(
   qname: string
 ): Promise<DeleteAllTasksResponse> {
-  const resp = await axios({
+  const resp = await http({
     method: "delete",
-    url: `${getBaseUrl()}/queues/${qname}/scheduled_tasks:delete_all`,
+    url: `${getBaseUrl()}/queues/${seg(qname)}/scheduled_tasks:delete_all`,
   });
   return resp.data;
 }
@@ -1076,9 +1099,9 @@ export async function batchRunScheduledTasks(
   qname: string,
   taskIds: string[]
 ): Promise<BatchRunTasksResponse> {
-  const resp = await axios({
+  const resp = await http({
     method: "post",
-    url: `${getBaseUrl()}/queues/${qname}/scheduled_tasks:batch_run`,
+    url: `${getBaseUrl()}/queues/${seg(qname)}/scheduled_tasks:batch_run`,
     data: {
       task_ids: taskIds,
     },
@@ -1087,9 +1110,9 @@ export async function batchRunScheduledTasks(
 }
 
 export async function runAllScheduledTasks(qname: string): Promise<void> {
-  await axios({
+  await http({
     method: "post",
-    url: `${getBaseUrl()}/queues/${qname}/scheduled_tasks:run_all`,
+    url: `${getBaseUrl()}/queues/${seg(qname)}/scheduled_tasks:run_all`,
   });
 }
 
@@ -1097,9 +1120,9 @@ export async function batchArchiveScheduledTasks(
   qname: string,
   taskIds: string[]
 ): Promise<BatchArchiveTasksResponse> {
-  const resp = await axios({
+  const resp = await http({
     method: "post",
-    url: `${getBaseUrl()}/queues/${qname}/scheduled_tasks:batch_archive`,
+    url: `${getBaseUrl()}/queues/${seg(qname)}/scheduled_tasks:batch_archive`,
     data: {
       task_ids: taskIds,
     },
@@ -1108,9 +1131,9 @@ export async function batchArchiveScheduledTasks(
 }
 
 export async function archiveAllScheduledTasks(qname: string): Promise<void> {
-  await axios({
+  await http({
     method: "post",
-    url: `${getBaseUrl()}/queues/${qname}/scheduled_tasks:archive_all`,
+    url: `${getBaseUrl()}/queues/${seg(qname)}/scheduled_tasks:archive_all`,
   });
 }
 
@@ -1118,9 +1141,9 @@ export async function runRetryTask(
   qname: string,
   taskId: string
 ): Promise<void> {
-  await axios({
+  await http({
     method: "post",
-    url: `${getBaseUrl()}/queues/${qname}/retry_tasks/${taskId}:run`,
+    url: `${getBaseUrl()}/queues/${seg(qname)}/retry_tasks/${seg(taskId)}:run`,
   });
 }
 
@@ -1128,9 +1151,9 @@ export async function archiveRetryTask(
   qname: string,
   taskId: string
 ): Promise<void> {
-  await axios({
+  await http({
     method: "post",
-    url: `${getBaseUrl()}/queues/${qname}/retry_tasks/${taskId}:archive`,
+    url: `${getBaseUrl()}/queues/${seg(qname)}/retry_tasks/${seg(taskId)}:archive`,
   });
 }
 
@@ -1138,9 +1161,9 @@ export async function deleteRetryTask(
   qname: string,
   taskId: string
 ): Promise<void> {
-  await axios({
+  await http({
     method: "delete",
-    url: `${getBaseUrl()}/queues/${qname}/retry_tasks/${taskId}`,
+    url: `${getBaseUrl()}/queues/${seg(qname)}/retry_tasks/${seg(taskId)}`,
   });
 }
 
@@ -1148,9 +1171,9 @@ export async function batchDeleteRetryTasks(
   qname: string,
   taskIds: string[]
 ): Promise<BatchDeleteTasksResponse> {
-  const resp = await axios({
+  const resp = await http({
     method: "post",
-    url: `${getBaseUrl()}/queues/${qname}/retry_tasks:batch_delete`,
+    url: `${getBaseUrl()}/queues/${seg(qname)}/retry_tasks:batch_delete`,
     data: {
       task_ids: taskIds,
     },
@@ -1161,9 +1184,9 @@ export async function batchDeleteRetryTasks(
 export async function deleteAllRetryTasks(
   qname: string
 ): Promise<DeleteAllTasksResponse> {
-  const resp = await axios({
+  const resp = await http({
     method: "delete",
-    url: `${getBaseUrl()}/queues/${qname}/retry_tasks:delete_all`,
+    url: `${getBaseUrl()}/queues/${seg(qname)}/retry_tasks:delete_all`,
   });
   return resp.data;
 }
@@ -1172,9 +1195,9 @@ export async function batchRunRetryTasks(
   qname: string,
   taskIds: string[]
 ): Promise<BatchRunTasksResponse> {
-  const resp = await axios({
+  const resp = await http({
     method: "post",
-    url: `${getBaseUrl()}/queues/${qname}/retry_tasks:batch_run`,
+    url: `${getBaseUrl()}/queues/${seg(qname)}/retry_tasks:batch_run`,
     data: {
       task_ids: taskIds,
     },
@@ -1183,9 +1206,9 @@ export async function batchRunRetryTasks(
 }
 
 export async function runAllRetryTasks(qname: string): Promise<void> {
-  await axios({
+  await http({
     method: "post",
-    url: `${getBaseUrl()}/queues/${qname}/retry_tasks:run_all`,
+    url: `${getBaseUrl()}/queues/${seg(qname)}/retry_tasks:run_all`,
   });
 }
 
@@ -1193,9 +1216,9 @@ export async function batchArchiveRetryTasks(
   qname: string,
   taskIds: string[]
 ): Promise<BatchArchiveTasksResponse> {
-  const resp = await axios({
+  const resp = await http({
     method: "post",
-    url: `${getBaseUrl()}/queues/${qname}/retry_tasks:batch_archive`,
+    url: `${getBaseUrl()}/queues/${seg(qname)}/retry_tasks:batch_archive`,
     data: {
       task_ids: taskIds,
     },
@@ -1204,9 +1227,9 @@ export async function batchArchiveRetryTasks(
 }
 
 export async function archiveAllRetryTasks(qname: string): Promise<void> {
-  await axios({
+  await http({
     method: "post",
-    url: `${getBaseUrl()}/queues/${qname}/retry_tasks:archive_all`,
+    url: `${getBaseUrl()}/queues/${seg(qname)}/retry_tasks:archive_all`,
   });
 }
 
@@ -1214,9 +1237,9 @@ export async function runArchivedTask(
   qname: string,
   taskId: string
 ): Promise<void> {
-  await axios({
+  await http({
     method: "post",
-    url: `${getBaseUrl()}/queues/${qname}/archived_tasks/${taskId}:run`,
+    url: `${getBaseUrl()}/queues/${seg(qname)}/archived_tasks/${seg(taskId)}:run`,
   });
 }
 
@@ -1224,9 +1247,9 @@ export async function deleteArchivedTask(
   qname: string,
   taskId: string
 ): Promise<void> {
-  await axios({
+  await http({
     method: "delete",
-    url: `${getBaseUrl()}/queues/${qname}/archived_tasks/${taskId}`,
+    url: `${getBaseUrl()}/queues/${seg(qname)}/archived_tasks/${seg(taskId)}`,
   });
 }
 
@@ -1234,9 +1257,9 @@ export async function batchDeleteArchivedTasks(
   qname: string,
   taskIds: string[]
 ): Promise<BatchDeleteTasksResponse> {
-  const resp = await axios({
+  const resp = await http({
     method: "post",
-    url: `${getBaseUrl()}/queues/${qname}/archived_tasks:batch_delete`,
+    url: `${getBaseUrl()}/queues/${seg(qname)}/archived_tasks:batch_delete`,
     data: {
       task_ids: taskIds,
     },
@@ -1247,9 +1270,9 @@ export async function batchDeleteArchivedTasks(
 export async function deleteAllArchivedTasks(
   qname: string
 ): Promise<DeleteAllTasksResponse> {
-  const resp = await axios({
+  const resp = await http({
     method: "delete",
-    url: `${getBaseUrl()}/queues/${qname}/archived_tasks:delete_all`,
+    url: `${getBaseUrl()}/queues/${seg(qname)}/archived_tasks:delete_all`,
   });
   return resp.data;
 }
@@ -1258,9 +1281,9 @@ export async function batchRunArchivedTasks(
   qname: string,
   taskIds: string[]
 ): Promise<BatchRunTasksResponse> {
-  const resp = await axios({
+  const resp = await http({
     method: "post",
-    url: `${getBaseUrl()}/queues/${qname}/archived_tasks:batch_run`,
+    url: `${getBaseUrl()}/queues/${seg(qname)}/archived_tasks:batch_run`,
     data: {
       task_ids: taskIds,
     },
@@ -1269,9 +1292,9 @@ export async function batchRunArchivedTasks(
 }
 
 export async function runAllArchivedTasks(qname: string): Promise<void> {
-  await axios({
+  await http({
     method: "post",
-    url: `${getBaseUrl()}/queues/${qname}/archived_tasks:run_all`,
+    url: `${getBaseUrl()}/queues/${seg(qname)}/archived_tasks:run_all`,
   });
 }
 
@@ -1279,9 +1302,9 @@ export async function deleteCompletedTask(
   qname: string,
   taskId: string
 ): Promise<void> {
-  await axios({
+  await http({
     method: "delete",
-    url: `${getBaseUrl()}/queues/${qname}/completed_tasks/${taskId}`,
+    url: `${getBaseUrl()}/queues/${seg(qname)}/completed_tasks/${seg(taskId)}`,
   });
 }
 
@@ -1289,9 +1312,9 @@ export async function batchDeleteCompletedTasks(
   qname: string,
   taskIds: string[]
 ): Promise<BatchDeleteTasksResponse> {
-  const resp = await axios({
+  const resp = await http({
     method: "post",
-    url: `${getBaseUrl()}/queues/${qname}/completed_tasks:batch_delete`,
+    url: `${getBaseUrl()}/queues/${seg(qname)}/completed_tasks:batch_delete`,
     data: {
       task_ids: taskIds,
     },
@@ -1302,15 +1325,15 @@ export async function batchDeleteCompletedTasks(
 export async function deleteAllCompletedTasks(
   qname: string
 ): Promise<DeleteAllTasksResponse> {
-  const resp = await axios({
+  const resp = await http({
     method: "delete",
-    url: `${getBaseUrl()}/queues/${qname}/completed_tasks:delete_all`,
+    url: `${getBaseUrl()}/queues/${seg(qname)}/completed_tasks:delete_all`,
   });
   return resp.data;
 }
 
 export async function listServers(): Promise<ListServersResponse> {
-  const resp = await axios({
+  const resp = await http({
     method: "get",
     url: `${getBaseUrl()}/servers`,
   });
@@ -1318,7 +1341,7 @@ export async function listServers(): Promise<ListServersResponse> {
 }
 
 export async function listSchedulerEntries(): Promise<ListSchedulerEntriesResponse> {
-  const resp = await axios({
+  const resp = await http({
     method: "get",
     url: `${getBaseUrl()}/scheduler_entries`,
   });
@@ -1328,15 +1351,15 @@ export async function listSchedulerEntries(): Promise<ListSchedulerEntriesRespon
 export async function listSchedulerEnqueueEvents(
   entryId: string
 ): Promise<ListSchedulerEnqueueEventsResponse> {
-  const resp = await axios({
+  const resp = await http({
     method: "get",
-    url: `${getBaseUrl()}/scheduler_entries/${entryId}/enqueue_events`,
+    url: `${getBaseUrl()}/scheduler_entries/${seg(entryId)}/enqueue_events`,
   });
   return resp.data;
 }
 
 export async function getRedisInfo(): Promise<RedisInfoResponse> {
-  const resp = await axios({
+  const resp = await http({
     method: "get",
     url: `${getBaseUrl()}/redis_info`,
   });
@@ -1361,7 +1384,7 @@ export async function getMetrics(
   if (queues && queues.length > 0) {
     params.queues = queues.join(",");
   }
-  const resp = await axios({
+  const resp = await http({
     method: "get",
     url: `${getBaseUrl()}/metrics?${queryString.stringify(params)}`,
   });
@@ -1472,7 +1495,7 @@ export async function createJob(body: {
   reason: string;
   throttle?: number;
 }): Promise<JobInfo> {
-  const resp = await axios({
+  const resp = await http({
     method: "post",
     url: `${getBaseUrl()}/jobs`,
     data: body,
@@ -1483,7 +1506,7 @@ export async function createJob(body: {
 export async function listJobs(limit?: number): Promise<{ jobs: JobInfo[] }> {
   const usp = new URLSearchParams();
   if (limit) usp.set("limit", String(limit));
-  const resp = await axios({
+  const resp = await http({
     method: "get",
     url: `${getBaseUrl()}/jobs?${usp.toString()}`,
   });
@@ -1498,9 +1521,9 @@ export async function getJob(
   const usp = new URLSearchParams();
   if (failuresOffset) usp.set("failures_offset", String(failuresOffset));
   if (failuresLimit) usp.set("failures_limit", String(failuresLimit));
-  const resp = await axios({
+  const resp = await http({
     method: "get",
-    url: `${getBaseUrl()}/jobs/${id}?${usp.toString()}`,
+    url: `${getBaseUrl()}/jobs/${seg(id)}?${usp.toString()}`,
   });
   return resp.data;
 }
@@ -1524,9 +1547,9 @@ export async function getJobResults(
   const usp = new URLSearchParams();
   if (offset) usp.set("offset", String(offset));
   if (limit) usp.set("limit", String(limit));
-  const resp = await axios({
+  const resp = await http({
     method: "get",
-    url: `${getBaseUrl()}/jobs/${id}/results?${usp.toString()}`,
+    url: `${getBaseUrl()}/jobs/${seg(id)}/results?${usp.toString()}`,
   });
   return resp.data;
 }
@@ -1535,34 +1558,34 @@ export async function executeJob(
   id: string,
   body: { proceed_on_partial?: boolean; throttle?: number; reason?: string }
 ): Promise<JobInfo> {
-  const resp = await axios({
+  const resp = await http({
     method: "post",
-    url: `${getBaseUrl()}/jobs/${id}/execute`,
+    url: `${getBaseUrl()}/jobs/${seg(id)}/execute`,
     data: body,
   });
   return resp.data;
 }
 
 export async function cancelJob(id: string): Promise<JobInfo> {
-  const resp = await axios({
+  const resp = await http({
     method: "post",
-    url: `${getBaseUrl()}/jobs/${id}/cancel`,
+    url: `${getBaseUrl()}/jobs/${seg(id)}/cancel`,
   });
   return resp.data;
 }
 
 export async function pauseJob(id: string): Promise<JobInfo> {
-  const resp = await axios({
+  const resp = await http({
     method: "post",
-    url: `${getBaseUrl()}/jobs/${id}/pause`,
+    url: `${getBaseUrl()}/jobs/${seg(id)}/pause`,
   });
   return resp.data;
 }
 
 export async function resumeJob(id: string): Promise<JobInfo> {
-  const resp = await axios({
+  const resp = await http({
     method: "post",
-    url: `${getBaseUrl()}/jobs/${id}/resume`,
+    url: `${getBaseUrl()}/jobs/${seg(id)}/resume`,
   });
   return resp.data;
 }
@@ -1572,7 +1595,7 @@ export async function listAudit(
 ): Promise<{ entries: AuditEntry[] }> {
   const usp = new URLSearchParams();
   if (limit) usp.set("limit", String(limit));
-  const resp = await axios({
+  const resp = await http({
     method: "get",
     url: `${getBaseUrl()}/audit?${usp.toString()}`,
   });

@@ -5,8 +5,9 @@
 // sourced from archive-trimmed queues are lower bounds — the honesty fields
 // carry that, and the UI must render it, never hide it.
 
-import axios from "axios";
 import queryString from "query-string";
+
+import { http, seg } from "./api";
 
 const getBaseUrl = () =>
   import.meta.env.PROD
@@ -93,16 +94,16 @@ export async function listErrorSignatures(query: {
     { url: `${getBaseUrl()}/errors/signatures`, query: { ...query } },
     { skipEmptyString: true }
   );
-  const resp = await axios({ method: "get", url });
+  const resp = await http({ method: "get", url });
   return resp.data;
 }
 
 export async function getErrorSignature(
   sig: string
 ): Promise<GetErrorSignatureResponse> {
-  const resp = await axios({
+  const resp = await http({
     method: "get",
-    url: `${getBaseUrl()}/errors/signatures/${sig}`,
+    url: `${getBaseUrl()}/errors/signatures/${seg(sig)}`,
   });
   return resp.data;
 }

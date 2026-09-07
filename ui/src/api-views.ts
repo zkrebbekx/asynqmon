@@ -4,7 +4,7 @@
 // (tasks: q/mode/size; queues: f/sort/dir/limit), stored and served
 // verbatim. System views are seeded server-side and are undeletable.
 
-import axios from "axios";
+import { http, seg } from "./api";
 
 const getBaseUrl = () =>
   import.meta.env.PROD
@@ -28,7 +28,7 @@ export interface ListViewsResponse {
 }
 
 export async function listViews(): Promise<ListViewsResponse> {
-  const resp = await axios({ method: "get", url: `${getBaseUrl()}/views` });
+  const resp = await http({ method: "get", url: `${getBaseUrl()}/views` });
   return resp.data;
 }
 
@@ -39,7 +39,7 @@ export interface UpsertViewBody {
 }
 
 export async function createView(body: UpsertViewBody): Promise<SavedView> {
-  const resp = await axios({ method: "post", url: `${getBaseUrl()}/views`, data: body });
+  const resp = await http({ method: "post", url: `${getBaseUrl()}/views`, data: body });
   return resp.data;
 }
 
@@ -47,10 +47,10 @@ export async function updateView(
   id: string,
   body: Partial<UpsertViewBody>
 ): Promise<SavedView> {
-  const resp = await axios({ method: "put", url: `${getBaseUrl()}/views/${id}`, data: body });
+  const resp = await http({ method: "put", url: `${getBaseUrl()}/views/${seg(id)}`, data: body });
   return resp.data;
 }
 
 export async function deleteView(id: string): Promise<void> {
-  await axios({ method: "delete", url: `${getBaseUrl()}/views/${id}` });
+  await http({ method: "delete", url: `${getBaseUrl()}/views/${seg(id)}` });
 }
