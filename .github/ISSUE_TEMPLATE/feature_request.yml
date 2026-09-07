@@ -1,0 +1,29 @@
+name: Feature request
+description: Suggest a change to asynqmon.
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: Describe the task you cannot finish today, not the solution.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: The change you propose
+      description: Name the flag, the endpoint, or the view that changes.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives you considered
+  - type: checkboxes
+    id: scope
+    attributes:
+      label: Scope
+      options:
+        - label: This change keeps the read-only mode read-only.
+        - label: I am willing to open a pull request for it.

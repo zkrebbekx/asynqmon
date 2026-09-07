@@ -29,7 +29,7 @@ There're a few options to install the binary:
 
 - [Download a release binary](#release-binaries)
 - [Download a docker image](#docker-image)
-- [Build a binary from source](building-from-source)
+- [Build a binary from source](#building-from-source)
 - [Build a docker image from source](#building-docker-image-locally)
 
 ### Release binaries
@@ -121,7 +121,7 @@ _Note_: Use `--redis-url` to specify address, db-number, and password with one f
 | Flag                              | Env                       | Description                                                                                                                  | Default          |
 | --------------------------------- | ------------------------- | ---------------------------------------------------------------------------------------------------------------------------- | ---------------- |
 | `--port`(int)                     | `PORT`                    | port number to use for web ui server                                                                                         | 8080             |
-| `---redis-url`(string)            | `REDIS_URL`               | URL to redis or sentinel server. See [godoc](https://pkg.go.dev/github.com/hibiken/asynq#ParseRedisURI) for supported format | ""               |
+| `--redis-url`(string)            | `REDIS_URL`               | URL to redis or sentinel server. See [godoc](https://pkg.go.dev/github.com/hibiken/asynq#ParseRedisURI) for supported format | ""               |
 | `--redis-addr`(string)            | `REDIS_ADDR`              | address of redis server to connect to                                                                                        | "127.0.0.1:6379" |
 | `--redis-db`(int)                 | `REDIS_DB`                | redis database number                                                                                                        | 0                |
 | `--redis-password`(string)        | `REDIS_PASSWORD`          | password to use when connecting to redis server                                                                              | ""               |
@@ -195,7 +195,9 @@ budget and answers:
 - `200 {"status":"ok"}` — Redis reachable
 - `503 {"status":"unavailable","error":"..."}` — Redis unreachable
 
-The bundled Helm chart points its `livenessProbe`/`readinessProbe` at it.
+The bundled Helm chart points its readiness probe at `/healthz`; its liveness
+probe is a TCP check on the HTTP port. An HTTP liveness probe on `/healthz`
+restart-loops the pods during a Redis outage, and a restart cannot fix Redis.
 
 ### Integration with Prometheus
 
@@ -573,4 +575,4 @@ func main() {
 
 ## License
 
-Copyright (c) 2019-present [Ken Hibino](https://github.com/hibiken) and [Contributors](https://github.com/hibiken/asynqmon/graphs/contributors). `Asynqmon` is free and open-source software licensed under the [MIT License](https://github.com/hibiken/asynq/blob/master/LICENSE). Official logo was created by [Vic Shóstak](https://github.com/koddr) and distributed under [Creative Commons](https://creativecommons.org/publicdomain/zero/1.0/) license (CC0 1.0 Universal).
+Copyright (c) 2019-present [Ken Hibino](https://github.com/hibiken) and [Contributors](https://github.com/hibiken/asynqmon/graphs/contributors). Copyright (c) 2026 [zkrebbekx](https://github.com/zkrebbekx) for the changes in this fork. `Asynqmon` is free and open-source software licensed under the [MIT License](https://github.com/hibiken/asynq/blob/master/LICENSE). Official logo was created by [Vic Shóstak](https://github.com/koddr) and distributed under [Creative Commons](https://creativecommons.org/publicdomain/zero/1.0/) license (CC0 1.0 Universal).
