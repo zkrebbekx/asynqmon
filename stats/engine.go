@@ -1361,8 +1361,7 @@ func (e *Engine) localStaleAfter() time.Duration {
 // message, then at most one line per minute while the same message repeats,
 // then one recovery line when the subsystem succeeds again.
 type errorLimiter struct {
-	now time.Time
-	mu  sync.Mutex
+	mu sync.Mutex
 	// state per subsystem: the last message logged and when.
 	last    map[string]string
 	lastLog map[string]time.Time

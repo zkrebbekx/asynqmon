@@ -27,9 +27,9 @@ import (
 // This file uses the package's DB 14 (see engine_test.go).
 // ****************************************************************************
 
-// oomErr is the error text Redis returns when a write is refused for lack of
+// errOOM is the error text Redis returns when a write is refused for lack of
 // memory. The assertions match on "OOM", as an operator's logs would.
-var oomErr = errors.New("OOM command not allowed when used memory > 'maxmemory'.")
+var errOOM = errors.New("OOM command not allowed when used memory > 'maxmemory'")
 
 // writeCommands are the commands the stats engine uses to change state. EVAL
 // and EVALSHA cover every fenced write, including the lease.
@@ -53,8 +53,8 @@ func (h oomHook) DialHook(next redis.DialHook) redis.DialHook { return next }
 func (h oomHook) ProcessHook(next redis.ProcessHook) redis.ProcessHook {
 	return func(ctx context.Context, cmd redis.Cmder) error {
 		if h.on.Load() && writeCommands[strings.ToLower(cmd.Name())] {
-			cmd.SetErr(oomErr)
-			return oomErr
+			cmd.SetErr(errOOM)
+			return errOOM
 		}
 		return next(ctx, cmd)
 	}
@@ -66,9 +66,9 @@ func (h oomHook) ProcessPipelineHook(next redis.ProcessPipelineHook) redis.Proce
 			for _, cmd := range cmds {
 				if writeCommands[strings.ToLower(cmd.Name())] {
 					for _, c := range cmds {
-						c.SetErr(oomErr)
+						c.SetErr(errOOM)
 					}
-					return oomErr
+					return errOOM
 				}
 			}
 		}

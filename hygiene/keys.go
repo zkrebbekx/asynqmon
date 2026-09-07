@@ -28,8 +28,6 @@ import (
 //     90-day TTL, so a 30-day movement window is always resolvable.
 // ****************************************************************************
 
-const allQueuesKey = "asynq:queues"
-
 func queueKeyPrefix(qname string) string { return fmt.Sprintf("asynq:{%s}:", qname) }
 func pendingKey(qname string) string     { return queueKeyPrefix(qname) + "pending" }
 func activeKey(qname string) string      { return queueKeyPrefix(qname) + "active" }
