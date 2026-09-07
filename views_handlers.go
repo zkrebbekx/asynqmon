@@ -231,7 +231,7 @@ func newUpdateViewHandlerFunc(store viewStore, audit *jobs.Store) http.HandlerFu
 		var req upsertViewRequest
 		r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodySize)
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			writeErrorMsg(w, http.StatusBadRequest, `invalid JSON body (want {"name"?, "target"?, "state"?})`)
+			writeErrorMsg(w, http.StatusBadRequest, `invalid JSON body (want {"version", "name"?, "target"?, "state"?})`)
 			return
 		}
 		v, ok, err := store.Get(r.Context(), id)
