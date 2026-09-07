@@ -587,6 +587,13 @@ func (s *Store) ReleaseClaim(ctx context.Context, id, instanceID string) error {
 // caller's fencing token is still the job's current one, so a paused or
 // partitioned runner can never write after another replica reclaimed the job.
 //
+// The script also refreshes the TTL of the three artifact keys, in the same
+// atomic call (#45.3). A trailing best-effort EXPIRE pipeline did that
+// before; a runner that died between the Lua write and that pipeline left
+// the candidates, sample and failures keys without any TTL, so they survived
+// until the job was reclaimed. PEXPIRE on a key that does not exist is a
+// no-op, so a write that pushes nothing costs three cheap calls.
+//
 // KEYS: 1=job hash  2=candidates list  3=sample list  4=failures list
 // ARGV: 1=token
 //
@@ -625,6 +632,9 @@ for f = 1, nfail do
 	end
 	i = i + 1
 end
+redis.call("PEXPIRE", KEYS[2], ` + strconv.FormatInt(jobTTL.Milliseconds(), 10) + `)
+redis.call("PEXPIRE", KEYS[3], ` + strconv.FormatInt(jobTTL.Milliseconds(), 10) + `)
+redis.call("PEXPIRE", KEYS[4], ` + strconv.FormatInt(jobTTL.Milliseconds(), 10) + `)
 return 1`)
 
 // ProgressWrite is one fence-guarded batch mutation.
@@ -670,12 +680,7 @@ func (s *Store) WriteProgress(ctx context.Context, id string, token int64, w Pro
 	if n != 1 {
 		return false, nil
 	}
-	// Keep artifact keys on the same clock as the job hash. Best-effort.
-	pipe := s.rc.Pipeline()
-	for _, k := range []string{candidatesKey(id), sampleKey(id), failuresKey(id)} {
-		pipe.Expire(ctx, k, jobTTL)
-	}
-	_, _ = pipe.Exec(ctx)
+	// The artifact keys got their TTL inside progressScript (#45.3).
 	// Live progress event: a write carrying a state change publishes
 	// unconditionally; count/cursor-only batch writes coalesce to at most one
 	// publish per job per second (events.go).
