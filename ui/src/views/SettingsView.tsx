@@ -7,7 +7,14 @@ import { Label } from "../components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../components/ui/select";
 import PageShell, { panelClass } from "../components/PageShell";
 import { getHealthRoles, HealthRolesResponse } from "../api-fleet";
-import { SavedView, deleteView, listViews, updateView } from "../api-views";
+import {
+  SavedView,
+  VIEW_CHANGED_MESSAGE,
+  deleteView,
+  isViewChangedError,
+  listViews,
+  updateView,
+} from "../api-views";
 import { paths } from "../paths";
 import { Link } from "react-router-dom";
 import { toast } from "sonner";
@@ -247,10 +254,15 @@ function SavedViewsSection() {
     setEditing(null);
     if (name === "" || name === v.name) return;
     try {
-      await updateView(v.id, { name });
+      await updateView(v.id, v.version, { name });
       toast.success(`View renamed to “${name}”.`);
       load();
     } catch (e) {
+      if (isViewChangedError(e)) {
+        toast.error(VIEW_CHANGED_MESSAGE);
+        load(); // pull the winning version so the next edit can succeed
+        return;
+      }
       toast.error(`Rename failed: ${toErrorString(e as Parameters<typeof toErrorString>[0])}`);
     }
   };

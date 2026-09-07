@@ -8,6 +8,7 @@ import { Input } from "./ui/input";
 import { TaskInfoExtended } from "../reducers/tasksReducer";
 import { TableColumn } from "../types/table";
 import { PaginationOptions } from "../api";
+import { rowsPerPageOptions } from "../constants";
 import { TaskState } from "../types/taskState";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "./ui/table";
 import { Button } from "./ui/button";
@@ -15,9 +16,6 @@ import { Alert, AlertDescription, AlertTitle } from "./ui/alert";
 import { AlertCircle } from "lucide-react";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "./ui/select";
 import ConfirmDialog from "./ConfirmDialog";
-
-export const rowsPerPageOptions = [10, 20, 50, 100];
-export const defaultPageSize = 20;
 
 export interface RowProps {
   task: TaskInfoExtended;

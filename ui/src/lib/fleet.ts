@@ -214,3 +214,16 @@ export function attentionTarget(suggestedQuery: string): AttentionTarget {
   const s = params.toString();
   return { kind: "queues", search: s ? `?${s}` : "" };
 }
+
+/**************************************************************
+                        Severity styling
+ **************************************************************/
+
+// SEV_STRIPE maps a finding severity to the Tailwind class of its left
+// stripe. It lives here, not beside the components, so the component module
+// exports components only (fast refresh).
+export const SEV_STRIPE: Record<string, string> = {
+  crit: "bg-[var(--fc-crit)]",
+  warn: "bg-[var(--fc-warn)]",
+  info: "bg-[var(--fc-acc-dim)]",
+};

@@ -150,6 +150,7 @@ function Row({ task, isSelected, onSelectChange }: RowProps) {
                   variant="ghost"
                   className="h-7 w-7"
                   onClick={() => dispatch(cancelActiveTaskAsync(task.queue, task.id))}
+                  aria-label="Cancel task"
                 >
                   <X size={14} />
                 </Button>

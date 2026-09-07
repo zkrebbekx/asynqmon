@@ -6,7 +6,7 @@
 //  1. shape: a JSON string value, ≥16 chars, strict base64 charset
 //     (standard `A-Za-z0-9+/` or URL-safe `A-Za-z0-9_-`, padded or
 //     unpadded, with a length base64 can actually produce), decoding to
-//     ≥12 bytes;
+//     ≥16 bytes;
 //  2. character-class guard on the ENCODED text: at least two of
 //     {lowercase, uppercase, digit} or an explicit base64-only character
 //     (`+ / =`) — real base64 of real content is essentially never a single
@@ -14,9 +14,13 @@
 //     false-positive source;
 //  3. the decoded bytes must be strict, fully-printable UTF-8 (tab/newline
 //     allowed, no other control bytes). For N random decoded bytes the
-//     chance of passing is ~(95/256)^N — under 1e-5 at the 12-byte minimum
+//     chance of passing is ~(95/256)^N — under 2e-7 at the 16-byte minimum
 //     — which is what makes hex strings, dashless UUIDs, and ids that
-//     merely LOOK base64-ish reliably fail.
+//     merely LOOK base64-ish reliably fail;
+//  4. content guard on the DECODED text: it must parse as a JSON object or
+//     array, or contain at least one whitespace or punctuation character.
+//     Real text has spaces and punctuation; a run of printable garbage that
+//     survived layer 3 almost never does.
 //
 // Anything that fails any layer stays raw, silently. The UI labels what was
 // decoded and keeps the raw view one click away, so the transformation is
@@ -24,10 +28,38 @@
 
 const STD_B64 = /^[A-Za-z0-9+/]+={0,2}$/;
 const URL_B64 = /^[A-Za-z0-9_-]+={0,2}$/;
-const CONTROL = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/;
+// Whitespace or Unicode punctuation anywhere in the decoded text (layer 4).
+const TEXT_MARK = /[\s\p{P}]/u;
 
 const MIN_ENCODED_LEN = 16;
-const MIN_DECODED_BYTES = 12;
+const MIN_DECODED_BYTES = 16;
+
+// hasControlChar reports whether text contains a C0 control (other than
+// tab, LF, CR) or DEL. Written as a loop rather than a regex so the intent
+// is explicit and lint-clean.
+function hasControlChar(text: string): boolean {
+  for (let i = 0; i < text.length; i++) {
+    const c = text.charCodeAt(i);
+    if (c === 0x09 || c === 0x0a || c === 0x0d) continue;
+    if (c < 0x20 || c === 0x7f) return true;
+  }
+  return false;
+}
+
+// looksLikeText is layer 4: JSON object/array, or at least one whitespace
+// or punctuation character.
+function looksLikeText(text: string): boolean {
+  const t = text.trim();
+  if (t.startsWith("{") || t.startsWith("[")) {
+    try {
+      const parsed = JSON.parse(t);
+      if (parsed !== null && typeof parsed === "object") return true;
+    } catch {
+      /* fall through to the punctuation check */
+    }
+  }
+  return TEXT_MARK.test(text);
+}
 
 // tryDecodeBase64Text returns the decoded text when `s` passes every layer,
 // or null. Exported for direct testing.
@@ -64,7 +96,8 @@ export function tryDecodeBase64Text(s: string): string | null {
   } catch {
     return null;
   }
-  if (CONTROL.test(text)) return null;
+  if (hasControlChar(text)) return null;
+  if (!looksLikeText(text)) return null;
   return text;
 }
 
