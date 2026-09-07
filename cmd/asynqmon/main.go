@@ -10,6 +10,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"strconv"
@@ -233,6 +234,23 @@ func redisTimeout(cfg *Config) time.Duration {
 // opt type gets DialTimeout, ReadTimeout, and WriteTimeout from
 // --redis-timeout and a fixed PoolSize, so a hung Redis fails a request
 // within the /healthz budget instead of the go-redis defaults.
+// redactURIError replaces the password of a redis URI with "***" in an error
+// message. asynq and go-redis echo the URI they failed to parse, and a
+// redis://user:secret@host URI would otherwise reach the log through
+// log.Fatal.
+func redactURIError(err error, raw string) error {
+	if err == nil {
+		return nil
+	}
+	msg := err.Error()
+	if u, perr := url.Parse(raw); perr == nil && u.User != nil {
+		if secret, ok := u.User.Password(); ok && secret != "" {
+			msg = strings.ReplaceAll(msg, secret, "***")
+		}
+	}
+	return errors.New(msg)
+}
+
 func makeRedisConnOpt(cfg *Config) (asynq.RedisConnOpt, error) {
 	timeout := redisTimeout(cfg)
 
@@ -255,7 +273,7 @@ func makeRedisConnOpt(cfg *Config) (asynq.RedisConnOpt, error) {
 	if strings.HasPrefix(cfg.RedisURL, "redis-sentinel") {
 		res, err := asynq.ParseRedisURI(cfg.RedisURL)
 		if err != nil {
-			return nil, err
+			return nil, redactURIError(err, cfg.RedisURL)
 		}
 		connOpt := res.(asynq.RedisFailoverClientOpt) // safe to type-assert
 		// The userinfo password in a redis-sentinel:// URL authenticates to
@@ -287,7 +305,7 @@ func makeRedisConnOpt(cfg *Config) (asynq.RedisConnOpt, error) {
 	if len(cfg.RedisURL) > 0 {
 		res, err := asynq.ParseRedisURI(cfg.RedisURL)
 		if err != nil {
-			return nil, err
+			return nil, redactURIError(err, cfg.RedisURL)
 		}
 		connOpt = res.(asynq.RedisClientOpt) // safe to type-assert
 	} else {
@@ -447,7 +465,9 @@ func runPurge(ctx context.Context, cfg *Config, out *os.File) error {
 	}
 	rc, ok := redisConnOpt.MakeRedisClient().(redis.UniversalClient)
 	if !ok {
-		return fmt.Errorf("unsupported redis connection type %T", redisConnOpt)
+		// The value is deliberately not formatted into the message: it
+		// carries the redis password, and this error reaches log.Fatal.
+		return errors.New("unsupported redis connection type")
 	}
 	defer rc.Close()
 	res, err := purgeOwnedKeys(ctx, rc)
