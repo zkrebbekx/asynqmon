@@ -21,7 +21,7 @@ import { useSelector } from "react-redux";
 import { ChevronDown, ChevronRight } from "lucide-react";
 import { AppState, useAppDispatch } from "../store";
 import { listServersAsync } from "../actions/serversActions";
-import { usePolling } from "../hooks";
+import { useLatestOnly, usePolling } from "../hooks";
 import { ServerInfo, WorkerInfo } from "../api";
 import {
   getCoverage,
@@ -514,20 +514,26 @@ export default function ServersView() {
   const [coverageError, setCoverageError] = useState("");
   const [cancel, setCancel] = useState<CancelListenersResponse | null>(null);
   const [cancelError, setCancelError] = useState("");
+  const beginWidgetsFetch = useLatestOnly();
   const fetchWidgets = useCallback(async () => {
+    const isCurrent = beginWidgetsFetch();
     try {
-      setCoverage(await getCoverage());
+      const cov = await getCoverage();
+      if (!isCurrent()) return; // a later poll already resolved
+      setCoverage(cov);
       setCoverageError("");
     } catch (e) {
-      setCoverageError(toErrorString(e as Parameters<typeof toErrorString>[0]));
+      if (isCurrent()) setCoverageError(toErrorString(e as Parameters<typeof toErrorString>[0]));
     }
     try {
-      setCancel(await getCancelListeners());
+      const cl = await getCancelListeners();
+      if (!isCurrent()) return;
+      setCancel(cl);
       setCancelError("");
     } catch (e) {
-      setCancelError(toErrorString(e as Parameters<typeof toErrorString>[0]));
+      if (isCurrent()) setCancelError(toErrorString(e as Parameters<typeof toErrorString>[0]));
     }
-  }, []);
+  }, [beginWidgetsFetch]);
   usePolling(fetchWidgets, pollInterval);
 
   // Budget bars and "updated Ns ago" track wall-clock time. Plain interval,

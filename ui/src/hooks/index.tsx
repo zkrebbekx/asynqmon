@@ -6,8 +6,23 @@ import { pollTick } from "../actions/settingsActions";
 import { ThemePreference } from "../reducers/settingsReducer";
 import { acquireOverlayMute } from "../lib/keymap";
 
+// Poll cadence bounds, in seconds. The settings value is user-typed; a
+// cadence below 2 s hammers the server and one above 20 s leaves the
+// dashboard stale for longer than the SSE watchdogs tolerate.
+export const MIN_POLL_INTERVAL_SECONDS = 2;
+export const MAX_POLL_INTERVAL_SECONDS = 20;
+
+export function clampPollInterval(seconds: number): number {
+  if (!Number.isFinite(seconds)) return MAX_POLL_INTERVAL_SECONDS;
+  return Math.min(MAX_POLL_INTERVAL_SECONDS, Math.max(MIN_POLL_INTERVAL_SECONDS, seconds));
+}
+
+function isThenable(v: unknown): v is PromiseLike<unknown> {
+  return typeof v === "object" && v !== null && typeof (v as PromiseLike<unknown>).then === "function";
+}
+
 export function usePolling(
-  doFn: () => void,
+  doFn: () => void | Promise<unknown>,
   interval: number,
   fetchKey: ReadonlyArray<string | number | boolean | null | undefined> = []
 ) {
@@ -19,17 +34,42 @@ export function usePolling(
   const savedFn = useRef(doFn);
   savedFn.current = doFn;
 
+  // Number of callback invocations whose promise is still pending. An
+  // interval tick is skipped while one is pending: when Redis or the pod
+  // hangs, each tick used to add one more XHR until the browser's per-host
+  // connection pool was full and the tab looked dead until reload.
+  const inFlight = useRef(0);
+
   // Params the callback captures (queue, page, task id, ...) go in fetchKey:
   // when they change we fetch immediately and restart the interval, instead
   // of showing stale data until the next poll tick.
   const key = JSON.stringify(fetchKey);
 
   useEffect(() => {
-    const tick = () => {
-      savedFn.current();
+    // `force` ticks (mount, key change) always run: the pending call, if
+    // any, belongs to the previous params. Interval and visibility ticks
+    // are skipped while a call is pending.
+    const tick = (force: boolean) => {
+      if (!force && inFlight.current > 0) return;
+      inFlight.current++;
+      const clear = () => {
+        inFlight.current--;
+      };
+      let result: unknown;
+      try {
+        result = savedFn.current();
+      } catch (e) {
+        clear();
+        throw e;
+      }
+      if (isThenable(result)) {
+        result.then(clear, clear);
+      } else {
+        clear();
+      }
       dispatch(pollTick());
     };
-    tick();
+    tick(true);
     // When polling is paused we still fetch once, but skip the interval.
     if (!pollingActive) return;
 
@@ -37,7 +77,7 @@ export function usePolling(
     // is looking at just loads the server — and refetch immediately on return.
     let id: ReturnType<typeof setInterval> | null = null;
     const start = () => {
-      if (id === null) id = setInterval(tick, interval * 1000);
+      if (id === null) id = setInterval(() => tick(false), clampPollInterval(interval) * 1000);
     };
     const stop = () => {
       if (id !== null) {
@@ -49,7 +89,7 @@ export function usePolling(
       if (document.hidden) {
         stop();
       } else {
-        tick();
+        tick(false);
         start();
       }
     };

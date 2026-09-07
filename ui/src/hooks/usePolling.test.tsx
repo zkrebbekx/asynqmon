@@ -5,7 +5,7 @@ import { combineReducers, configureStore } from "@reduxjs/toolkit";
 import { Provider } from "react-redux";
 import settingsReducer from "../reducers/settingsReducer";
 import { togglePolling } from "../actions/settingsActions";
-import { usePolling } from "./index";
+import { clampPollInterval, usePolling } from "./index";
 
 function makeStore() {
   return configureStore({ reducer: combineReducers({ settings: settingsReducer }) });
@@ -84,6 +84,71 @@ describe("usePolling", () => {
     expect(store.getState().settings.lastUpdatedAt).toBe(0);
     renderHook(() => usePolling(() => {}, 5), { wrapper: wrapperFor(store) });
     expect(store.getState().settings.lastUpdatedAt).toBeGreaterThan(0);
+  });
+
+  it("skips interval ticks while the previous call is still pending (#51)", async () => {
+    // A hung backend must not stack one more XHR per tick.
+    let resolveFirst: () => void = () => {};
+    const fn = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveFirst = resolve;
+        })
+    );
+    const store = makeStore();
+    renderHook(() => usePolling(fn, 5), { wrapper: wrapperFor(store) });
+    expect(fn).toHaveBeenCalledTimes(1);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(15_000);
+    });
+    // Three ticks elapsed; none re-invoked the callback.
+    expect(fn).toHaveBeenCalledTimes(1);
+    // Once the pending call settles, the next tick runs again.
+    fn.mockImplementation(() => Promise.resolve());
+    await act(async () => {
+      resolveFirst();
+      await vi.advanceTimersByTimeAsync(5_000);
+    });
+    expect(fn).toHaveBeenCalledTimes(2);
+  });
+
+  it("clears the in-flight guard when the call rejects", async () => {
+    const fn = vi.fn(() => Promise.reject(new Error("boom")));
+    const store = makeStore();
+    renderHook(() => usePolling(fn, 5), { wrapper: wrapperFor(store) });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5_000);
+    });
+    expect(fn).toHaveBeenCalledTimes(2);
+  });
+
+  it("runs the key-change fetch even while an older call is pending", async () => {
+    const fn = vi.fn(() => new Promise<void>(() => {}));
+    const store = makeStore();
+    const { rerender } = renderHook(
+      ({ page }: { page: number }) => usePolling(fn, 5, ["q", page]),
+      { wrapper: wrapperFor(store), initialProps: { page: 0 } }
+    );
+    expect(fn).toHaveBeenCalledTimes(1);
+    rerender({ page: 1 });
+    expect(fn).toHaveBeenCalledTimes(2);
+  });
+
+  it("clamps the poll interval to [2, 20] seconds", () => {
+    expect(clampPollInterval(1)).toBe(2);
+    expect(clampPollInterval(0)).toBe(2);
+    expect(clampPollInterval(8)).toBe(8);
+    expect(clampPollInterval(100)).toBe(20);
+    expect(clampPollInterval(Number.NaN)).toBe(20);
+
+    const fn = vi.fn();
+    const store = makeStore();
+    renderHook(() => usePolling(fn, 0.5), { wrapper: wrapperFor(store) });
+    expect(fn).toHaveBeenCalledTimes(1);
+    act(() => void vi.advanceTimersByTime(1_000));
+    expect(fn).toHaveBeenCalledTimes(1); // 0.5 s is clamped up to 2 s
+    act(() => void vi.advanceTimersByTime(1_000));
+    expect(fn).toHaveBeenCalledTimes(2);
   });
 
   it("pauses the interval while the tab is hidden and refetches on return", () => {
