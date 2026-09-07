@@ -35,7 +35,7 @@
     "lodash.uniqby": "^4.7.0",
     "lucide-react": "^1.22.0",
     "pretty-bytes": "^7.1.0",
-    "query-string": "^9.4.1",
+    "query-string": "^9.5.1",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "react-redux": "^9.3.0",
