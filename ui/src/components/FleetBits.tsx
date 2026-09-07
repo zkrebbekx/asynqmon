@@ -67,9 +67,3 @@ export function Kbd({ children, className }: { children: ReactNode; className?: 
     </kbd>
   );
 }
-
-export const SEV_STRIPE: Record<string, string> = {
-  crit: "bg-[var(--fc-crit)]",
-  warn: "bg-[var(--fc-warn)]",
-  info: "bg-[var(--fc-acc-dim)]",
-};

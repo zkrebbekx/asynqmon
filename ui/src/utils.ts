@@ -177,7 +177,7 @@ export function percentage(numerator: number, denominator: number): string {
 export function isJsonPayload(p: string) {
   try {
     JSON.parse(p);
-  } catch (error) {
+  } catch {
     return false;
   }
   return true;

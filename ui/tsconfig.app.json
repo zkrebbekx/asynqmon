@@ -18,6 +18,7 @@
     },
 
     /* Linting */
+    "strict": true,
     "noFallthroughCasesInSwitch": true,
     "useUnknownInCatchVariables": false
   },

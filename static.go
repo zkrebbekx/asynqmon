@@ -141,9 +141,9 @@ func (h *uiAssetsHandler) indexFilePath() string {
 
 func (h *uiAssetsHandler) indexTemplate() (*template.Template, error) {
 	h.tmplOnce.Do(func() {
-		// Note: Replace the default delimiter ("{{") with a custom one
-		// since webpack escapes the '{' character when it compiles the index.html file.
-		// See the "homepage" field in package.json.
+		// Note: Replace the default delimiter ("{{") with a custom one.
+		// The Vite build escapes the '{' character when it emits
+		// index.html, so the default Go template delimiter cannot be used.
 		h.indexTmpl, h.indexTmplErr = template.New(h.indexFileName).
 			Delims("/[[", "]]").
 			ParseFS(h.contents, h.indexFilePath())

@@ -19,11 +19,6 @@ function fresh(key: string) {
   return hit && Date.now() - hit.at < CACHE_TTL_MS ? hit : undefined;
 }
 
-// Test hook: lets vitest clear the module cache between cases.
-export function resetObservedCache() {
-  cache.clear();
-}
-
 export default function ObservedRunStamp({ queue, id }: { queue: string; id: string }) {
   const key = `${queue}/${id}`;
   const [obs, setObs] = useState<api.ObservedTaskResponse | null>(

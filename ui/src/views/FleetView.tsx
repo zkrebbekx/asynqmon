@@ -24,10 +24,10 @@ import {
 } from "../api-series";
 import { paths, attentionFindingPath } from "../paths";
 import { timeAgo } from "../utils";
-import { formatErrorRate, formatFindingValue, severityTone } from "../lib/fleet";
+import { formatErrorRate, formatFindingValue, severityTone, SEV_STRIPE } from "../lib/fleet";
 import { formatRate, learningRemaining, ratePerMinute } from "../lib/series";
 import { formatSigCount, trendTone } from "../lib/errsig";
-import { FcChip, MicroLabel, SEV_STRIPE } from "../components/FleetBits";
+import { FcChip, MicroLabel } from "../components/FleetBits";
 import PageShell from "../components/PageShell";
 import { RingBars, Sparkline } from "../components/charts";
 import { cn } from "../lib/utils";
