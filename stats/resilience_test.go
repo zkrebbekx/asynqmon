@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -15,45 +17,75 @@ import (
 // ****************************************************************************
 // Redis-write-failure resilience (#36) and the shutdown series flush (#28).
 //
-// The write outage is produced the way an operator sees it: CONFIG SET
-// maxmemory 1 with policy noeviction, so every write returns OOM while reads
-// keep working. Both settings are restored in t.Cleanup. When CONFIG SET is
-// unavailable (a managed Redis), the test falls back to a client wrapper
-// that fails every write.
+// The write outage is produced per client, not per server. An earlier version
+// used CONFIG SET maxmemory 1, which reproduces the operator's incident
+// exactly but changes a SERVER setting: `go test ./...` runs packages in
+// parallel against one Redis, so every other package would see OOM for the
+// length of the window. The client hook below fails the same commands with the
+// same error text and touches nothing outside this test.
 //
 // This file uses the package's DB 14 (see engine_test.go).
 // ****************************************************************************
 
-// forceOOM makes every write to rc fail with an OOM error. It returns the
-// restore func and true, or false when the server does not allow CONFIG SET.
-// maxmemory is a SERVER setting, so the caller restores it as soon as the
-// outage window ends; t.Cleanup is only the backstop.
-func forceOOM(t *testing.T, rc redis.UniversalClient) (func(), bool) {
+// oomErr is the error text Redis returns when a write is refused for lack of
+// memory. The assertions match on "OOM", as an operator's logs would.
+var oomErr = errors.New("OOM command not allowed when used memory > 'maxmemory'.")
+
+// writeCommands are the commands the stats engine uses to change state. EVAL
+// and EVALSHA cover every fenced write, including the lease.
+var writeCommands = map[string]bool{
+	"eval": true, "evalsha": true, "set": true, "setnx": true, "setrange": true,
+	"getset": true, "append": true, "incr": true, "incrby": true, "decr": true,
+	"hset": true, "hsetnx": true, "hincrby": true, "hdel": true,
+	"zadd": true, "zrem": true, "zremrangebyrank": true, "zremrangebyscore": true,
+	"sadd": true, "srem": true, "spop": true,
+	"lpush": true, "rpush": true, "lpop": true, "rpop": true, "lrem": true,
+	"del": true, "unlink": true, "expire": true, "pexpire": true, "persist": true,
+	"xadd": true, "xtrim": true, "rename": true, "copy": true, "flushdb": true,
+}
+
+// oomHook fails every write command while its flag is set. Reads pass through,
+// which is what a Redis over its maxmemory limit does.
+type oomHook struct{ on *atomic.Bool }
+
+func (h oomHook) DialHook(next redis.DialHook) redis.DialHook { return next }
+
+func (h oomHook) ProcessHook(next redis.ProcessHook) redis.ProcessHook {
+	return func(ctx context.Context, cmd redis.Cmder) error {
+		if h.on.Load() && writeCommands[strings.ToLower(cmd.Name())] {
+			cmd.SetErr(oomErr)
+			return oomErr
+		}
+		return next(ctx, cmd)
+	}
+}
+
+func (h oomHook) ProcessPipelineHook(next redis.ProcessPipelineHook) redis.ProcessPipelineHook {
+	return func(ctx context.Context, cmds []redis.Cmder) error {
+		if h.on.Load() {
+			for _, cmd := range cmds {
+				if writeCommands[strings.ToLower(cmd.Name())] {
+					for _, c := range cmds {
+						c.SetErr(oomErr)
+					}
+					return oomErr
+				}
+			}
+		}
+		return next(ctx, cmds)
+	}
+}
+
+// newOOMClient returns a second client on the test DB whose writes fail while
+// the returned flag is set. The caller sets the flag for the outage window
+// only.
+func newOOMClient(t *testing.T) (redis.UniversalClient, *atomic.Bool) {
 	t.Helper()
-	ctx := context.Background()
-	maxmemory, err := rc.ConfigGet(ctx, "maxmemory").Result()
-	if err != nil {
-		return nil, false
-	}
-	policy, err := rc.ConfigGet(ctx, "maxmemory-policy").Result()
-	if err != nil {
-		return nil, false
-	}
-	restore := func() {
-		c := redis.NewClient(&redis.Options{Addr: testRedisAddr, DB: testRedisDB})
-		defer c.Close()
-		c.ConfigSet(context.Background(), "maxmemory", maxmemory["maxmemory"])
-		c.ConfigSet(context.Background(), "maxmemory-policy", policy["maxmemory-policy"])
-	}
-	if err := rc.ConfigSet(ctx, "maxmemory-policy", "noeviction").Err(); err != nil {
-		return nil, false
-	}
-	if err := rc.ConfigSet(ctx, "maxmemory", "1").Err(); err != nil {
-		restore()
-		return nil, false
-	}
-	t.Cleanup(restore)
-	return restore, true
+	on := &atomic.Bool{}
+	rc := redis.NewClient(&redis.Options{Addr: testRedisAddr, DB: testRedisDB})
+	rc.AddHook(oomHook{on: on})
+	t.Cleanup(func() { rc.Close() })
+	return rc, on
 }
 
 // TestSweepSurvivesWriteOutage proves the holder keeps answering from memory
@@ -69,7 +101,8 @@ func TestSweepSurvivesWriteOutage(t *testing.T) {
 		t.Fatalf("enqueue: %v", err)
 	}
 
-	holder := NewEngine(Config{RedisClient: rc, Inspector: insp, Logf: silentLogf})
+	oomClient, oomOn := newOOMClient(t)
+	holder := NewEngine(Config{RedisClient: oomClient, Inspector: insp, Logf: silentLogf})
 	standby := NewEngine(Config{RedisClient: rc, Inspector: insp, Logf: silentLogf})
 
 	// One healthy sweep so both replicas have seen real data.
@@ -81,15 +114,11 @@ func TestSweepSurvivesWriteOutage(t *testing.T) {
 		t.Fatalf("standby first read: %v", err)
 	}
 
-	restore, ok := forceOOM(t, rc)
-	if !ok {
-		t.Skip("skipping: server does not allow CONFIG SET maxmemory")
-	}
-
 	// A sweep during the outage: every write fails, every read still works.
+	oomOn.Store(true)
 	oomSweepErr := holder.SweepNow(ctx)
 	holderRead, holderErr := holder.Read(ctx)
-	restore() // keep the server-wide outage window as short as possible
+	oomOn.Store(false)
 
 	// The shared cache expired because no replica could refresh it — the 2m
 	// CacheTTL, reproduced with a DEL.
