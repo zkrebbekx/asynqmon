@@ -61,6 +61,11 @@ func newEnqueueTestEnv(t *testing.T) *enqueueTestEnv {
 	opt := asynq.RedisClientOpt{Addr: enqueueTestRedisAddr, DB: enqueueTestRedisDB}
 	client := asynq.NewClient(opt)
 	insp := asynq.NewInspector(opt)
+	// The queue "emails" must exist: since #53.4 an unknown queue name is a
+	// 400 unless the body carries "create_queue": true.
+	if _, err := client.Enqueue(asynq.NewTask("seed:exists", nil), asynq.Queue("emails")); err != nil {
+		t.Fatalf("seeding queue emails: %v", err)
+	}
 	t.Cleanup(func() {
 		client.Close()
 		insp.Close()
@@ -449,6 +454,68 @@ func TestEnqueueValidationAndConflicts(t *testing.T) {
 				So(firstUniqueCode, ShouldEqual, http.StatusCreated)
 				So(secondUniqueCode, ShouldEqual, http.StatusConflict)
 				So(secondUniqueBody, ShouldContainSubstring, "uniqueness lock")
+			})
+		})
+	})
+}
+
+// ----------------------------------------------------------------------------
+// #53.4: an unknown queue name is a 400 unless the body opts in with
+// "create_queue": true, and a deadline in the past is a 400.
+// ----------------------------------------------------------------------------
+
+func TestEnqueueQueueExistenceAndDeadline(t *testing.T) {
+	env := newEnqueueTestEnv(t)
+	router := env.newRouter(Options{EnableEnqueue: true})
+
+	post := func(qname string, body map[string]interface{}) (int, string) {
+		w := doJSON(t, router, "POST", enqueueURL(qname), body, nil)
+		var e struct {
+			Error string `json:"error"`
+		}
+		_ = json.Unmarshal(w.Body.Bytes(), &e)
+		return w.Code, e.Error
+	}
+
+	typoCode, typoBody := post("emials", map[string]interface{}{"type": "email:send"})
+	createdCode, _ := post("emials", map[string]interface{}{"type": "email:send", "create_queue": true})
+	// The queue exists now, so a second plain enqueue is accepted.
+	againCode, _ := post("emials", map[string]interface{}{"type": "email:send"})
+
+	pastCode, pastBody := post("emails", map[string]interface{}{
+		"type": "email:send", "deadline": time.Now().Add(-time.Minute).Format(time.RFC3339),
+	})
+	futureCode, _ := post("emails", map[string]interface{}{
+		"type": "email:send", "deadline": time.Now().Add(time.Hour).Format(time.RFC3339),
+	})
+
+	queues, queuesErr := env.insp.Queues()
+
+	Convey("Given an enqueue-enabled router and the queue emails", t, func() {
+		Convey("When the request names a queue that does not exist", func() {
+			Convey("Then it answers 400 and names the create_queue opt-in", func() {
+				So(typoCode, ShouldEqual, http.StatusBadRequest)
+				So(typoBody, ShouldContainSubstring, "does not exist")
+				So(typoBody, ShouldContainSubstring, "create_queue")
+			})
+		})
+		Convey("When the same request carries create_queue true", func() {
+			Convey("Then the task is created and the queue exists afterwards", func() {
+				So(createdCode, ShouldEqual, http.StatusCreated)
+				So(againCode, ShouldEqual, http.StatusCreated)
+				So(queuesErr, ShouldBeNil)
+				So(queues, ShouldContain, "emials")
+			})
+		})
+		Convey("When the deadline is earlier than now", func() {
+			Convey("Then it answers 400 with a field-specific message", func() {
+				So(pastCode, ShouldEqual, http.StatusBadRequest)
+				So(pastBody, ShouldContainSubstring, "deadline: must be in the future")
+			})
+		})
+		Convey("When the deadline is in the future", func() {
+			Convey("Then the task is created", func() {
+				So(futureCode, ShouldEqual, http.StatusCreated)
 			})
 		})
 	})

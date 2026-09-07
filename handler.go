@@ -793,7 +793,7 @@ func muxRouter(opts Options, rc redis.UniversalClient, inspector *asynq.Inspecto
 			// closer-managed client and sets it before building the router.
 			ec = asynq.NewClient(opts.RedisConnOpt)
 		}
-		api.HandleFunc("/queues/{qname}/tasks", newEnqueueTaskHandlerFunc(ec, jobsStore, payloadFmt, resultFmt)).Methods("POST")
+		api.HandleFunc("/queues/{qname}/tasks", newEnqueueTaskHandlerFunc(ec, inspector, jobsStore, payloadFmt, resultFmt)).Methods("POST")
 		// Run a scheduler entry's task NOW (upstream hibiken/asynqmon#337):
 		// resolves the stable key against live entries ∪ snapshots (GONE
 		// entries are exactly the ones you want to fire manually) and

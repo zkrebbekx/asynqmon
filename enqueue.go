@@ -71,6 +71,11 @@ type enqueueTaskRequest struct {
 	// as TaskInfo.Headers; a clone that omits it enqueues a task without the
 	// source task's metadata. Absent or empty means no headers.
 	Headers map[string]string `json:"headers"`
+	// CreateQueue lets the request name a queue that does not exist yet.
+	// Without it an unknown queue name is a 400: a typo would otherwise
+	// create a zero-consumer queue that later shows up as a hygiene
+	// finding (§3.10).
+	CreateQueue bool `json:"create_queue"`
 
 	// Reason is optional free text recorded on the audit entry.
 	Reason string `json:"reason"`
@@ -160,6 +165,13 @@ func buildEnqueueTask(qname string, req *enqueueTaskRequest, now time.Time) (tas
 		t, err := time.Parse(time.RFC3339, req.Deadline)
 		if err != nil {
 			return fail("deadline: must be RFC3339 (e.g. 2026-01-02T15:04:05Z)")
+		}
+		if !t.After(now) {
+			// A deadline in the past makes the task expire before any
+			// worker can run it: reject the typo instead of enqueuing work
+			// that is already dead.
+			return fail("deadline: must be in the future (got %s, now %s)",
+				t.UTC().Format(time.RFC3339), now.UTC().Format(time.RFC3339))
 		}
 		opts = append(opts, asynq.Deadline(t))
 	}
