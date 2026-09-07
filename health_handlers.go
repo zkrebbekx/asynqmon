@@ -120,10 +120,35 @@ type healthStats struct {
 	Series         *healthSeries `json:"series,omitempty"`
 }
 
+// healthErrsig is the error-signature indexer's last-run command spend on
+// THIS replica (holder-local, like LastSweepLocal). The merge phase — the
+// signature reload plus every write of the fenced batch — and the retry
+// sample used to be invisible here (#52.5).
+type healthErrsig struct {
+	// CommandBudget is the configured commands-per-second cap.
+	CommandBudget int `json:"command_budget"`
+
+	// TailCommands is the last archived-tail sweep's total command count;
+	// TailMergeCommands is the merge phase's share; TailBudgetCommands is
+	// the per-sweep allowance; TailAt is when the sweep finished (RFC3339,
+	// empty when this replica never swept).
+	TailCommands       int    `json:"tail_commands"`
+	TailMergeCommands  int    `json:"tail_merge_commands"`
+	TailBudgetCommands int    `json:"tail_budget_commands"`
+	TailAt             string `json:"tail_at,omitempty"`
+
+	// The same numbers for the last retry sample.
+	SampleCommands       int    `json:"sample_commands"`
+	SampleMergeCommands  int    `json:"sample_merge_commands"`
+	SampleBudgetCommands int    `json:"sample_budget_commands"`
+	SampleAt             string `json:"sample_at,omitempty"`
+}
+
 type healthRolesResponse struct {
-	Roles     []healthRole `json:"roles"`
-	Stats     healthStats  `json:"stats"`
-	UpdatedAt string       `json:"updated_at"` // RFC3339, request time
+	Roles     []healthRole  `json:"roles"`
+	Stats     healthStats   `json:"stats"`
+	Errsig    *healthErrsig `json:"errsig,omitempty"`
+	UpdatedAt string        `json:"updated_at"` // RFC3339, request time
 }
 
 // roleSpec joins a leasefence role with its display title and this replica's
@@ -209,9 +234,30 @@ func newHealthRolesHandlerFunc(rc redis.UniversalClient, engine *stats.Engine, i
 			}
 		}
 
+		var es *healthErrsig
+		if indexer != nil {
+			sp := indexer.Spend()
+			es = &healthErrsig{
+				CommandBudget:        sp.Budget,
+				TailCommands:         sp.TailCommands,
+				TailMergeCommands:    sp.TailMergeCommands,
+				TailBudgetCommands:   sp.TailBudget,
+				SampleCommands:       sp.SampleCommands,
+				SampleMergeCommands:  sp.SampleMergeCommands,
+				SampleBudgetCommands: sp.SampleBudget,
+			}
+			if !sp.TailAt.IsZero() {
+				es.TailAt = formatTimeInRFC3339(sp.TailAt)
+			}
+			if !sp.SampleAt.IsZero() {
+				es.SampleAt = formatTimeInRFC3339(sp.SampleAt)
+			}
+		}
+
 		writeResponseJSON(w, healthRolesResponse{
 			Roles:     roles,
 			Stats:     st,
+			Errsig:    es,
 			UpdatedAt: formatTimeInRFC3339(now),
 		})
 	}

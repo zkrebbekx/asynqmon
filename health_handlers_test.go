@@ -11,6 +11,7 @@ import (
 	"github.com/redis/go-redis/v9"
 	. "github.com/smartystreets/goconvey/convey"
 
+	"github.com/zkrebbekx/asynqmon/errsig"
 	"github.com/zkrebbekx/asynqmon/internal/leasefence"
 	"github.com/zkrebbekx/asynqmon/stats"
 )
@@ -193,6 +194,84 @@ func TestHealthRolesEndpoint(t *testing.T) {
 			So(wDisabled.Code, ShouldEqual, 200)
 			So(disabled.Stats.Available, ShouldBeFalse)
 			So(disabled.Stats.Reason, ShouldContainSubstring, "disabled")
+		})
+	})
+}
+
+// TestHealthRolesErrsigSpend: the roles readout carries the indexer's
+// last-run command spend, merge phase included (#52.5). DB 13, same
+// arrangement as TestHealthRolesEndpoint.
+func TestHealthRolesErrsigSpend(t *testing.T) {
+	ctx := context.Background()
+	rc := redis.NewClient(&redis.Options{Addr: statsTestRedisAddr, DB: statsTestRedisDB})
+	if err := rc.Ping(ctx).Err(); err != nil {
+		rc.Close()
+		t.Skipf("skipping: redis not available on %s: %v", statsTestRedisAddr, err)
+	}
+	if err := rc.FlushDB(ctx).Err(); err != nil {
+		t.Fatalf("flushing test db: %v", err)
+	}
+	t.Cleanup(func() { rc.Close() })
+
+	opt := asynq.RedisClientOpt{Addr: statsTestRedisAddr, DB: statsTestRedisDB}
+	client := asynq.NewClient(opt)
+	insp := asynq.NewInspector(opt)
+	t.Cleanup(func() { client.Close(); insp.Close() })
+	if _, err := client.Enqueue(asynq.NewTask("h:t", nil), asynq.Queue("hq")); err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+
+	indexer := errsig.NewIndexer(errsig.Config{
+		RedisClient: rc,
+		Inspector:   insp,
+		Logf:        func(string, ...interface{}) {},
+	})
+	if err := indexer.SweepTailNow(ctx); err != nil {
+		t.Fatalf("tail sweep: %v", err)
+	}
+	if err := indexer.SampleRetryNow(ctx); err != nil {
+		t.Fatalf("retry sample: %v", err)
+	}
+
+	var resp struct {
+		Errsig *struct {
+			CommandBudget        int    `json:"command_budget"`
+			TailCommands         int    `json:"tail_commands"`
+			TailMergeCommands    int    `json:"tail_merge_commands"`
+			TailBudgetCommands   int    `json:"tail_budget_commands"`
+			TailAt               string `json:"tail_at"`
+			SampleCommands       int    `json:"sample_commands"`
+			SampleMergeCommands  int    `json:"sample_merge_commands"`
+			SampleBudgetCommands int    `json:"sample_budget_commands"`
+			SampleAt             string `json:"sample_at"`
+		} `json:"errsig"`
+	}
+	w := getJSON(t, newHealthRolesHandlerFunc(rc, nil, indexer, nil), "/api/health/roles", &resp)
+
+	var noIndexer struct {
+		Errsig *struct{} `json:"errsig"`
+	}
+	getJSON(t, newHealthRolesHandlerFunc(rc, nil, nil, nil), "/api/health/roles", &noIndexer)
+
+	Convey("Given an indexer that swept and sampled on this replica", t, func() {
+		Convey("Then the roles readout reports its command spend", func() {
+			So(w.Code, ShouldEqual, 200)
+			So(resp.Errsig, ShouldNotBeNil)
+			So(resp.Errsig.CommandBudget, ShouldBeGreaterThan, 0)
+			So(resp.Errsig.TailCommands, ShouldBeGreaterThan, 0)
+			So(resp.Errsig.TailBudgetCommands, ShouldBeGreaterThan, 0)
+			So(resp.Errsig.TailAt, ShouldNotBeEmpty)
+			So(resp.Errsig.SampleCommands, ShouldBeGreaterThan, 0)
+			So(resp.Errsig.SampleAt, ShouldNotBeEmpty)
+		})
+		Convey("Then the merge phase is part of that spend", func() {
+			So(resp.Errsig.TailMergeCommands, ShouldBeGreaterThan, 0)
+			So(resp.Errsig.TailCommands, ShouldBeGreaterThanOrEqualTo, resp.Errsig.TailMergeCommands)
+			So(resp.Errsig.SampleMergeCommands, ShouldBeGreaterThan, 0)
+			So(resp.Errsig.SampleCommands, ShouldBeGreaterThanOrEqualTo, resp.Errsig.SampleMergeCommands)
+		})
+		Convey("Then a replica without an indexer omits the block", func() {
+			So(noIndexer.Errsig, ShouldBeNil)
 		})
 	})
 }

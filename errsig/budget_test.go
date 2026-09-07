@@ -78,3 +78,52 @@ func TestTailSweepBudgetRotation(t *testing.T) {
 		})
 	})
 }
+
+// TestSpendCountsMergePhase: the merge phase and the retry sample are part
+// of the reported command spend (#52.5). Same real-Redis DB 6 arrangement.
+func TestSpendCountsMergePhase(t *testing.T) {
+	rc := fenceTestRedis(t)
+	ctx := context.Background()
+	opt := asynq.RedisClientOpt{Addr: fenceTestRedisAddr, DB: fenceTestRedisDB}
+	client := asynq.NewClient(opt)
+	insp := asynq.NewInspector(opt)
+	t.Cleanup(func() { client.Close(); insp.Close() })
+
+	if _, err := client.Enqueue(asynq.NewTask("t:x", nil), asynq.Queue("spq")); err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+
+	ix := NewIndexer(Config{RedisClient: rc, Inspector: insp, Logf: func(string, ...interface{}) {}})
+	before := ix.Spend()
+	if err := ix.SweepTailNow(ctx); err != nil {
+		t.Fatalf("tail sweep: %v", err)
+	}
+	if err := ix.SampleRetryNow(ctx); err != nil {
+		t.Fatalf("retry sample: %v", err)
+	}
+	after := ix.Spend()
+
+	Convey("Given an indexer that never ran", t, func() {
+		Convey("Then its reported spend is zero", func() {
+			So(before.TailCommands, ShouldEqual, 0)
+			So(before.SampleCommands, ShouldEqual, 0)
+			So(before.TailAt.IsZero(), ShouldBeTrue)
+		})
+	})
+	Convey("Given one tail sweep and one retry sample", t, func() {
+		Convey("Then the tail spend includes the merge phase", func() {
+			So(after.TailMergeCommands, ShouldBeGreaterThan, 0)
+			So(after.TailCommands, ShouldBeGreaterThan, after.TailMergeCommands)
+			So(after.TailBudget, ShouldBeGreaterThan, 0)
+			So(after.TailAt.IsZero(), ShouldBeFalse)
+		})
+		Convey("Then the sample spend includes its union reads and writes", func() {
+			So(after.SampleMergeCommands, ShouldBeGreaterThan, 0)
+			So(after.SampleCommands, ShouldBeGreaterThanOrEqualTo, after.SampleMergeCommands)
+			So(after.SampleAt.IsZero(), ShouldBeFalse)
+		})
+		Convey("Then the budget is reported with the spend", func() {
+			So(after.Budget, ShouldEqual, defaultCommandBudget)
+		})
+	})
+}

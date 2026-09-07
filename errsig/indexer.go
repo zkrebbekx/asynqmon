@@ -148,6 +148,67 @@ type Indexer struct {
 	sampleRot string
 	failedByQ map[string]int64
 	trimmedQ  map[string]bool
+
+	// spend records what the last run of each feeder cost in Redis
+	// commands, merge phase included (#52.5). The health readout serves it
+	// per replica, so an operator sees the indexer's real spend against its
+	// budget instead of only the governed read phase.
+	spendMu sync.Mutex
+	spend   Spend
+}
+
+// Spend is the command cost of this replica's last run of each feeder
+// (§5.7 command budget; #52.5). Commands counts every Redis command the run
+// issued: the governed read phase plus the merge phase (the signature
+// reload and every write command of the fenced batch).
+type Spend struct {
+	// Budget is the configured commands-per-second cap.
+	Budget int
+
+	// TailCommands is the last archived-tail sweep's total command count;
+	// TailMergeCommands is the merge phase's share of it; TailBudget is the
+	// per-sweep allowance; TailAt is when that sweep finished.
+	TailCommands      int
+	TailMergeCommands int
+	TailBudget        int
+	TailAt            time.Time
+
+	// SampleCommands, SampleMergeCommands, SampleBudget and SampleAt are
+	// the same numbers for the last retry sample.
+	SampleCommands      int
+	SampleMergeCommands int
+	SampleBudget        int
+	SampleAt            time.Time
+}
+
+// Spend returns this replica's last-run command costs. Holder-local: a
+// standby that never ran a feeder reports zeros.
+func (ix *Indexer) Spend() Spend {
+	ix.spendMu.Lock()
+	defer ix.spendMu.Unlock()
+	return ix.spend
+}
+
+// recordTailSpend stores the finished tail sweep's cost.
+func (ix *Indexer) recordTailSpend(now time.Time, total, merge, budget int) {
+	ix.spendMu.Lock()
+	defer ix.spendMu.Unlock()
+	ix.spend.Budget = ix.cfg.CommandBudget
+	ix.spend.TailCommands = total
+	ix.spend.TailMergeCommands = merge
+	ix.spend.TailBudget = budget
+	ix.spend.TailAt = now
+}
+
+// recordSampleSpend stores the finished retry sample's cost.
+func (ix *Indexer) recordSampleSpend(now time.Time, total, merge, budget int) {
+	ix.spendMu.Lock()
+	defer ix.spendMu.Unlock()
+	ix.spend.Budget = ix.cfg.CommandBudget
+	ix.spend.SampleCommands = total
+	ix.spend.SampleMergeCommands = merge
+	ix.spend.SampleBudget = budget
+	ix.spend.SampleAt = now
 }
 
 // NewIndexer creates an Indexer. It does not touch Redis until Start (or one
@@ -565,9 +626,16 @@ func (ix *Indexer) SweepTailNow(ctx context.Context) error {
 	}
 	sort.Strings(trimmed)
 
-	if err := ix.mergeAndWrite(ctx, now, token, agg, failedTotal, trimmed, newCursors); err != nil {
+	mergeSpent, err := ix.mergeAndWrite(ctx, now, token, agg, failedTotal, trimmed, newCursors)
+	spent += mergeSpent
+	if err != nil {
 		return err
 	}
+	// The merge phase used to be invisible in the budget readout (#52.5):
+	// one ZRANGE, one HGETALL per tracked signature and the whole fenced
+	// write batch. It is counted now, so the health readout shows the real
+	// spend.
+	ix.recordTailSpend(now, spent, mergeSpent, budget)
 	return nil
 }
 
@@ -692,14 +760,16 @@ func (ix *Indexer) tailQueue(ctx context.Context, q string, cur tailCursor, maxS
 // archived observations, rolls every signature's trend snapshot (untouched
 // signatures must still roll toward a flat delta, or a dead signature would
 // read "growing" forever), and writes back only what changed.
-func (ix *Indexer) mergeAndWrite(ctx context.Context, now time.Time, token int64, agg map[string]*tailAccum, failedTotal int64, trimmed []string, newCursors map[string]string) error {
+func (ix *Indexer) mergeAndWrite(ctx context.Context, now time.Time, token int64, agg map[string]*tailAccum, failedTotal int64, trimmed []string, newCursors map[string]string) (int, error) {
+	spent := 1 // ZRANGE
 	indexSigs, err := ix.rc.ZRange(ctx, indexKey, 0, -1).Result()
 	if err != nil && !errors.Is(err, redis.Nil) {
-		return fmt.Errorf("reading signature index: %w", err)
+		return spent, fmt.Errorf("reading signature index: %w", err)
 	}
-	all, _, err := readSignatureHashes(ctx, ix.rc, indexSigs)
+	all, hgets, err := readSignatureHashes(ctx, ix.rc, indexSigs)
+	spent += hgets
 	if err != nil {
-		return fmt.Errorf("reading signature hashes: %w", err)
+		return spent, fmt.Errorf("reading signature hashes: %w", err)
 	}
 
 	writeSet := make(map[string]bool)
@@ -740,7 +810,7 @@ func (ix *Indexer) mergeAndWrite(ctx context.Context, now time.Time, token int64
 		s := all[sig]
 		fields, herr := s.toHash()
 		if herr != nil {
-			return fmt.Errorf("encoding signature %s: %w", sig, herr)
+			return spent, fmt.Errorf("encoding signature %s: %w", sig, herr)
 		}
 		cmds = append(cmds,
 			hsetCmd(sigKey(sig), fields),
@@ -759,7 +829,7 @@ func (ix *Indexer) mergeAndWrite(ctx context.Context, now time.Time, token int64
 
 	trimmedJSON, err := json.Marshal(trimmed)
 	if err != nil {
-		return fmt.Errorf("encoding trimmed queues: %w", err)
+		return spent, fmt.Errorf("encoding trimmed queues: %w", err)
 	}
 	cmds = append(cmds,
 		leasefence.Cmd{"HSET", metaKey,
@@ -779,28 +849,32 @@ func (ix *Indexer) mergeAndWrite(ctx context.Context, now time.Time, token int64
 		// TTL prune (90d, mirroring the archive) + population cap.
 		leasefence.Cmd{"ZREMRANGEBYSCORE", indexKey, "-inf", strconv.FormatInt(now.Add(-indexTTL).Unix(), 10)},
 		leasefence.Cmd{"PEXPIRE", indexKey, ttlMs})
+	spent += len(cmds)
 	ok, err := ix.fence.Exec(ctx, token, cmds)
 	if err != nil {
-		return fmt.Errorf("writing signature index: %w", err)
+		return spent, fmt.Errorf("writing signature index: %w", err)
 	}
 	if !ok {
 		ix.standDown(token)
-		return ErrSuperseded
+		return spent, ErrSuperseded
 	}
 
-	return ix.enforceCap(ctx, token)
+	capSpent, err := ix.enforceCap(ctx, token)
+	return spent + capSpent, err
 }
 
 // enforceCap evicts the lowest-last_seen signatures beyond maxSignatures
 // (fence-guarded like every index write).
-func (ix *Indexer) enforceCap(ctx context.Context, token int64) error {
+func (ix *Indexer) enforceCap(ctx context.Context, token int64) (int, error) {
+	spent := 1 // ZCARD
 	total, err := ix.rc.ZCard(ctx, indexKey).Result()
 	if err != nil || total <= maxSignatures {
-		return err
+		return spent, err
 	}
+	spent++ // ZRANGE
 	evict, err := ix.rc.ZRange(ctx, indexKey, 0, total-maxSignatures-1).Result()
 	if err != nil {
-		return err
+		return spent, err
 	}
 	cmds := make([]leasefence.Cmd, 0, 3*len(evict))
 	for _, sig := range evict {
@@ -809,15 +883,16 @@ func (ix *Indexer) enforceCap(ctx context.Context, token int64) error {
 			leasefence.Cmd{"ZREM", indexKey, sig},
 			leasefence.Cmd{"SREM", retrySigsKey, sig})
 	}
+	spent += len(cmds)
 	ok, err := ix.fence.Exec(ctx, token, cmds)
 	if err != nil {
-		return err
+		return spent, err
 	}
 	if !ok {
 		ix.standDown(token)
-		return ErrSuperseded
+		return spent, ErrSuperseded
 	}
-	return nil
+	return spent, nil
 }
 
 // ----------------------------------------------------------------------------
@@ -923,9 +998,11 @@ func (ix *Indexer) SampleRetryNow(ctx context.Context) error {
 	// — but only for cells in queues this run actually swept; a budgeted
 	// partial run must not zero contributions it never re-observed).
 	prev, err := ix.rc.SMembers(ctx, retrySigsKey).Result()
+	spent++ // SMEMBERS of the retry-sampled set (merge phase; #52.5)
 	if err != nil && !errors.Is(err, redis.Nil) {
 		return fmt.Errorf("reading retry-sampled set: %w", err)
 	}
+	mergeSpent := 1
 	union := make(map[string]bool, len(prev)+len(observed))
 	for _, sig := range prev {
 		union[sig] = true
@@ -939,7 +1016,9 @@ func (ix *Indexer) SampleRetryNow(ctx context.Context) error {
 	}
 	sort.Strings(sigsList)
 
-	existing, _, err := readSignatureHashes(ctx, ix.rc, sigsList)
+	existing, hgets, err := readSignatureHashes(ctx, ix.rc, sigsList)
+	spent += hgets
+	mergeSpent += hgets
 	if err != nil {
 		return fmt.Errorf("reading signature hashes: %w", err)
 	}
@@ -1025,6 +1104,8 @@ func (ix *Indexer) SampleRetryNow(ctx context.Context) error {
 		leasefence.Cmd{"HSET", metaKey, "sample_at", strconv.FormatInt(now.Unix(), 10)},
 		leasefence.Cmd{"PEXPIRE", metaKey, ttlMs},
 		leasefence.Cmd{"PEXPIRE", indexKey, ttlMs})
+	spent += len(cmds)
+	mergeSpent += len(cmds)
 	ok, err := ix.fence.Exec(ctx, token, cmds)
 	if err != nil {
 		return fmt.Errorf("writing retry sample: %w", err)
@@ -1033,5 +1114,6 @@ func (ix *Indexer) SampleRetryNow(ctx context.Context) error {
 		ix.standDown(token)
 		return ErrSuperseded
 	}
+	ix.recordSampleSpend(now, spent, mergeSpent, budget)
 	return nil
 }
