@@ -28,7 +28,7 @@ import {
   putHygieneConfig,
   runHygieneReport,
 } from "../api-hygiene";
-import { usePolling } from "../hooks";
+import { useLatestOnly, usePolling } from "../hooks";
 import {
   HYGIENE_KINDS,
   KIND_QUESTIONS,
@@ -553,17 +553,20 @@ export default function HygieneView() {
   const [pendingAction, setPendingAction] = useState<DeadLetterAction | null>(null);
   const readOnly = window.READ_ONLY;
 
+  const beginCardsFetch = useLatestOnly();
   const fetchCards = useCallback(async () => {
+    const isCurrent = beginCardsFetch();
     try {
       const resp = await listHygiene();
+      if (!isCurrent()) return; // a later fetch (poll or Run-now) resolved first
       // Server order is the display order; keep a defensive stable sort.
       const byKind = new Map(resp.reports.map((r) => [r.kind, r]));
       setCards(HYGIENE_KINDS.map((k) => byKind.get(k)).filter((c): c is HygieneCard => !!c));
       setLoadError("");
     } catch (e) {
-      setLoadError(toErrorString(e as never));
+      if (isCurrent()) setLoadError(toErrorString(e as never));
     }
-  }, []);
+  }, [beginCardsFetch]);
 
   usePolling(fetchCards, 15);
 

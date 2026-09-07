@@ -1,0 +1,1 @@
+import{g as e,i as t,u as n}from"./vendor-CRa7RDkM.js";import{J as r,jt as i}from"./index-kwXaYAvc.js";var a=t();function o(){let{qname:t,taskId:o}=e();return!t||!o?(0,a.jsx)(n,{to:r().TASKS,replace:!0}):(0,a.jsx)(n,{to:`${r().TASKS}${i(t,o)}`,replace:!0})}export{o as default};

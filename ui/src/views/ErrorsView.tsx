@@ -16,7 +16,7 @@ import { Link, useSearchParams } from "react-router-dom";
 import { useSelector } from "react-redux";
 import { Info } from "lucide-react";
 import { AppState } from "../store";
-import { usePolling } from "../hooks";
+import { useLatestOnly, usePolling } from "../hooks";
 import {
   ErrorSignatureRow,
   GetErrorSignatureResponse,
@@ -355,17 +355,21 @@ export default function ErrorsView() {
   // Bulk-verb modal state (§4.3 flow, shared machinery).
   const [job, setJob] = useState<{ verb: JobMutationVerb; scope: BulkJobScope } | null>(null);
 
+  const beginListFetch = useLatestOnly();
   const fetchList = useCallback(async () => {
+    const isCurrent = beginListFetch();
     try {
       const r = await listErrorSignatures({ sort, limit: 50 });
+      if (!isCurrent()) return; // a newer sort's fetch started meanwhile
       setResp(r);
       setError("");
     } catch (e) {
+      if (!isCurrent()) return;
       setError(toErrorString(e as Parameters<typeof toErrorString>[0]));
     } finally {
-      setLoading(false);
+      if (isCurrent()) setLoading(false);
     }
-  }, [sort]);
+  }, [sort, beginListFetch]);
 
   usePolling(fetchList, pollInterval, [sort]);
 

@@ -4,7 +4,7 @@
 // generated server-side (leased scheduler or Run-now) and persisted; these
 // calls only read/trigger — the browser never computes a report.
 
-import axios from "axios";
+import { http, seg } from "./api";
 
 // Same base-URL convention as api.ts / api-fleet.ts.
 const getBaseUrl = () =>
@@ -38,7 +38,7 @@ export interface ListHygieneResponse {
 }
 
 export async function listHygiene(): Promise<ListHygieneResponse> {
-  const resp = await axios({ method: "get", url: `${getBaseUrl()}/hygiene` });
+  const resp = await http({ method: "get", url: `${getBaseUrl()}/hygiene` });
   return resp.data;
 }
 
@@ -196,7 +196,7 @@ export interface HygieneReport {
 }
 
 export async function getHygieneReport(kind: HygieneKind): Promise<HygieneReport> {
-  const resp = await axios({ method: "get", url: `${getBaseUrl()}/hygiene/${kind}` });
+  const resp = await http({ method: "get", url: `${getBaseUrl()}/hygiene/${seg(kind)}` });
   return resp.data;
 }
 
@@ -208,7 +208,7 @@ export async function getHygieneReport(kind: HygieneKind): Promise<HygieneReport
 // Available in read-only mode — reports are reads; the trigger is
 // audit-logged server-side.
 export async function runHygieneReport(kind: HygieneKind): Promise<HygieneReport> {
-  const resp = await axios({ method: "post", url: `${getBaseUrl()}/hygiene/${kind}/run` });
+  const resp = await http({ method: "post", url: `${getBaseUrl()}/hygiene/${seg(kind)}/run` });
   return resp.data;
 }
 
@@ -225,9 +225,9 @@ export async function putHygieneConfig(
   kind: HygieneKind,
   config: HygieneConfig
 ): Promise<HygieneConfig & { kind: HygieneKind }> {
-  const resp = await axios({
+  const resp = await http({
     method: "put",
-    url: `${getBaseUrl()}/hygiene/${kind}/config`,
+    url: `${getBaseUrl()}/hygiene/${seg(kind)}/config`,
     data: config,
   });
   return resp.data;

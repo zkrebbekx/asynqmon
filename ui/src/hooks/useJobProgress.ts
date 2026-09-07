@@ -2,7 +2,11 @@
 // bulk-job modal). Primary transport is the `jobs` SSE event (useJobsEvents);
 // whenever the stream is not delivering this job, the hook falls back to
 // polling GET /api/jobs/:id every 2 seconds — the UI must work on polling
-// alone (same contract as useFleetEvents).
+// alone (same contract as useFleetEvents). The stream's own watchdog
+// (useJobsEvents) demotes `source` to "poll" after 45 s without a frame, so
+// a half-open connection re-enables this poll. While the stream covers the
+// job, `lastEventAt` drives a slow reconcile: one GET per 10 s once the
+// stream has said nothing about the job for 45 s.
 //
 // "Settled" is caller-defined (default: terminal state) because a preview
 // job's interesting end is the preview_ready park, which is not terminal.
@@ -30,6 +34,13 @@ export interface JobProgressSnapshot {
 }
 
 const FALLBACK_POLL_MS = 2_000;
+// While the stream covers the job but has been quiet about it for longer
+// than STALE_EVENT_MS, reconcile from GET /api/jobs/:id every
+// STALE_POLL_MS. A live stream (pings keep it up) says nothing about a job
+// that stopped progressing; a slow reconcile bounds how long the meter can
+// show a stale count.
+const STALE_POLL_MS = 10_000;
+const STALE_EVENT_MS = 45_000;
 
 const defaultSettled = (job: JobInfo) => isTerminalJobState(job.state);
 
@@ -101,6 +112,8 @@ export function useJobProgress(
   // stops for good once the job settles.
   const sseCovering = streamSource === "sse" && sseJob !== undefined;
   const settledNow = job !== null && settledRef.current(job);
+  const lastEventAtRef = useRef(lastEventAt);
+  lastEventAtRef.current = lastEventAt;
   useEffect(() => {
     if (!jobId) return;
     let disposed = false;
@@ -118,6 +131,10 @@ export function useJobProgress(
     let id: ReturnType<typeof setInterval> | null = null;
     if (!settledNow && !sseCovering) {
       id = setInterval(fetchNow, FALLBACK_POLL_MS);
+    } else if (!settledNow) {
+      id = setInterval(() => {
+        if (Date.now() - lastEventAtRef.current > STALE_EVENT_MS) fetchNow();
+      }, STALE_POLL_MS);
     }
     return () => {
       disposed = true;

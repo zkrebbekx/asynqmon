@@ -18,7 +18,14 @@
 //
 // Same resilience contract as useFleetEvents: the stream may 404/503 or drop
 // mid-incident — consumers must keep working on their poll fallbacks, and
-// the stream is retried with exponential backoff. Unlike the fleet
+// the stream is retried with exponential backoff.
+//
+// Liveness: the server emits `event: ping` every 15 s. A watchdog counts
+// every frame (jobs and ping) and, after 45 s of silence, publishes
+// source "poll" and reconnects. Without it a half-open TCP connection (VPN
+// drop, proxy idle kill) fires no `error` event for minutes and the
+// consumers that stand their polls down while `source === "sse"` froze
+// mid-progress. Unlike the fleet
 // aggregates, this feed is NOT gated on the live-updates pause pill: it
 // tracks operations the operator explicitly started (the same rule as the
 // Ops screen's tight progress polling).
@@ -38,6 +45,9 @@ export interface JobsEventsSnapshot {
 
 const INITIAL_BACKOFF_MS = 5_000;
 const MAX_BACKOFF_MS = 60_000;
+// Three missed server pings (15 s cadence) mean the connection is dead.
+export const WATCHDOG_MS = 45_000;
+const WATCHDOG_TICK_MS = 5_000;
 
 const INITIAL_SNAPSHOT: JobsEventsSnapshot = { jobs: {}, source: "poll", lastEventAt: 0 };
 
@@ -48,6 +58,10 @@ let es: EventSource | null = null;
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 let backoff = INITIAL_BACKOFF_MS;
 let refs = 0;
+let watchdogTimer: ReturnType<typeof setInterval> | null = null;
+// Epoch ms of the last frame of ANY kind on the open stream (jobs or ping);
+// the connect time until the first frame.
+let lastAnyEventAt = 0;
 const listeners = new Set<() => void>();
 
 function publish(next: JobsEventsSnapshot) {
@@ -55,8 +69,13 @@ function publish(next: JobsEventsSnapshot) {
   for (const l of listeners) l();
 }
 
+function onPing() {
+  lastAnyEventAt = Date.now();
+}
+
 function onJobs(e: MessageEvent) {
   backoff = INITIAL_BACKOFF_MS;
+  lastAnyEventAt = Date.now();
   let incoming: JobInfo[];
   try {
     incoming = (JSON.parse(e.data) as { jobs?: JobInfo[] }).jobs ?? [];
@@ -77,18 +96,37 @@ function onJobs(e: MessageEvent) {
   publish({ jobs, source: "sse", lastEventAt: Date.now() });
 }
 
+// closeStream tears the connection down. When `retry` is set and a consumer
+// is still attached, it demotes the consumers to polling and schedules a
+// reconnect with backoff.
+function closeStream(retry: boolean) {
+  es?.close();
+  es = null;
+  if (watchdogTimer !== null) {
+    clearInterval(watchdogTimer);
+    watchdogTimer = null;
+  }
+  if (!retry || refs === 0) return;
+  publish({ ...snapshot, source: "poll" });
+  if (reconnectTimer !== null) clearTimeout(reconnectTimer);
+  reconnectTimer = setTimeout(openStream, backoff);
+  backoff = Math.min(backoff * 2, MAX_BACKOFF_MS);
+}
+
+function watchdogCheck() {
+  if (es === null) return;
+  if (Date.now() - lastAnyEventAt > WATCHDOG_MS) closeStream(true);
+}
+
 function openStream() {
   if (refs === 0 || es !== null || typeof EventSource === "undefined") return;
+  reconnectTimer = null;
   es = new EventSource(fleetEventsUrl());
+  lastAnyEventAt = Date.now();
   es.addEventListener("jobs", onJobs);
-  es.onerror = () => {
-    es?.close();
-    es = null;
-    if (refs === 0) return;
-    publish({ ...snapshot, source: "poll" });
-    reconnectTimer = setTimeout(openStream, backoff);
-    backoff = Math.min(backoff * 2, MAX_BACKOFF_MS);
-  };
+  es.addEventListener("ping", onPing);
+  es.onerror = () => closeStream(true);
+  watchdogTimer = setInterval(watchdogCheck, WATCHDOG_TICK_MS);
 }
 
 function acquire(): () => void {
@@ -100,15 +138,13 @@ function acquire(): () => void {
     released = true;
     refs--;
     if (refs > 0) return;
-    if (es !== null) {
-      es.close();
-      es = null;
-    }
+    closeStream(false);
     if (reconnectTimer !== null) {
       clearTimeout(reconnectTimer);
       reconnectTimer = null;
     }
     backoff = INITIAL_BACKOFF_MS;
+    lastAnyEventAt = 0;
     snapshot = INITIAL_SNAPSHOT; // remounts/tests start clean
   };
 }

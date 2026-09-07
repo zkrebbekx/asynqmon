@@ -16,7 +16,7 @@ import { useLocation, useNavigate, useParams } from "react-router-dom";
 import { Search, AlertTriangle } from "lucide-react";
 import { AppState } from "../store";
 import * as api from "../api";
-import { DailyStat, JobMutationVerb, TaskInfo } from "../api";
+import { DailyStat, JobMutationVerb, TaskInfo, UNADDRESSABLE_NAME_NOTICE, isAddressableName } from "../api";
 import {
   CoverageRow,
   FleetQueueRow,
@@ -87,6 +87,12 @@ export default function TasksView() {
   const pollInterval = useSelector((s: AppState) => s.settings.pollInterval);
 
   const { tab, focus } = parseWorkspaceParams(query);
+
+  // The API addresses a queue with one path segment, so a name that contains
+  // "/" reaches no route, not even escaped as "%2F" (#49). Reads and writes
+  // for such a queue would hit a different route, so every mutating control
+  // is disabled and the header says why.
+  const addressable = isAddressableName(queue);
 
   // ---------- polled data ----------
   const [counts, setCounts] = useState<Record<string, number> | null>(null);
@@ -271,8 +277,15 @@ export default function TasksView() {
 
   // ---------- bulk-job modal (§4.3, pre-scoped to this queue) ----------
   const [bulk, setBulk] = useState<BulkTarget | null>(null);
+  // Every bulk verb goes through openBulk, which is inert for an
+  // unaddressable queue name (#49): the job's own reads would hit the wrong
+  // route.
+  const openBulk = (target: BulkTarget) => {
+    if (!addressable) return;
+    setBulk(target);
+  };
   const onClusterVerb = (verb: JobMutationVerb, state: "retry" | "archived", signature: string) =>
-    setBulk({ verb, state, aql: `error~${quoteAqlValue(signature)}` });
+    openBulk({ verb, state, aql: `error~${quoteAqlValue(signature)}` });
 
   const countLabel = (t: WorkspaceTab): string => {
     if (t === "attention") return "";
@@ -301,6 +314,20 @@ export default function TasksView() {
         </div>
       )}
 
+      {/* Unaddressable queue name (#49): non-blocking notice, mutating
+          controls off. */}
+      {!addressable && (
+        <div
+          role="status"
+          className="flex items-start gap-2 rounded-lg border border-[var(--fc-warn)]/40 bg-[var(--fc-warn-bg)] px-3 py-2.5 text-xs text-[var(--fc-ink2)]"
+        >
+          <AlertTriangle size={14} className="mt-0.5 shrink-0 text-[var(--fc-warn)]" />
+          <span>
+            <b className="font-mono">{queue}</b>: {UNADDRESSABLE_NAME_NOTICE}
+          </span>
+        </div>
+      )}
+
       {/* A. Header health strip */}
       <WorkspaceHealthStrip
         qname={queue}
@@ -309,9 +336,9 @@ export default function TasksView() {
         counts={counts}
         coverageRow={coverageRow}
         nowMs={nowMs}
-        onPause={window.READ_ONLY ? undefined : () => doPauseResume("pause")}
-        onResume={window.READ_ONLY ? undefined : () => doPauseResume("resume")}
-        onDelete={window.READ_ONLY ? undefined : () => setConfirmDeleteQueue(true)}
+        onPause={window.READ_ONLY || !addressable ? undefined : () => doPauseResume("pause")}
+        onResume={window.READ_ONLY || !addressable ? undefined : () => doPauseResume("resume")}
+        onDelete={window.READ_ONLY || !addressable ? undefined : () => setConfirmDeleteQueue(true)}
         mutating={queueMutating}
       />
       <ConfirmDialog
@@ -393,7 +420,7 @@ export default function TasksView() {
               healthySentence={healthySummary(fleetRow, history, nowMs)}
               nowMs={nowMs}
               onOpenTab={(state: FocusState) => openTab(state)}
-              onPaceRetries={() => setBulk({ verb: "run", state: "retry" })}
+              onPaceRetries={() => openBulk({ verb: "run", state: "retry" })}
             />
           )}
           {tab === "active" && (
@@ -401,7 +428,7 @@ export default function TasksView() {
               key={queue}
               queue={queue}
               totalTaskCount={counts?.active ?? 0}
-              onWholeScopeVerb={(verb) => setBulk({ verb, state: "active" })}
+              onWholeScopeVerb={addressable ? (verb) => openBulk({ verb, state: "active" }) : undefined}
             />
           )}
           {tab === "pending" && (
@@ -409,7 +436,7 @@ export default function TasksView() {
               key={queue}
               queue={queue}
               totalTaskCount={counts?.pending ?? 0}
-              onWholeScopeVerb={(verb) => setBulk({ verb, state: "pending" })}
+              onWholeScopeVerb={addressable ? (verb) => openBulk({ verb, state: "pending" }) : undefined}
             />
           )}
           {tab === "aggregating" && (
@@ -420,7 +447,7 @@ export default function TasksView() {
               key={queue}
               queue={queue}
               totalTaskCount={counts?.scheduled ?? 0}
-              onWholeScopeVerb={(verb) => setBulk({ verb, state: "scheduled" })}
+              onWholeScopeVerb={addressable ? (verb) => openBulk({ verb, state: "scheduled" }) : undefined}
             />
           )}
           {tab === "retry" && (
@@ -428,7 +455,7 @@ export default function TasksView() {
               key={queue}
               queue={queue}
               totalTaskCount={counts?.retry ?? 0}
-              onWholeScopeVerb={(verb) => setBulk({ verb, state: "retry" })}
+              onWholeScopeVerb={addressable ? (verb) => openBulk({ verb, state: "retry" }) : undefined}
             />
           )}
           {tab === "archived" && (
@@ -436,7 +463,7 @@ export default function TasksView() {
               key={queue}
               queue={queue}
               totalTaskCount={counts?.archived ?? 0}
-              onWholeScopeVerb={(verb) => setBulk({ verb, state: "archived" })}
+              onWholeScopeVerb={addressable ? (verb) => openBulk({ verb, state: "archived" }) : undefined}
             />
           )}
           {tab === "completed" && (
@@ -444,7 +471,7 @@ export default function TasksView() {
               key={queue}
               queue={queue}
               totalTaskCount={counts?.completed ?? 0}
-              onWholeScopeVerb={(verb) => setBulk({ verb, state: "completed" })}
+              onWholeScopeVerb={addressable ? (verb) => openBulk({ verb, state: "completed" }) : undefined}
             />
           )}
         </div>

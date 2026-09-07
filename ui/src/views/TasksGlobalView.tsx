@@ -6,7 +6,7 @@ import { Search, Play, Trash2, Archive, X, ChevronLeft, ChevronRight, Tag, Clock
 import { AppState, useAppDispatch } from "../store";
 import { listQueuesAsync } from "../actions/queuesActions";
 import * as api from "../api";
-import { TaskInfo } from "../api";
+import { TaskInfo, UNADDRESSABLE_NAME_NOTICE, isAddressableName } from "../api";
 import { prettifyPayload, toErrorString, uuidPrefix } from "../utils";
 import { metaId, MetaPair } from "../lib/metadata";
 import {
@@ -548,7 +548,12 @@ export default function TasksGlobalView() {
     });
 
   const acts = actionFns[view.state];
+  // A queue name that contains "/" fits no single-segment API route (#49).
+  // Row actions are hidden for such a row, and the whole-scope bar is off
+  // while the console is scoped to such a queue.
+  const scopeAddressable = view.queue === "" || isAddressableName(view.queue);
   const runAction = async (fn: ActionFn, queue: string, id: string) => {
+    if (!isAddressableName(queue)) return;
     try {
       await fn(queue, id);
       setError("");
@@ -757,7 +762,7 @@ export default function TasksGlobalView() {
     if (!verb) return;
     const fn = acts[verb];
     if (!fn) return;
-    const targets = selectedTasks;
+    const targets = selectedTasks.filter((t) => isAddressableName(t.queue));
     try {
       await Promise.all(targets.map((t) => fn(t.queue, t.id)));
       setError("");
@@ -1084,7 +1089,7 @@ export default function TasksGlobalView() {
           async preview, cost disclosure, throttle, mandatory reason, gated
           execute — and runs as a background job on the Operations screen.
           Visually distinct from row actions and red-guarded for delete. */}
-      {!window.READ_ONLY && (jobResultsMode ? jobTotal : total) > 0 && bulkActions.length > 0 && (
+      {!window.READ_ONLY && scopeAddressable && (jobResultsMode ? jobTotal : total) > 0 && bulkActions.length > 0 && (
         <div className="flex flex-wrap items-center gap-2 rounded-lg border border-dashed border-[var(--fc-warn)]/50 bg-[var(--fc-warn-bg)]/40 px-4 py-2">
           <span className="text-xs text-[var(--fc-ink2)]">
             Whole scope — all{" "}
@@ -1136,6 +1141,20 @@ export default function TasksGlobalView() {
             fetchAnalytics();
           }}
         />
+      )}
+
+      {/* Unaddressable queue name (#49): non-blocking notice, mutating
+          actions off for the affected scope and rows. */}
+      {!scopeAddressable && (
+        <div
+          role="status"
+          className="flex items-start gap-2 rounded-lg border border-[var(--fc-warn)]/40 bg-[var(--fc-warn-bg)] px-3 py-2.5 text-xs text-[var(--fc-ink2)]"
+        >
+          <AlertCircle size={14} className="mt-0.5 shrink-0 text-[var(--fc-warn)]" />
+          <span>
+            <b className="font-mono">{view.queue}</b>: {UNADDRESSABLE_NAME_NOTICE}
+          </span>
+        </div>
       )}
 
       {error && (
@@ -1372,6 +1391,14 @@ export default function TasksGlobalView() {
                     </TableCell>
                     {!window.READ_ONLY && (
                       <TableCell className="text-center" onClick={(e) => e.stopPropagation()}>
+                        {!isAddressableName(t.queue) ? (
+                          <span
+                            className="text-[10.5px] text-[var(--fc-ink3)]"
+                            title={UNADDRESSABLE_NAME_NOTICE}
+                          >
+                            unaddressable
+                          </span>
+                        ) : (
                         <TooltipProvider>
                           <div className="flex items-center justify-center gap-1">
                             {acts.run && (
@@ -1404,6 +1431,7 @@ export default function TasksGlobalView() {
                             )}
                           </div>
                         </TooltipProvider>
+                        )}
                       </TableCell>
                     )}
                   </TableRow>

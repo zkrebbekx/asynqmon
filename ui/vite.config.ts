@@ -35,11 +35,32 @@ export default defineConfig(({ command }) => ({
     chunkSizeWarningLimit: 600,
     rollupOptions: {
       output: {
-        manualChunks(id: string) {
-          if (id.includes('node_modules')) {
-            if (id.includes('recharts') || id.includes('d3-') || id.includes('victory')) return 'recharts';
-            if (/[\\/](react|react-dom|react-router|react-router-dom|react-redux|redux)[\\/]/.test(id)) return 'vendor';
-          }
+        // Chunk groups are the rolldown-native form of the old rollup
+        // `manualChunks` callback. Vite 8 bundles with rolldown, which
+        // IGNORES a `manualChunks` return for a module that another group
+        // already claims — the callback could not move Redux Toolkit out of
+        // the recharts chunk (issue #50). A group with a higher priority
+        // wins, and one name must appear only once: two groups named
+        // "vendor" made the second one lose, which dropped react-dom into
+        // the recharts chunk and made the entry import all 500 kB of it.
+        codeSplitting: {
+          groups: [
+            {
+              // Everything the entry needs on every route. Redux Toolkit and
+              // its deps sit here, NOT with recharts: recharts 3 depends on
+              // them too, and store.ts makes them entry-reachable.
+              name: 'vendor',
+              test: /[\\/]node_modules[\\/](@reduxjs|immer|reselect|redux-thunk|use-sync-external-store|react|react-dom|react-router|react-router-dom|react-redux|redux|scheduler|clsx|tailwind-merge|class-variance-authority)[\\/]/,
+              priority: 30,
+            },
+            {
+              // recharts is loaded by the lazy Metrics view alone. Keep it in
+              // its own cacheable chunk that no eager module imports.
+              name: 'recharts',
+              test: /[\\/]node_modules[\\/](recharts|d3-|victory)/,
+              priority: 20,
+            },
+          ],
         },
       },
     },

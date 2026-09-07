@@ -5,9 +5,9 @@
 // (404/503) while the backend lands, so callers surface errors instead of
 // assuming data.
 
-import axios from "axios";
 import queryString from "query-string";
 
+import { http, seg } from "./api";
 import type { SchedulerEntry, TaskInfo } from "./api";
 
 // Same base-URL convention as api.ts: production serves the API on the same
@@ -64,7 +64,7 @@ export interface FleetOverviewResponse {
 }
 
 export async function getFleetOverview(): Promise<FleetOverviewResponse> {
-  const resp = await axios({ method: "get", url: `${getBaseUrl()}/fleet/overview` });
+  const resp = await http({ method: "get", url: `${getBaseUrl()}/fleet/overview` });
   return resp.data;
 }
 
@@ -121,7 +121,7 @@ export async function listFleetQueues(
     { url: `${getBaseUrl()}/fleet/queues`, query: { ...query } },
     { skipEmptyString: true }
   );
-  const resp = await axios({ method: "get", url });
+  const resp = await http({ method: "get", url });
   return resp.data;
 }
 
@@ -164,7 +164,7 @@ export interface FleetAttentionResponse {
 }
 
 export async function getFleetAttention(): Promise<FleetAttentionResponse> {
-  const resp = await axios({ method: "get", url: `${getBaseUrl()}/fleet/attention` });
+  const resp = await http({ method: "get", url: `${getBaseUrl()}/fleet/attention` });
   return resp.data;
 }
 
@@ -201,7 +201,7 @@ export interface CoverageResponse {
 }
 
 export async function getCoverage(): Promise<CoverageResponse> {
-  const resp = await axios({ method: "get", url: `${getBaseUrl()}/coverage` });
+  const resp = await http({ method: "get", url: `${getBaseUrl()}/coverage` });
   return resp.data;
 }
 
@@ -219,7 +219,7 @@ export interface CancelListenersResponse {
 }
 
 export async function getCancelListeners(): Promise<CancelListenersResponse> {
-  const resp = await axios({ method: "get", url: `${getBaseUrl()}/cancel-listeners` });
+  const resp = await http({ method: "get", url: `${getBaseUrl()}/cancel-listeners` });
   return resp.data;
 }
 
@@ -255,7 +255,7 @@ export interface SchedulersResponse {
 }
 
 export async function listSchedulers(): Promise<SchedulersResponse> {
-  const resp = await axios({ method: "get", url: `${getBaseUrl()}/schedulers` });
+  const resp = await http({ method: "get", url: `${getBaseUrl()}/schedulers` });
   return resp.data;
 }
 
@@ -293,9 +293,9 @@ export interface SchedulerOutcomesResponse {
 export async function getSchedulerOutcomes(
   stableKey: string
 ): Promise<SchedulerOutcomesResponse> {
-  const resp = await axios({
+  const resp = await http({
     method: "get",
-    url: `${getBaseUrl()}/schedulers/${stableKey}/outcomes`,
+    url: `${getBaseUrl()}/schedulers/${seg(stableKey)}/outcomes`,
   });
   return resp.data;
 }
@@ -323,9 +323,9 @@ export async function runSchedulerEntry(
   stableKey: string,
   reason?: string
 ): Promise<RunSchedulerEntryResponse> {
-  const resp = await axios({
+  const resp = await http({
     method: "post",
-    url: `${getBaseUrl()}/schedulers/${stableKey}/run`,
+    url: `${getBaseUrl()}/schedulers/${seg(stableKey)}/run`,
     data: reason ? { reason } : {},
   });
   return resp.data;
@@ -356,9 +356,9 @@ export async function getRetryHistogram(
   if (opts?.window) usp.set("window", String(opts.window));
   if (opts?.buckets) usp.set("buckets", String(opts.buckets));
   const qs = usp.toString();
-  const resp = await axios({
+  const resp = await http({
     method: "get",
-    url: `${getBaseUrl()}/queues/${qname}/retry_histogram${qs ? `?${qs}` : ""}`,
+    url: `${getBaseUrl()}/queues/${seg(qname)}/retry_histogram${qs ? `?${qs}` : ""}`,
   });
   return resp.data;
 }
@@ -386,9 +386,9 @@ export async function getPendingWaitSample(
   probes?: number
 ): Promise<PendingWaitSampleResponse> {
   const qs = probes ? `?probes=${probes}` : "";
-  const resp = await axios({
+  const resp = await http({
     method: "get",
-    url: `${getBaseUrl()}/queues/${qname}/pending_wait_sample${qs}`,
+    url: `${getBaseUrl()}/queues/${seg(qname)}/pending_wait_sample${qs}`,
   });
   return resp.data;
 }
@@ -450,7 +450,7 @@ export interface HealthRolesResponse {
 }
 
 export async function getHealthRoles(): Promise<HealthRolesResponse> {
-  const resp = await axios({ method: "get", url: `${getBaseUrl()}/health/roles` });
+  const resp = await http({ method: "get", url: `${getBaseUrl()}/health/roles` });
   return resp.data;
 }
 

@@ -2,7 +2,7 @@
 // deploy markers (phase 10). Points are period-aligned; v === null means
 // NO-SAMPLE — a slot that was never flushed. Renderers must gap, never zero.
 
-import axios from "axios";
+import { http } from "./api";
 
 const getBaseUrl = () =>
   import.meta.env.PROD
@@ -45,7 +45,7 @@ export async function getSeries(spec: SeriesSpec): Promise<SeriesResponse> {
     window: spec.window,
   });
   if (spec.points) usp.set("points", String(spec.points));
-  const resp = await axios({ method: "get", url: `${getBaseUrl()}/series?${usp}` });
+  const resp = await http({ method: "get", url: `${getBaseUrl()}/series?${usp}` });
   return resp.data;
 }
 
@@ -59,7 +59,7 @@ export interface SeriesBatchResponse {
 
 export async function getSeriesBatch(specs: SeriesSpec[]): Promise<SeriesBatchResponse> {
   const usp = new URLSearchParams({ specs: JSON.stringify(specs) });
-  const resp = await axios({ method: "get", url: `${getBaseUrl()}/series/batch?${usp}` });
+  const resp = await http({ method: "get", url: `${getBaseUrl()}/series/batch?${usp}` });
   return resp.data;
 }
 
@@ -79,7 +79,7 @@ export interface ListMarkersResponse {
 }
 
 export async function listMarkers(window: SeriesWindow = "24h"): Promise<ListMarkersResponse> {
-  const resp = await axios({
+  const resp = await http({
     method: "get",
     url: `${getBaseUrl()}/markers?window=${window}`,
   });
@@ -87,7 +87,7 @@ export async function listMarkers(window: SeriesWindow = "24h"): Promise<ListMar
 }
 
 export async function createMarker(label: string): Promise<DeployMarker> {
-  const resp = await axios({
+  const resp = await http({
     method: "post",
     url: `${getBaseUrl()}/markers`,
     data: { label },

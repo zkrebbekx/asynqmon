@@ -62,6 +62,9 @@ class MockEventSource {
   emitJobs(jobs: JobInfo[]) {
     this.listeners["jobs"]?.({ data: JSON.stringify({ jobs }) } as MessageEvent);
   }
+  emitPing() {
+    this.listeners["ping"]?.({ data: "{}" } as MessageEvent);
+  }
   fail() {
     this.onerror?.();
   }
@@ -197,6 +200,69 @@ describe("useJobProgress", () => {
       MockEventSource.instances[0].emitJobs([makeJob({ state: "previewing" })])
     );
     expect(result.current.job?.state).toBe("canceled");
+  });
+
+  it("demotes a silent stream to polling after 45 s and reconnects (#51)", async () => {
+    vi.useFakeTimers();
+    const { result } = renderHook(() => useJobProgress("jb_1"));
+    await act(async () => {});
+    act(() => MockEventSource.instances[0].emitJobs([makeJob()]));
+    expect(result.current.source).toBe("sse");
+    const callsBefore = mockGetJob.mock.calls.length;
+    // No jobs frame and no ping for 60 s: the watchdog closes the stream.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(60_000);
+    });
+    expect(result.current.source).toBe("poll");
+    expect(MockEventSource.instances[0].closed).toBe(true);
+    // The 2 s fallback poll is back on.
+    expect(mockGetJob.mock.calls.length).toBeGreaterThan(callsBefore);
+    // A reconnect attempt follows (5 s initial backoff, already elapsed).
+    expect(MockEventSource.instances.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("counts ping frames as liveness: the stream stays the source", async () => {
+    vi.useFakeTimers();
+    const { result } = renderHook(() => useJobProgress("jb_1"));
+    await act(async () => {});
+    act(() => MockEventSource.instances[0].emitJobs([makeJob()]));
+    expect(result.current.source).toBe("sse");
+    // Four ping frames at the server cadence over 60 s, no jobs frame.
+    for (let i = 0; i < 4; i++) {
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(15_000);
+      });
+      act(() => MockEventSource.instances[0].emitPing());
+    }
+    expect(result.current.source).toBe("sse");
+    expect(MockEventSource.instances[0].closed).toBe(false);
+    expect(MockEventSource.instances).toHaveLength(1);
+  });
+
+  it("reconciles from GET once the live stream is quiet about the job for 45 s", async () => {
+    vi.useFakeTimers();
+    renderHook(() => useJobProgress("jb_1"));
+    await act(async () => {});
+    act(() => MockEventSource.instances[0].emitJobs([makeJob()]));
+    await act(async () => {});
+    const callsAfterSwitch = mockGetJob.mock.calls.length;
+    // Pings keep the stream alive; no reconcile inside the first 45 s.
+    for (let i = 0; i < 3; i++) {
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(14_000);
+      });
+      act(() => MockEventSource.instances[0].emitPing());
+    }
+    expect(mockGetJob.mock.calls.length).toBe(callsAfterSwitch);
+    // Past 45 s of job silence the slow 10 s reconcile fetches.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(10_000);
+    });
+    act(() => MockEventSource.instances[0].emitPing());
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(10_000);
+    });
+    expect(mockGetJob.mock.calls.length).toBeGreaterThan(callsAfterSwitch);
   });
 
   it("keeps working on polling alone when the stream errors", async () => {

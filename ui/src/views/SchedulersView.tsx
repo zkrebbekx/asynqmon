@@ -19,7 +19,7 @@ import { ChevronDown, ChevronRight, Loader2, Play } from "lucide-react";
 import { useSelector } from "react-redux";
 import { toast } from "sonner";
 import { AppState } from "../store";
-import { usePolling, useQuery } from "../hooks";
+import { useLatestOnly, usePolling, useQuery } from "../hooks";
 import { useEnqueueEnabled } from "../hooks/useFeatures";
 import {
   listSchedulers,
@@ -397,15 +397,20 @@ export default function SchedulersView() {
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [nowMs, setNowMs] = useState(Date.now());
 
+  const beginRowsFetch = useLatestOnly();
   const fetchRows = useCallback(() => {
-    listSchedulers()
+    const isCurrent = beginRowsFetch();
+    return listSchedulers()
       .then((r) => {
+        if (!isCurrent()) return; // a later poll already resolved
         setRows(r.entries ?? []);
         setError("");
         setNowMs(Date.now());
       })
-      .catch((e) => setError(toErrorString(e)));
-  }, []);
+      .catch((e) => {
+        if (isCurrent()) setError(toErrorString(e));
+      });
+  }, [beginRowsFetch]);
   usePolling(fetchRows, pollInterval);
 
   const toggle = (key: string) =>
@@ -507,12 +512,18 @@ function ConsoleSchedulesPanel() {
   const pollInterval = useSelector((s: AppState) => s.settings.pollInterval);
   const [cards, setCards] = useState<HygieneCard[] | null>(null);
 
+  const beginCardsFetch = useLatestOnly();
   const fetchCards = useCallback(() => {
-    listHygiene()
-      .then((r) => setCards(r.reports ?? []))
+    const isCurrent = beginCardsFetch();
+    return listHygiene()
+      .then((r) => {
+        if (isCurrent()) setCards(r.reports ?? []);
+      })
       // Non-fatal: the panel simply stays hidden if hygiene is unreachable.
-      .catch(() => setCards(null));
-  }, []);
+      .catch(() => {
+        if (isCurrent()) setCards(null);
+      });
+  }, [beginCardsFetch]);
   usePolling(fetchCards, pollInterval);
 
   if (cards === null || cards.length === 0) return null;
