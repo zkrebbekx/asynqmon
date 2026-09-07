@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"log"
 	"sort"
 	"strconv"
 	"time"
@@ -240,6 +241,49 @@ func seedSystemViews(ctx context.Context, store viewStore) error {
 		}
 	}
 	return nil
+}
+
+// Background seeding schedule (see seedSystemViewsInBackground).
+const (
+	seedAttemptTimeout = 3 * time.Second
+	seedBackoffInitial = time.Second
+	seedBackoffMax     = 30 * time.Second
+)
+
+// seedSystemViewsInBackground runs seedSystemViews from a goroutine so the
+// handler constructor never blocks on Redis. Each attempt gets
+// seedAttemptTimeout. A failed attempt is retried after a backoff that
+// doubles from seedBackoffInitial up to seedBackoffMax. The goroutine
+// stops after the first success or when ctx is canceled. The returned
+// channel closes when the goroutine exits.
+func seedSystemViewsInBackground(ctx context.Context, store viewStore) <-chan struct{} {
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		backoff := seedBackoffInitial
+		for {
+			attemptCtx, cancel := context.WithTimeout(ctx, seedAttemptTimeout)
+			err := seedSystemViews(attemptCtx, store)
+			cancel()
+			if err == nil {
+				return
+			}
+			if ctx.Err() != nil {
+				return
+			}
+			log.Printf("asynqmon: seeding system views failed, retry in %s: %v", backoff, err)
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(backoff):
+			}
+			backoff *= 2
+			if backoff > seedBackoffMax {
+				backoff = seedBackoffMax
+			}
+		}
+	}()
+	return done
 }
 
 // sortViewsForDisplay orders system views first (shipped order), then user
