@@ -492,3 +492,50 @@ func TestPendingSinceUnknownCounted(t *testing.T) {
 		})
 	})
 }
+
+// ----------------------------------------------------------------------------
+// #39 — a scan stops when the client goes away
+// ----------------------------------------------------------------------------
+
+func TestScanStopsOnCanceledContext(t *testing.T) {
+	env := newLimitsTestEnv(t)
+	const seeded = 1200 // more than one 1000-task listing page
+	env.seed(t, "ctxq", "ctx:x", `{}`, seeded)
+
+	// Cancel from inside the sink, as a disconnecting client would: the scan
+	// must not list the next page.
+	ctx, cancel := context.WithCancel(context.Background())
+	matches := 0
+	matched, scanned, truncated, err := scanMatchingTasks(ctx, env.insp, []string{"ctxq"}, "pending", "", nil, 20000, DefaultPayloadFormatter,
+		func(st *searchTask) bool {
+			matches++
+			if matches == 1 {
+				cancel()
+			}
+			return true
+		})
+	cancel()
+
+	// A context canceled before the scan starts costs no listing at all.
+	deadCtx, deadCancel := context.WithCancel(context.Background())
+	deadCancel()
+	_, deadScanned, _, deadErr := scanMatchingTasks(deadCtx, env.insp, []string{"ctxq"}, "pending", "", nil, 20000, DefaultPayloadFormatter,
+		func(st *searchTask) bool { return true })
+
+	Convey("Given 1200 pending tasks and a client that disconnects", t, func() {
+		Convey("When the context is canceled during the first page", func() {
+			Convey("Then the scan stops after that page and reports the cancellation", func() {
+				So(err, ShouldEqual, context.Canceled)
+				So(truncated, ShouldBeTrue)
+				So(scanned, ShouldEqual, searchBatchSize)
+				So(matched, ShouldEqual, searchBatchSize)
+			})
+		})
+		Convey("When the context is already canceled", func() {
+			Convey("Then no page is listed at all", func() {
+				So(deadErr, ShouldEqual, context.Canceled)
+				So(deadScanned, ShouldEqual, 0)
+			})
+		})
+	})
+}
