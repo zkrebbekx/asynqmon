@@ -156,6 +156,67 @@ func TestPushEntryID(t *testing.T) {
 	})
 }
 
+// TestSchedulerGoneThreshold pins the GONE threshold to the asynq heartbeat
+// contract (#44). asynq 0.25+ beats every 10s and writes its entry key with a
+// TTL of two heartbeats (20s), and it publishes on the FIRST tick, so a live
+// scheduler can be invisible for 20s and a restarting one for longer. A 10s
+// (or 30s) assumption flagged a healthy 0.26 scheduler as GONE.
+func TestSchedulerGoneThreshold(t *testing.T) {
+	Convey("Given the asynq 0.25+ heartbeat contract", t, func() {
+		Convey("Then the fork mirrors the heartbeat and entry TTL it depends on", func() {
+			So(asynqSchedulerHeartbeat, ShouldEqual, 10*time.Second)
+			So(asynqSchedulerEntryTTL, ShouldEqual, 20*time.Second)
+		})
+
+		Convey("Then the GONE threshold covers the entry TTL plus two heartbeats", func() {
+			So(DefaultSchedulerGoneAfter, ShouldEqual, 40*time.Second)
+			So(DefaultSchedulerGoneAfter, ShouldBeGreaterThan, asynqSchedulerEntryTTL)
+		})
+	})
+
+	Convey("Given a snapshot with no live counterpart", t, func() {
+		goneAfter := DefaultSchedulerGoneAfter
+
+		Convey("When the entry has been silent for one 0.26 entry TTL (20s)", func() {
+			gone, prune := schedulerSnapshotState(asynqSchedulerEntryTTL, goneAfter)
+			Convey("Then it is NOT gone: one late heartbeat hides a live scheduler", func() {
+				So(gone, ShouldBeFalse)
+				So(prune, ShouldBeFalse)
+			})
+		})
+
+		Convey("When the entry has been silent for a restart (TTL + one heartbeat)", func() {
+			gone, _ := schedulerSnapshotState(asynqSchedulerEntryTTL+asynqSchedulerHeartbeat, goneAfter)
+			Convey("Then it is still not gone", func() {
+				So(gone, ShouldBeFalse)
+			})
+		})
+
+		Convey("When the age sits exactly on the threshold", func() {
+			gone, _ := schedulerSnapshotState(goneAfter, goneAfter)
+			Convey("Then it is not gone (the comparison is strict)", func() {
+				So(gone, ShouldBeFalse)
+			})
+		})
+
+		Convey("When the age passes the threshold by one second", func() {
+			gone, prune := schedulerSnapshotState(goneAfter+time.Second, goneAfter)
+			Convey("Then the entry is GONE and not pruned", func() {
+				So(gone, ShouldBeTrue)
+				So(prune, ShouldBeFalse)
+			})
+		})
+
+		Convey("When the age passes the retention horizon", func() {
+			gone, prune := schedulerSnapshotState(schedulerSnapshotHorizon+time.Hour, goneAfter)
+			Convey("Then the snapshot is pruned instead of reported", func() {
+				So(prune, ShouldBeTrue)
+				So(gone, ShouldBeFalse)
+			})
+		})
+	})
+}
+
 func TestSchedulerGoneDetector(t *testing.T) {
 	Convey("Given a GONE observation handed to the attention evaluator", t, func() {
 		now := time.Date(2026, 7, 25, 15, 0, 0, 0, time.UTC)

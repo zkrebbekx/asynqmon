@@ -31,12 +31,29 @@ import (
 // ****************************************************************************
 
 const (
+	// asynqSchedulerHeartbeat is the default heartbeat interval of an asynq
+	// scheduler (asynq >= 0.25: scheduler.go defaultHeartbeatInterval). A
+	// scheduler publishes its entries on its FIRST heartbeat tick, so a
+	// freshly started scheduler is silent for one interval.
+	asynqSchedulerHeartbeat = 10 * time.Second
+
+	// asynqSchedulerEntryTTL is the TTL an asynq scheduler puts on its entry
+	// key: two heartbeat intervals (rdb.WriteSchedulerEntries is called with
+	// heartbeatInterval*2). One late heartbeat therefore hides the entries
+	// for up to this long even though the scheduler is alive.
+	asynqSchedulerEntryTTL = 2 * asynqSchedulerHeartbeat
+
 	// DefaultSchedulerGoneAfter is how stale a snapshot's last_seen must be —
-	// with no live counterpart — before the entry is declared GONE. Two
-	// sweeper heartbeats (the 15s lease TTL) of silence: long enough that a
-	// scheduler restart or a missed asynq heartbeat (5s cadence) does not
-	// flap, short enough that a dead scheduler is a finding within a minute.
-	DefaultSchedulerGoneAfter = 30 * time.Second
+	// with no live counterpart — before the entry is declared GONE. It is
+	// derived from the asynq heartbeat contract, never from the sweeper's
+	// own cadence: the entry TTL (a late heartbeat) plus two heartbeats (a
+	// graceful restart publishes on the first tick, one interval after
+	// start, and the sweep observes at most one interval later). asynq
+	// 0.24 (5s heartbeat, 10s TTL) needed 20s; 0.25+ (10s / 20s) needs 40s.
+	// A dead scheduler is still a finding within a minute: its key expires
+	// after the entry TTL and the finding raises DefaultSchedulerGoneAfter
+	// later (60s in total).
+	DefaultSchedulerGoneAfter = asynqSchedulerEntryTTL + 2*asynqSchedulerHeartbeat
 
 	// schedulerSnapshotHorizon bounds snapshot retention: an entry not
 	// observed for this long is pruned from the index and its hash deleted,
@@ -154,27 +171,43 @@ func StableKeyForAsynqEntry(e *asynq.SchedulerEntry) string {
 // Sweep integration.
 // ----------------------------------------------------------------------------
 
-// sweepSchedulers performs the per-sweep §5.12 pass: read the snapshot set,
-// upsert every live entry under its stable key, and diff for GONE
-// observations. Snapshots past the retention horizon are pruned. Returns the
-// GONE list plus the Redis command counts (SchedulerEntries goes through the
-// Inspector's own client and is not counted, matching how Servers() is
-// treated in the sweep budget).
-func (e *Engine) sweepSchedulers(ctx context.Context, now time.Time, token int64) (gone []SchedulerGoneObs, reads, writes int, err error) {
+// schedulerSnapshotState classifies a snapshot with no live counterpart by
+// the age of its last_seen: gone when the age exceeds goneAfter, prune when
+// it exceeds the retention horizon. An age equal to goneAfter is NOT gone
+// (strict comparison), so the boundary tests below are exact.
+func schedulerSnapshotState(age, goneAfter time.Duration) (gone, prune bool) {
+	switch {
+	case age > schedulerSnapshotHorizon:
+		return false, true
+	case age > goneAfter:
+		return true, false
+	}
+	return false, false
+}
+
+// sweepSchedulers performs the read half of the per-sweep §5.12 pass: read
+// the snapshot set, plan the upsert of every live entry under its stable
+// key, and diff for GONE observations. Snapshots past the retention horizon
+// are planned for pruning. Returns the GONE list, the fenced write commands
+// the caller applies after the local publish (§5.13: the upsert is a
+// read-modify-write, so it must stay fenced), and the read command count
+// (SchedulerEntries goes through the Inspector's own client and is not
+// counted, matching how Servers() is treated in the sweep budget).
+func (e *Engine) sweepSchedulers(ctx context.Context, now time.Time) (gone []SchedulerGoneObs, cmds []leasefence.Cmd, reads int, err error) {
 	live, err := e.insp.SchedulerEntries()
 	if err != nil {
-		return nil, reads, writes, err
+		return nil, nil, reads, err
 	}
 
 	keys, err := e.rc.ZRange(ctx, schedIndexKey, 0, -1).Result()
 	reads++
 	if err != nil {
-		return nil, reads, writes, err
+		return nil, nil, reads, err
 	}
 	existing, n, err := readSchedulerHashes(ctx, e.rc, keys)
 	reads += n
 	if err != nil {
-		return nil, reads, writes, err
+		return nil, nil, reads, err
 	}
 
 	liveByKey := make(map[string]*asynq.SchedulerEntry, len(live))
@@ -185,7 +218,6 @@ func (e *Engine) sweepSchedulers(ctx context.Context, now time.Time, token int64
 	// Fence-guarded (§5.13): the upsert is a read-modify-write (FirstSeen /
 	// EntryIDs merge over the hashes read above), so a superseded ex-holder
 	// flushing a stale merge must be rejected, not silently accepted.
-	var cmds []leasefence.Cmd
 	for key, le := range liveByKey {
 		data := SchedulerEntryDataFromAsynq(le)
 		firstSeen := now
@@ -206,11 +238,10 @@ func (e *Engine) sweepSchedulers(ctx context.Context, now time.Time, token int64
 		}
 		fields, err := snap.toHash()
 		if err != nil {
-			return nil, reads, writes, err
+			return nil, nil, reads, err
 		}
 		cmds = append(cmds, hashArgs(schedSnapshotKey(key), fields))
 		cmds = append(cmds, leasefence.Cmd{"ZADD", schedIndexKey, strconv.FormatInt(now.Unix(), 10), key})
-		writes += 2
 	}
 
 	goneAfter := e.cfg.SchedulerGoneAfter
@@ -218,28 +249,18 @@ func (e *Engine) sweepSchedulers(ctx context.Context, now time.Time, token int64
 		if _, isLive := liveByKey[key]; isLive {
 			continue
 		}
-		age := now.Sub(snap.LastSeen)
+		isGone, prune := schedulerSnapshotState(now.Sub(snap.LastSeen), goneAfter)
 		switch {
-		case age > schedulerSnapshotHorizon:
+		case prune:
 			cmds = append(cmds, leasefence.Cmd{"DEL", schedSnapshotKey(key)})
 			cmds = append(cmds, leasefence.Cmd{"ZREM", schedIndexKey, key})
-			writes += 2
-		case age > goneAfter:
+		case isGone:
 			gone = append(gone, SchedulerGoneObs{
 				StableKey: key,
 				TaskType:  snap.Entry.TaskType,
 				Queue:     snap.Entry.Queue,
 				LastSeen:  snap.LastSeen,
 			})
-		}
-	}
-	if len(cmds) > 0 {
-		ok, err := e.fence.Exec(ctx, token, cmds)
-		if err != nil {
-			return nil, reads, writes, err
-		}
-		if !ok {
-			return nil, reads, writes, ErrSuperseded
 		}
 	}
 
@@ -250,7 +271,7 @@ func (e *Engine) sweepSchedulers(ctx context.Context, now time.Time, token int64
 		}
 		return gone[i].StableKey < gone[j].StableKey
 	})
-	return gone, reads, writes, nil
+	return gone, cmds, reads, nil
 }
 
 // pushEntryID prepends id to ids (dedup, newest first, capped).

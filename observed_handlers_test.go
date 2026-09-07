@@ -160,6 +160,14 @@ func (e *observedTestEnv) archivedCount(qname string) int {
 	return qi.Archived
 }
 
+func (e *observedTestEnv) processedCount(qname string) int {
+	qi, err := e.insp.GetQueueInfo(qname)
+	if err != nil {
+		return 0
+	}
+	return qi.Processed
+}
+
 func TestObserveMiddlewareRecordsAttempts(t *testing.T) {
 	e := newObservedTestEnv(t)
 
@@ -175,7 +183,10 @@ func TestObserveMiddlewareRecordsAttempts(t *testing.T) {
 	if err != nil {
 		t.Fatalf("enqueue obs:ok: %v", err)
 	}
-	e.runObservedServer(t, map[string]int{"obsq": 1}, observe.Middleware(e.rc), func() bool {
+	// Every outcome is recorded here so the ok path is covered too; the
+	// default (error + panic only) is proven by TestObserveDefaultOutcomes.
+	allOutcomes := observe.WithOutcomes(observe.OutcomeOK, observe.OutcomeError, observe.OutcomePanic)
+	e.runObservedServer(t, map[string]int{"obsq": 1}, observe.Middleware(e.rc, allOutcomes), func() bool {
 		return e.llen("obsq", failTask.ID) == 4 && e.llen("obsq", okTask.ID) == 1
 	})
 
@@ -184,6 +195,9 @@ func TestObserveMiddlewareRecordsAttempts(t *testing.T) {
 	sum := e.summary(t, "obsq", failTask.ID)
 	attemptsTTL := e.rc.TTL(context.Background(), observe.AttemptsKey(observe.DefaultKeyPrefix, "obsq", failTask.ID)).Val()
 	summaryTTL := e.rc.TTL(context.Background(), observe.SummaryKey(observe.DefaultKeyPrefix, "obsq", failTask.ID)).Val()
+	countKey := observe.CountKey(observe.DefaultKeyPrefix, time.Now().UTC().Format("2006-01-02"))
+	dayCount := e.rc.Get(context.Background(), countKey).Val()
+	countTTL := e.rc.TTL(context.Background(), countKey).Val()
 	host, _ := os.Hostname()
 	wantWorker := host + ":" + strconv.Itoa(os.Getpid())
 
@@ -234,11 +248,18 @@ func TestObserveMiddlewareRecordsAttempts(t *testing.T) {
 			So(busyMs, ShouldEqual, totalMs)
 		})
 
-		Convey("Then both keys carry the default 7d TTL, refreshed per write", func() {
+		Convey("Then both keys carry the default 24h TTL, refreshed per write", func() {
+			So(observe.DefaultTTL, ShouldEqual, 24*time.Hour)
 			So(attemptsTTL, ShouldBeGreaterThan, 0)
 			So(attemptsTTL, ShouldBeLessThanOrEqualTo, observe.DefaultTTL)
 			So(summaryTTL, ShouldBeGreaterThan, 0)
 			So(summaryTTL, ShouldBeLessThanOrEqualTo, observe.DefaultTTL)
+		})
+
+		Convey("Then the per-day counter counts every recorded attempt with a 48h TTL", func() {
+			So(dayCount, ShouldEqual, "5") // 4 failing attempts + 1 ok attempt
+			So(countTTL, ShouldBeGreaterThan, 47*time.Hour)
+			So(countTTL, ShouldBeLessThanOrEqualTo, 48*time.Hour)
 		})
 
 		Convey("And a succeeding task records a single ok attempt with no error", func() {
@@ -247,6 +268,80 @@ func TestObserveMiddlewareRecordsAttempts(t *testing.T) {
 			So(okRecs[0].Outcome, ShouldEqual, "ok")
 			So(okRecs[0].Error, ShouldEqual, "")
 			So(okRecs[0].DurationMs, ShouldBeGreaterThanOrEqualTo, 5) // the handler sleeps 5ms
+		})
+	})
+}
+
+// TestObserveDefaultOutcomes proves the default filter (error + panic only)
+// and per-task sampling against a real asynq server.
+func TestObserveDefaultOutcomes(t *testing.T) {
+	e := newObservedTestEnv(t)
+
+	// ── flow ─────────────────────────────────────────────────────────────
+	// Default middleware: one ok task (must record nothing) and one failing
+	// task (must record). The counter only counts what was written.
+	okTask, err := e.client.Enqueue(asynq.NewTask("obs:ok", nil), asynq.Queue("obsdef"), asynq.MaxRetry(0), asynq.Retention(time.Hour))
+	if err != nil {
+		t.Fatalf("enqueue obs:ok: %v", err)
+	}
+	failTask, err := e.client.Enqueue(asynq.NewTask("obs:fail", []byte("nope")), asynq.Queue("obsdef"), asynq.MaxRetry(1))
+	if err != nil {
+		t.Fatalf("enqueue obs:fail: %v", err)
+	}
+	e.runObservedServer(t, map[string]int{"obsdef": 1}, observe.Middleware(e.rc), func() bool {
+		return e.llen("obsdef", failTask.ID) == 2 && e.archivedCount("obsdef") == 1 && e.processedCount("obsdef") >= 3
+	})
+	okLen := e.llen("obsdef", okTask.ID)
+	okSummary := e.rc.Exists(context.Background(), observe.SummaryKey(observe.DefaultKeyPrefix, "obsdef", okTask.ID)).Val()
+	failRecs := e.attempts(t, "obsdef", failTask.ID)
+	countKey := observe.CountKey(observe.DefaultKeyPrefix, time.Now().UTC().Format("2006-01-02"))
+	dayCount := e.rc.Get(context.Background(), countKey).Val()
+
+	// Sampling: explicit task IDs whose sampling decision is known up front.
+	// Every outcome is enabled so the filter cannot mask the sampling.
+	var inID, outID string
+	for i := 0; inID == "" || outID == ""; i++ {
+		id := fmt.Sprintf("sample-%d", i)
+		if observe.Sampled(id, 0.5) {
+			if inID == "" {
+				inID = id
+			}
+		} else if outID == "" {
+			outID = id
+		}
+	}
+	for _, id := range []string{inID, outID} {
+		if _, err := e.client.Enqueue(asynq.NewTask("obs:fail", []byte("sampled")), asynq.Queue("obssmp"), asynq.TaskID(id), asynq.MaxRetry(0)); err != nil {
+			t.Fatalf("enqueue %s: %v", id, err)
+		}
+	}
+	mw := observe.Middleware(e.rc, observe.WithSampling(0.5),
+		observe.WithOutcomes(observe.OutcomeOK, observe.OutcomeError, observe.OutcomePanic))
+	e.runObservedServer(t, map[string]int{"obssmp": 1}, mw, func() bool {
+		return e.archivedCount("obssmp") == 2
+	})
+	inLen := e.llen("obssmp", inID)
+	outLen := e.llen("obssmp", outID)
+
+	// ── tree ─────────────────────────────────────────────────────────────
+	Convey("Given the default middleware (error and panic outcomes only)", t, func() {
+		Convey("Then a succeeding task writes no attempt list and no summary", func() {
+			So(okLen, ShouldEqual, 0)
+			So(okSummary, ShouldEqual, 0)
+		})
+		Convey("Then a failing task still records every attempt", func() {
+			So(failRecs, ShouldHaveLength, 2)
+			So(failRecs[0].Outcome, ShouldEqual, "error")
+		})
+		Convey("Then the per-day counter counts only the recorded attempts", func() {
+			So(dayCount, ShouldEqual, "2")
+		})
+	})
+
+	Convey("Given WithSampling(0.5) with every outcome enabled", t, func() {
+		Convey("Then the sampled task is recorded and the unsampled task is not", func() {
+			So(inLen, ShouldEqual, 1)
+			So(outLen, ShouldEqual, 0)
 		})
 	})
 }

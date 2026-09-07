@@ -79,6 +79,24 @@ func (m *memoryStore) get() (*FleetSnapshot, []*QueueSnapshot) {
 	return m.fleet, out
 }
 
+// addWriteCmds folds writes issued after the publish into the last sweep's
+// accounting (the auxiliary fenced batches run after e.mem.replace so a write
+// failure cannot cost the tick its numbers).
+func (m *memoryStore) addWriteCmds(n int) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.lastSweep.WriteCmds += n
+}
+
+// addSweepCmds folds post-publish reads and writes into the last sweep's
+// accounting.
+func (m *memoryStore) addSweepCmds(reads, writes int) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.lastSweep.ReadCmds += reads
+	m.lastSweep.WriteCmds += writes
+}
+
 func (m *memoryStore) sweepStats() SweepStats {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -96,7 +114,10 @@ func (m *memoryStore) getAttention() (*FleetSnapshot, *AttentionReport) {
 
 // hashArgs flattens a field map into HSET arguments after the key.
 func hashArgs(key string, fields map[string]interface{}) leasefence.Cmd {
-	cmd := make(leasefence.Cmd, 0, 2+2*len(fields))
+	// No capacity hint: len(fields) is data-derived, and CodeQL's
+	// allocation-size-overflow query flags 2+2*len(...) as a potentially
+	// overflowing allocation size. append grows the slice for us.
+	var cmd leasefence.Cmd
 	cmd = append(cmd, "HSET", key)
 	for f, v := range fields {
 		cmd = append(cmd, f, v)

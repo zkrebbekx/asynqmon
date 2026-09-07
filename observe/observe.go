@@ -31,6 +31,13 @@
 // "panic" — recorded, then rethrown so asynq's own recovery semantics are
 // untouched), worker host:pid, and the task's queue, id and type.
 //
+// # What is recorded by default
+//
+// By default the middleware records only the "error" and "panic" outcomes.
+// A task that succeeds on its first attempt writes nothing. Use
+// WithOutcomes to record "ok" attempts too, and WithSampling to record only
+// a fraction of the tasks.
+//
 // # Storage bounds
 //
 // Records live in asynqmon-owned keys, sized and expiring by design:
@@ -41,10 +48,26 @@
 //	asynqmon:obs:sum:<queue>:<task_id>  HASH summary: first_seen,
 //	                                    total_attempts, last_duration_ms,
 //	                                    last_outcome, total_busy_ms
+//	asynqmon:obs:count:<YYYY-MM-DD>     STRING counter of the attempts
+//	                                    recorded on that UTC day (48h TTL)
 //
-// Both keys carry a TTL (default 7 days) refreshed on every write. Tune with
-// WithAttemptCap, WithTTL and WithKeyPrefix. Note the bundled dashboard reads
-// the default prefix; change it only when you also run your own reader.
+// The attempt and summary keys carry a TTL (default 24 hours) refreshed on
+// every write. Tune with WithAttemptCap, WithTTL, WithOutcomes, WithSampling
+// and WithKeyPrefix. Note the bundled dashboard reads the default prefix;
+// change it only when you also run your own reader.
+//
+// # Footprint
+//
+// One recorded task costs about 750 bytes in Redis (two key names of about
+// 60 bytes plus the list, the hash and the object overhead). The resident
+// footprint is therefore approximately:
+//
+//	recorded_tasks_per_day x TTL_days x 750 B
+//
+// Example: 200,000 recorded tasks per day with the default 24h TTL keep
+// about 150 MB resident. The default outcome filter and WithSampling reduce
+// recorded_tasks_per_day; WithTTL reduces TTL_days. The per-day counter
+// gives the exact recorded_tasks_per_day without a SCAN.
 //
 // # Failure behavior
 //
@@ -57,6 +80,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"hash/fnv"
 	"os"
 	"strconv"
 	"sync/atomic"
@@ -77,7 +101,12 @@ const (
 	DefaultAttemptCap = 30
 
 	// DefaultTTL bounds how long records outlive their last write.
-	DefaultTTL = 7 * 24 * time.Hour
+	DefaultTTL = 24 * time.Hour
+
+	// countTTL bounds the per-day counter key. Two days cover the current
+	// day plus the previous one, which is what a daily footprint readout
+	// needs.
+	countTTL = 48 * time.Hour
 
 	// maxErrorLen caps the stored error/panic message, in bytes.
 	maxErrorLen = 500
@@ -118,17 +147,53 @@ func SummaryKey(prefix, queue, taskID string) string {
 	return prefix + "sum:" + queue + ":" + taskID
 }
 
+// CountKey returns the Redis STRING key that counts the attempts recorded on
+// one UTC day. day is formatted as YYYY-MM-DD.
+func CountKey(prefix, day string) string {
+	return prefix + "count:" + day
+}
+
+// Outcome is the result class of one attempt, as stored in AttemptRecord.
+type Outcome string
+
+// The three attempt outcomes.
+const (
+	OutcomeOK    Outcome = "ok"
+	OutcomeError Outcome = "error"
+	OutcomePanic Outcome = "panic"
+)
+
 type config struct {
 	ttl        time.Duration
 	attemptCap int
 	keyPrefix  string
+	// outcomes is the set of outcomes the middleware records.
+	outcomes map[Outcome]bool
+	// sampleRate is the fraction of tasks the middleware records, in (0, 1].
+	sampleRate float64
+}
+
+func defaultConfig() config {
+	return config{
+		ttl:        DefaultTTL,
+		attemptCap: DefaultAttemptCap,
+		keyPrefix:  DefaultKeyPrefix,
+		outcomes:   map[Outcome]bool{OutcomeError: true, OutcomePanic: true},
+		sampleRate: 1,
+	}
+}
+
+// records reports whether the configuration records an attempt with the
+// given outcome for the given task.
+func (c config) records(taskID string, outcome Outcome) bool {
+	return c.outcomes[outcome] && Sampled(taskID, c.sampleRate)
 }
 
 // Option customizes the middleware's storage bounds.
 type Option func(*config)
 
 // WithTTL sets how long a task's records outlive their last write
-// (default 7 days). Non-positive values are ignored.
+// (default 24 hours). Non-positive values are ignored.
 func WithTTL(d time.Duration) Option {
 	return func(c *config) {
 		if d > 0 {
@@ -146,6 +211,65 @@ func WithAttemptCap(n int) Option {
 			c.attemptCap = n
 		}
 	}
+}
+
+// WithOutcomes sets which attempt outcomes the middleware records (default
+// OutcomeError and OutcomePanic). An empty call is ignored. Pass all three
+// outcomes to record every attempt.
+func WithOutcomes(outcomes ...Outcome) Option {
+	return func(c *config) {
+		if len(outcomes) == 0 {
+			return
+		}
+		set := make(map[Outcome]bool, len(outcomes))
+		for _, o := range outcomes {
+			set[o] = true
+		}
+		c.outcomes = set
+	}
+}
+
+// WithSampling records only a fraction of the tasks (default 1: every task).
+// rate must be in (0, 1]; other values are ignored. The decision is per
+// task, not per attempt: every attempt of a sampled task is recorded and no
+// attempt of an unsampled task is. See Sampled.
+func WithSampling(rate float64) Option {
+	return func(c *config) {
+		if rate > 0 && rate <= 1 {
+			c.sampleRate = rate
+		}
+	}
+}
+
+// Sampled reports whether a task is in the recorded sample at the given
+// rate. The decision hashes the task ID (FNV-1a, 64 bit), so it is stable
+// for the life of the task and identical on every worker. A rate of 1 or
+// more samples every task; a rate of 0 or less samples none. Readers can
+// call it to tell "not sampled" from "not adopted".
+func Sampled(taskID string, rate float64) bool {
+	if rate >= 1 {
+		return true
+	}
+	if rate <= 0 {
+		return false
+	}
+	h := fnv.New64a()
+	_, _ = h.Write([]byte(taskID))
+	// Top 53 bits of the mixed hash give an exact float64 in [0, 1).
+	u := float64(mix64(h.Sum64())>>11) / float64(1<<53)
+	return u < rate
+}
+
+// mix64 is the MurmurHash3 64-bit finalizer. FNV-1a alone leaves the high
+// bits of similar inputs (sequential IDs) correlated; the finalizer spreads
+// every input bit over the whole word so the sampling rate holds.
+func mix64(h uint64) uint64 {
+	h ^= h >> 33
+	h *= 0xff51afd7ed558ccd
+	h ^= h >> 33
+	h *= 0xc4ceb9fe1a85ec53
+	h ^= h >> 33
+	return h
 }
 
 // WithKeyPrefix changes the key namespace (default "asynqmon:obs:"). The
@@ -171,7 +295,9 @@ func DroppedWrites() uint64 { return atomic.LoadUint64(&droppedWrites) }
 
 // Middleware returns an asynq middleware that records one AttemptRecord per
 // handler run, usable via (*asynq.ServeMux).Use. See the package
-// documentation for what is recorded and the storage bounds.
+// documentation for what is recorded and the storage bounds. By default only
+// "error" and "panic" attempts are recorded (WithOutcomes) for every task
+// (WithSampling).
 //
 // A panic in the wrapped handler is recorded (outcome "panic"), then
 // rethrown, so asynq's own panic recovery — the attempt counts as a failure —
@@ -179,7 +305,7 @@ func DroppedWrites() uint64 { return atomic.LoadUint64(&droppedWrites) }
 // handler is not running inside an asynq server), the middleware records
 // nothing and just delegates.
 func Middleware(rc redis.UniversalClient, opts ...Option) func(asynq.Handler) asynq.Handler {
-	cfg := config{ttl: DefaultTTL, attemptCap: DefaultAttemptCap, keyPrefix: DefaultKeyPrefix}
+	cfg := defaultConfig()
 	for _, opt := range opts {
 		opt(&cfg)
 	}
@@ -217,30 +343,35 @@ func Middleware(rc redis.UniversalClient, opts ...Option) func(asynq.Handler) as
 				// and fails the attempt exactly as without this middleware.
 				p := recover()
 				rec.DurationMs = time.Since(start).Milliseconds()
-				rec.Outcome = "panic"
+				rec.Outcome = string(OutcomePanic)
 				rec.Error = truncateErr(fmt.Sprintf("%v", p))
-				record(rc, cfg, rec)
+				if cfg.records(taskID, OutcomePanic) {
+					record(rc, cfg, rec)
+				}
 				panic(p)
 			}()
 			err := next.ProcessTask(ctx, t)
 			panicking = false
 
 			rec.DurationMs = time.Since(start).Milliseconds()
+			outcome := OutcomeOK
 			if err != nil {
-				rec.Outcome = "error"
+				outcome = OutcomeError
 				rec.Error = truncateErr(err.Error())
-			} else {
-				rec.Outcome = "ok"
 			}
-			record(rc, cfg, rec)
+			rec.Outcome = string(outcome)
+			if cfg.records(taskID, outcome) {
+				record(rc, cfg, rec)
+			}
 			return err
 		})
 	}
 }
 
-// record writes one attempt + summary update, best-effort. It runs on its own
-// short-timeout background context — never the task's, which may already be
-// canceled — and NEVER returns an error to the caller.
+// record writes one attempt + summary update and bumps the per-day counter,
+// best-effort. It runs on its own short-timeout background context — never
+// the task's, which may already be canceled — and NEVER returns an error to
+// the caller.
 func record(rc redis.UniversalClient, cfg config, rec AttemptRecord) {
 	data, err := json.Marshal(rec)
 	if err != nil {
@@ -252,6 +383,7 @@ func record(rc redis.UniversalClient, cfg config, rec AttemptRecord) {
 
 	ak := AttemptsKey(cfg.keyPrefix, rec.Queue, rec.TaskID)
 	sk := SummaryKey(cfg.keyPrefix, rec.Queue, rec.TaskID)
+	ck := CountKey(cfg.keyPrefix, time.Now().UTC().Format("2006-01-02"))
 	pipe := rc.Pipeline()
 	pipe.LPush(ctx, ak, data)
 	pipe.LTrim(ctx, ak, 0, int64(cfg.attemptCap-1))
@@ -261,6 +393,8 @@ func record(rc redis.UniversalClient, cfg config, rec AttemptRecord) {
 	pipe.HIncrBy(ctx, sk, "total_busy_ms", rec.DurationMs)
 	pipe.HSet(ctx, sk, "last_duration_ms", rec.DurationMs, "last_outcome", rec.Outcome)
 	pipe.Expire(ctx, sk, cfg.ttl)
+	pipe.Incr(ctx, ck)
+	pipe.Expire(ctx, ck, countTTL)
 	if _, err := pipe.Exec(ctx); err != nil {
 		atomic.AddUint64(&droppedWrites, 1)
 	}
