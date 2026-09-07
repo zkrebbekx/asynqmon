@@ -410,10 +410,10 @@ func (e *Engine) run(ctx context.Context, kind string, token int64) (*Report, er
 	unlock()
 	if e.cfg.WebhookURL != "" {
 		e.webhookWG.Add(1)
-		go func() {
+		safego.Go("hygiene: webhook delivery", func() {
 			defer e.webhookWG.Done()
 			e.deliverWebhook(rep)
-		}()
+		})
 	}
 	return rep, nil
 }
