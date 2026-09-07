@@ -130,8 +130,27 @@ type Options struct {
 	TrustedProxies []string
 
 	// RequireIdentity refuses mutating requests (403 JSON) that carry no
-	// resolvable identity (trusted header or basic-auth user). Optional.
+	// resolvable identity (trusted header or trusted basic-auth user).
+	// Optional.
 	RequireIdentity bool
+
+	// TrustBasicAuthUser accepts the HTTP Basic-Auth username as the acting
+	// user. asynqmon never verifies the password, so set this only when a
+	// reverse proxy in front of asynqmon verifies the credentials. Without
+	// it (and outside TrustedProxies) a Basic-Auth username is ignored and
+	// the request stays anonymous. Default false.
+	TrustBasicAuthUser bool
+
+	// AllowUntrustedAuthHeader acknowledges that AuthHeader is trusted from
+	// every peer when TrustedProxies is empty. The asynqmon binary refuses
+	// to start with AuthHeader set and TrustedProxies empty unless this is
+	// set; the library only logs a warning either way. Default false.
+	AllowUntrustedAuthHeader bool
+
+	// MaxSSEConnections caps the concurrent GET /api/fleet/events streams
+	// per replica. A subscriber over the cap gets 503 with Retry-After: 5.
+	// 0 uses the default of 256; a negative value removes the cap.
+	MaxSSEConnections int
 
 	// JobConcurrency is the max number of bulk jobs this replica works at
 	// once. Default 2.
@@ -207,6 +226,13 @@ type Options struct {
 	// writes only asynqmon-owned keys, so it stays enabled in ReadOnly
 	// mode unless disabled here explicitly.
 	HygieneDisabled bool
+
+	// HygieneRunInReadOnly keeps POST /api/hygiene/{kind}/run available in
+	// ReadOnly mode. Default false: the run-now route then answers 405
+	// like every other mutation. Set it when a read-only replica must still
+	// generate reports on demand (generation reads asynq state and writes
+	// only asynqmon-owned report keys).
+	HygieneRunInReadOnly bool
 
 	// hygieneEngine backs the hygiene routes. Set by New (and stopped via
 	// HTTPHandler.Close); muxRouter builds an unstarted engine itself when

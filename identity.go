@@ -78,6 +78,44 @@ func remoteIP(r *http.Request) string {
 	return host
 }
 
+// ipInNets reports whether ip is inside one of the networks.
+func ipInNets(ip net.IP, nets []*net.IPNet) bool {
+	if ip == nil {
+		return false
+	}
+	for _, n := range nets {
+		if n.Contains(ip) {
+			return true
+		}
+	}
+	return false
+}
+
+// forwardedClientIP returns the client IP behind a trusted proxy chain: the
+// rightmost X-Forwarded-For entry that is not itself a trusted proxy. The
+// caller must have checked that the peer is a trusted proxy. It returns ""
+// when the header is absent or every entry is a trusted proxy or malformed.
+func forwardedClientIP(r *http.Request, trusted []*net.IPNet) string {
+	var entries []string
+	for _, h := range r.Header.Values("X-Forwarded-For") {
+		entries = append(entries, strings.Split(h, ",")...)
+	}
+	for i := len(entries) - 1; i >= 0; i-- {
+		s := strings.TrimSpace(entries[i])
+		ip := net.ParseIP(s)
+		if ip == nil {
+			// A malformed entry ends the walk: everything to its left was
+			// appended by hops we cannot reason about.
+			return ""
+		}
+		if ipInNets(ip, trusted) {
+			continue
+		}
+		return ip.String()
+	}
+	return ""
+}
+
 // isMutating reports whether the request can change state. Mirrors the
 // read-only middleware's method test.
 func isMutating(r *http.Request) bool {
@@ -93,11 +131,17 @@ func isMutating(r *http.Request) bool {
 //  1. Options.AuthHeader (e.g. X-Auth-Request-User) — trusted only when the
 //     peer is inside Options.TrustedProxies (any peer when no CIDRs are
 //     configured, for single-proxy deployments where the network is the
-//     boundary);
-//  2. basic-auth username;
+//     boundary; the asynqmon binary refuses that configuration unless
+//     Options.AllowUntrustedAuthHeader is set);
+//  2. basic-auth username — accepted only when Options.TrustBasicAuthUser
+//     is set or the peer is inside a non-empty Options.TrustedProxies set.
+//     The middleware never verifies the password, so an unverified
+//     username is a forgeable actor and is ignored by default;
 //  3. with Options.RequireIdentity, mutating requests without (1)/(2) are
 //     refused with a 403 JSON error;
-//  4. otherwise "anonymous@<remote-ip>", flagged unattributed.
+//  4. otherwise "anonymous@<client-ip>", flagged unattributed. The client
+//     IP is the peer address, or, when the peer is a trusted proxy, the
+//     rightmost X-Forwarded-For entry that is not a trusted proxy.
 func newActorMiddleware(opts Options) func(http.Handler) http.Handler {
 	trusted := parseTrustedProxies(opts.TrustedProxies)
 	headerName := opts.AuthHeader
@@ -116,36 +160,46 @@ func newActorMiddleware(opts Options) func(http.Handler) http.Handler {
 		}
 		log.Printf("asynqmon: AuthHeader %q is trusted from EVERY peer because TrustedProxies is empty — "+
 			"any client that can reach this listener directly can forge the audit actor. "+
-			"Set TrustedProxies (--trusted-proxies) to the CIDRs of your reverse proxy.%s",
+			"Set TrustedProxies (--trusted-proxies) to the CIDRs of your reverse proxy "+
+			"(AllowUntrustedAuthHeader / --allow-untrusted-auth-header acknowledges this risk).%s",
 			headerName, suffix)
 	}
 
-	proxyTrusted := func(r *http.Request) bool {
-		if len(trusted) == 0 {
-			return true
-		}
-		ip := net.ParseIP(remoteIP(r))
-		if ip == nil {
-			return false
-		}
-		for _, n := range trusted {
-			if n.Contains(ip) {
-				return true
-			}
-		}
-		return false
+	// peerIsTrustedProxy is the strict check: a non-empty trusted set that
+	// contains the peer. It gates the basic-auth username and the
+	// X-Forwarded-For client IP.
+	peerIsTrustedProxy := func(r *http.Request) bool {
+		return len(trusted) > 0 && ipInNets(net.ParseIP(remoteIP(r)), trusted)
+	}
+
+	// headerTrusted keeps the documented single-proxy convenience: an empty
+	// trusted set trusts the header from any peer (with the warning above).
+	headerTrusted := func(r *http.Request) bool {
+		return len(trusted) == 0 || peerIsTrustedProxy(r)
 	}
 
 	resolve := func(r *http.Request) (string, bool) {
-		if headerName != "" && proxyTrusted(r) {
+		if headerName != "" && headerTrusted(r) {
 			if v := strings.TrimSpace(r.Header.Get(headerName)); v != "" {
 				return v, true
 			}
 		}
-		if user, _, ok := r.BasicAuth(); ok && user != "" {
-			return user, true
+		if opts.TrustBasicAuthUser || peerIsTrustedProxy(r) {
+			if user, _, ok := r.BasicAuth(); ok && user != "" {
+				return user, true
+			}
 		}
 		return "", false
+	}
+
+	// clientIP is the address the anonymous@ fallback names.
+	clientIP := func(r *http.Request) string {
+		if peerIsTrustedProxy(r) {
+			if ip := forwardedClientIP(r, trusted); ip != "" {
+				return ip
+			}
+		}
+		return remoteIP(r)
 	}
 
 	return func(h http.Handler) http.Handler {
@@ -154,10 +208,10 @@ func newActorMiddleware(opts Options) func(http.Handler) http.Handler {
 			if !attributed {
 				if opts.RequireIdentity && isMutating(r) {
 					writeErrorMsg(w, http.StatusForbidden,
-						"identity required: no trusted auth header or basic-auth user on a mutating request (--require-identity)")
+						"identity required: no trusted auth header or trusted basic-auth user on a mutating request (--require-identity)")
 					return
 				}
-				name = "anonymous@" + remoteIP(r)
+				name = "anonymous@" + clientIP(r)
 			}
 			ctx := context.WithValue(r.Context(), actorCtxKey{}, actorInfo{Name: name, Attributed: attributed})
 			h.ServeHTTP(w, r.WithContext(ctx))
