@@ -5,7 +5,7 @@
 
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
-import { createView, ViewTarget } from "../api-views";
+import { createView, isDuplicateNameError, listViews, ViewTarget } from "../api-views";
 import { toErrorString } from "../utils";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "./ui/dialog";
 import { Button } from "./ui/button";
@@ -36,14 +36,31 @@ export default function SaveViewModal({ open, target, state, onClose }: Props) {
     .join("  ");
 
   const save = async () => {
-    if (name.trim() === "" || busy) return;
+    const trimmed = name.trim();
+    if (trimmed === "" || busy) return;
     setBusy(true);
     try {
-      await createView({ name: name.trim(), target, state });
-      toast(`View saved — “${name.trim()}” is now in the ⌘K palette`);
+      // Views are shared, so the name may already be taken by a colleague.
+      // Check before the POST to answer in the modal instead of showing a
+      // raw 409; the server enforces the same rule.
+      const existing = await listViews();
+      const clash = (existing.views ?? []).find(
+        (v) => v.name.trim().toLowerCase() === trimmed.toLowerCase()
+      );
+      if (clash) {
+        setError(`A view named “${clash.name}” already exists — pick another name.`);
+        setBusy(false);
+        return;
+      }
+      await createView({ name: trimmed, target, state });
+      toast(`View saved — “${trimmed}” is now in the ⌘K palette`);
       onClose();
     } catch (e) {
-      setError(toErrorString(e));
+      setError(
+        isDuplicateNameError(e)
+          ? `A view named “${trimmed}” already exists — pick another name.`
+          : toErrorString(e)
+      );
       setBusy(false);
     }
   };

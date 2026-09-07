@@ -6,9 +6,11 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"log"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -25,6 +27,11 @@ import (
 //
 //	asynqmon:views:<id>   HASH  (one view)
 //	asynqmon:views:index  ZSET  (score = created_at unix ms, member = id)
+//
+// Every view carries a `version` (1 on create, +1 per accepted update) and
+// an `updated_at`. PUT must send the version it read. The store applies the
+// write with a compare-and-set script, so two operators editing the same
+// view no longer silently overwrite each other: the second one gets 409.
 //
 // `state` is the view's URL-serialized surface state exactly as the frontend
 // urlstate module owns it (tasks: {"q", "mode", "size"}; queues: {"f",
@@ -63,7 +70,11 @@ type View struct {
 	State     json.RawMessage
 	CreatedBy string
 	CreatedAt time.Time
-	System    bool
+	UpdatedAt time.Time
+	// Version starts at 1 and increases by 1 on each accepted update. A PUT
+	// carrying a different version is refused with 409.
+	Version int
+	System  bool
 }
 
 // systemViews are the §4.2 shipped views. IDs are stable so seeding is
@@ -121,9 +132,17 @@ type viewStore interface {
 	List(ctx context.Context) ([]View, error)
 	Get(ctx context.Context, id string) (View, bool, error)
 	Put(ctx context.Context, v View) error
+	// CompareAndPut writes v only when the stored version equals expect. It
+	// returns false when the stored version differs (a concurrent edit) and
+	// errViewGone when the view disappeared meanwhile.
+	CompareAndPut(ctx context.Context, v View, expect int) (bool, error)
 	Delete(ctx context.Context, id string) error
 	Count(ctx context.Context) (int64, error)
 }
+
+// errViewGone reports that the view vanished between the read and the
+// compare-and-set write.
+var errViewGone = errors.New("view no longer exists")
 
 type redisViewStore struct {
 	rc redis.UniversalClient
@@ -135,20 +154,76 @@ func newRedisViewStore(rc redis.UniversalClient) redisViewStore {
 
 func viewKey(id string) string { return viewKeyPrefix + id }
 
-func (s redisViewStore) Put(ctx context.Context, v View) error {
-	pipe := s.rc.Pipeline()
-	pipe.HSet(ctx, viewKey(v.ID), map[string]interface{}{
+func viewHashFields(v View) map[string]interface{} {
+	return map[string]interface{}{
 		"id":         v.ID,
 		"name":       v.Name,
 		"target":     v.Target,
 		"state":      string(v.State),
 		"created_by": v.CreatedBy,
 		"created_at": strconv.FormatInt(v.CreatedAt.UnixMilli(), 10),
+		"updated_at": strconv.FormatInt(v.UpdatedAt.UnixMilli(), 10),
+		"version":    strconv.Itoa(normalizeViewVersion(v.Version)),
 		"system":     boolField(v.System),
-	})
+	}
+}
+
+// normalizeViewVersion maps a missing or invalid version (a record written
+// before versioning) to 1, so a legacy view is editable with version 1.
+func normalizeViewVersion(n int) int {
+	if n < 1 {
+		return 1
+	}
+	return n
+}
+
+func (s redisViewStore) Put(ctx context.Context, v View) error {
+	pipe := s.rc.Pipeline()
+	pipe.HSet(ctx, viewKey(v.ID), viewHashFields(v))
 	pipe.ZAdd(ctx, viewsIndexKey, redis.Z{Score: float64(v.CreatedAt.UnixMilli()), Member: v.ID})
 	_, err := pipe.Exec(ctx)
 	return err
+}
+
+// compareAndPutView writes name/target/state/version/updated_at only when
+// the stored version matches. It returns 1 on success, 0 on a version
+// mismatch and -1 when the view is gone. The script keeps the check and the
+// write in one Redis round trip, so two concurrent PUTs cannot both win.
+var compareAndPutView = redis.NewScript(`
+local key = KEYS[1]
+if redis.call("EXISTS", key) == 0 then return -1 end
+local cur = tonumber(redis.call("HGET", key, "version"))
+if cur == nil or cur < 1 then cur = 1 end
+if cur ~= tonumber(ARGV[1]) then return 0 end
+redis.call("HSET", key,
+  "name", ARGV[2],
+  "target", ARGV[3],
+  "state", ARGV[4],
+  "version", ARGV[5],
+  "updated_at", ARGV[6])
+return 1
+`)
+
+func (s redisViewStore) CompareAndPut(ctx context.Context, v View, expect int) (bool, error) {
+	res, err := compareAndPutView.Run(ctx, s.rc, []string{viewKey(v.ID)},
+		normalizeViewVersion(expect),
+		v.Name,
+		v.Target,
+		string(v.State),
+		normalizeViewVersion(v.Version),
+		strconv.FormatInt(v.UpdatedAt.UnixMilli(), 10),
+	).Int64()
+	if err != nil {
+		return false, err
+	}
+	switch res {
+	case 1:
+		return true, nil
+	case 0:
+		return false, nil
+	default:
+		return false, errViewGone
+	}
 }
 
 func boolField(b bool) string {
@@ -163,6 +238,16 @@ func viewFromHash(h map[string]string) (View, bool) {
 		return View{}, false
 	}
 	ms, _ := strconv.ParseInt(h["created_at"], 10, 64)
+	// A record written before versioning has no updated_at and no version:
+	// it reads back as created_at and version 1.
+	ums, err := strconv.ParseInt(h["updated_at"], 10, 64)
+	if err != nil || ums <= 0 {
+		ums = ms
+	}
+	ver, err := strconv.Atoi(h["version"])
+	if err != nil {
+		ver = 0
+	}
 	return View{
 		ID:        h["id"],
 		Name:      h["name"],
@@ -170,6 +255,8 @@ func viewFromHash(h map[string]string) (View, bool) {
 		State:     json.RawMessage(h["state"]),
 		CreatedBy: h["created_by"],
 		CreatedAt: time.UnixMilli(ms),
+		UpdatedAt: time.UnixMilli(ums),
+		Version:   normalizeViewVersion(ver),
 		System:    h["system"] == "1",
 	}, true
 }
@@ -231,11 +318,13 @@ func seedSystemViews(ctx context.Context, store viewStore) error {
 		v := def
 		v.System = true
 		v.CreatedBy = "system"
+		v.Version = 1
 		if ok {
 			v.CreatedAt = existing.CreatedAt
 		} else {
 			v.CreatedAt = time.Now()
 		}
+		v.UpdatedAt = v.CreatedAt
 		if err := store.Put(ctx, v); err != nil {
 			return err
 		}
@@ -328,4 +417,22 @@ func newViewID() string {
 		return "vw_" + strconv.FormatInt(time.Now().UnixNano(), 36)
 	}
 	return "vw_" + hex.EncodeToString(b)
+}
+
+// findViewByName returns the first view whose name equals name, ignoring
+// case and surrounding space, and whose id differs from excludeID. Name
+// uniqueness is enforced here rather than with a second index: the view set
+// is capped at 500, so one List is cheap, and the check runs only on a
+// mutation.
+func findViewByName(views []View, name, excludeID string) (View, bool) {
+	want := strings.TrimSpace(name)
+	for _, v := range views {
+		if v.ID == excludeID {
+			continue
+		}
+		if strings.EqualFold(strings.TrimSpace(v.Name), want) {
+			return v, true
+		}
+	}
+	return View{}, false
 }

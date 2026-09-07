@@ -149,14 +149,16 @@ func TestViewsCRUD(t *testing.T) {
 				Convey("When the view is renamed and re-stated via PUT", func() {
 					uw := doViewReq(router, "PUT", "/api/views/"+v.ID, "kai@ops",
 						map[string]interface{}{
-							"name":  "gw-timeout blast (all states)",
-							"state": map[string]string{"q": `error~"gateway timeout"`},
+							"version": v.Version,
+							"name":    "gw-timeout blast (all states)",
+							"state":   map[string]string{"q": `error~"gateway timeout"`},
 						})
 
 					Convey("Then it answers 200 and preserves creator attribution", func() {
 						So(uw.Code, ShouldEqual, http.StatusOK)
 						u := decodeView(t, uw)
 						So(u.Name, ShouldEqual, "gw-timeout blast (all states)")
+						So(u.Version, ShouldEqual, v.Version+1)
 						So(u.CreatedBy, ShouldEqual, "mira@ops") // creator, not editor
 						So(u.CreatedAt, ShouldEqual, v.CreatedAt)
 						var state map[string]string
@@ -221,7 +223,7 @@ func TestViewsCRUD(t *testing.T) {
 			})
 			Convey("Then updating an unknown view answers 404", func() {
 				w := doViewReq(router, "PUT", "/api/views/vw_nope", "mira@ops",
-					map[string]interface{}{"name": "y"})
+					map[string]interface{}{"version": 1, "name": "y"})
 				So(w.Code, ShouldEqual, http.StatusNotFound)
 			})
 		})
@@ -321,7 +323,7 @@ func TestSystemViewSeeding(t *testing.T) {
 
 		Convey("When a system view is modified via PUT", func() {
 			w := doViewReq(router, "PUT", "/api/views/sys_orphaned_actives", "mira@ops",
-				map[string]interface{}{"name": "mine now"})
+				map[string]interface{}{"version": 1, "name": "mine now"})
 
 			Convey("Then it answers 400 with the reason", func() {
 				So(w.Code, ShouldEqual, http.StatusBadRequest)
@@ -360,7 +362,7 @@ func TestViewsReadOnlyMode(t *testing.T) {
 			post := doViewReqRO(roRouter, "POST", "/api/views",
 				map[string]interface{}{"name": "x", "target": "tasks", "state": map[string]string{}})
 			put := doViewReqRO(roRouter, "PUT", "/api/views/sys_exhausted_retries",
-				map[string]interface{}{"name": "x"})
+				map[string]interface{}{"version": 1, "name": "x"})
 			del := doViewReqRO(roRouter, "DELETE", "/api/views/vw_x", nil)
 
 			Convey("Then all are refused with 405", func() {
@@ -393,3 +395,139 @@ func doViewReqRO(h http.Handler, method, url string, body interface{}) *httptest
 }
 
 var viewsTestRedisAddr = testRedisAddrFromEnv()
+
+// createView is a helper for the concurrency and uniqueness suites.
+func createView(t *testing.T, router http.Handler, name, target string, state map[string]string) viewJSON {
+	t.Helper()
+	w := doViewReq(router, "POST", "/api/views", "mira@ops",
+		map[string]interface{}{"name": name, "target": target, "state": state})
+	if w.Code != http.StatusCreated {
+		t.Fatalf("creating view %q: status %d body %s", name, w.Code, w.Body.String())
+	}
+	return decodeView(t, w)
+}
+
+func TestViewVersioning(t *testing.T) {
+	store, audit, reset := newViewsTestStore(t)
+	router := viewsRouter(store, audit)
+
+	Convey("Given a saved user view", t, func() {
+		reset()
+		v := createView(t, router, "gw-timeout blast", "tasks", map[string]string{"q": "state=retry"})
+
+		Convey("Then it is served with version 1 and an updated_at", func() {
+			So(v.Version, ShouldEqual, 1)
+			So(v.UpdatedAt, ShouldEqual, v.CreatedAt)
+		})
+
+		Convey("When a PUT omits the version", func() {
+			w := doViewReq(router, "PUT", "/api/views/"+v.ID, "kai@ops",
+				map[string]interface{}{"name": "renamed"})
+
+			Convey("Then it answers 400 and the name is unchanged", func() {
+				So(w.Code, ShouldEqual, http.StatusBadRequest)
+				cur, _, err := store.Get(context.Background(), v.ID)
+				So(err, ShouldBeNil)
+				So(cur.Name, ShouldEqual, "gw-timeout blast")
+			})
+		})
+
+		Convey("When a PUT carries the current version", func() {
+			w := doViewReq(router, "PUT", "/api/views/"+v.ID, "kai@ops",
+				map[string]interface{}{"version": 1, "name": "renamed once"})
+
+			Convey("Then it answers 200, bumps the version and moves updated_at", func() {
+				So(w.Code, ShouldEqual, http.StatusOK)
+				u := decodeView(t, w)
+				So(u.Version, ShouldEqual, 2)
+				So(u.Name, ShouldEqual, "renamed once")
+				So(u.CreatedAt, ShouldEqual, v.CreatedAt)
+				So(u.UpdatedAt, ShouldNotEqual, "")
+			})
+
+			Convey("And a second PUT with the stale version answers 409 without writing", func() {
+				stale := doViewReq(router, "PUT", "/api/views/"+v.ID, "mira@ops",
+					map[string]interface{}{"version": 1, "name": "renamed twice"})
+				So(stale.Code, ShouldEqual, http.StatusConflict)
+				var body map[string]string
+				So(json.Unmarshal(stale.Body.Bytes(), &body), ShouldBeNil)
+				So(body["error"], ShouldEqual, "view changed")
+
+				cur, _, err := store.Get(context.Background(), v.ID)
+				So(err, ShouldBeNil)
+				So(cur.Name, ShouldEqual, "renamed once")
+				So(cur.Version, ShouldEqual, 2)
+			})
+		})
+
+		Convey("When a legacy record without version or updated_at is read", func() {
+			ctx := context.Background()
+			rc := redis.NewClient(&redis.Options{Addr: viewsTestRedisAddr, DB: viewsTestRedisDB})
+			defer rc.Close()
+			So(rc.HDel(ctx, viewKey(v.ID), "version", "updated_at").Err(), ShouldBeNil)
+
+			Convey("Then it reads back as version 1 with updated_at = created_at", func() {
+				cur, ok, err := store.Get(ctx, v.ID)
+				So(err, ShouldBeNil)
+				So(ok, ShouldBeTrue)
+				So(cur.Version, ShouldEqual, 1)
+				So(cur.UpdatedAt.UnixMilli(), ShouldEqual, cur.CreatedAt.UnixMilli())
+
+				Convey("And a PUT with version 1 is accepted", func() {
+					w := doViewReq(router, "PUT", "/api/views/"+v.ID, "kai@ops",
+						map[string]interface{}{"version": 1, "name": "migrated"})
+					So(w.Code, ShouldEqual, http.StatusOK)
+					So(decodeView(t, w).Version, ShouldEqual, 2)
+				})
+			})
+		})
+	})
+}
+
+func TestViewNameUniqueness(t *testing.T) {
+	store, audit, reset := newViewsTestStore(t)
+	router := viewsRouter(store, audit)
+
+	Convey("Given a saved view named 'gw-timeout blast'", t, func() {
+		reset()
+		first := createView(t, router, "gw-timeout blast", "tasks", map[string]string{"q": "state=retry"})
+
+		Convey("When a second view is created with the same name in another case", func() {
+			w := doViewReq(router, "POST", "/api/views", "kai@ops",
+				map[string]interface{}{"name": "  GW-Timeout Blast ", "target": "tasks", "state": map[string]string{}})
+
+			Convey("Then it answers 409 and only one view exists", func() {
+				So(w.Code, ShouldEqual, http.StatusConflict)
+				var body map[string]string
+				So(json.Unmarshal(w.Body.Bytes(), &body), ShouldBeNil)
+				So(body["error"], ShouldContainSubstring, "already exists")
+				views := decodeViewList(t, doViewReq(router, "GET", "/api/views", "", nil))
+				So(len(views), ShouldEqual, 1)
+			})
+		})
+
+		Convey("When a second view is renamed onto the first name", func() {
+			second := createView(t, router, "orphans", "tasks", map[string]string{"q": "state=active"})
+			w := doViewReq(router, "PUT", "/api/views/"+second.ID, "kai@ops",
+				map[string]interface{}{"version": second.Version, "name": "gw-timeout blast"})
+
+			Convey("Then it answers 409 and neither view changed", func() {
+				So(w.Code, ShouldEqual, http.StatusConflict)
+				cur, _, err := store.Get(context.Background(), second.ID)
+				So(err, ShouldBeNil)
+				So(cur.Name, ShouldEqual, "orphans")
+				So(cur.Version, ShouldEqual, second.Version)
+			})
+		})
+
+		Convey("When a view is renamed to its own name in another case", func() {
+			w := doViewReq(router, "PUT", "/api/views/"+first.ID, "kai@ops",
+				map[string]interface{}{"version": first.Version, "name": "GW-timeout Blast"})
+
+			Convey("Then it is accepted — a view never collides with itself", func() {
+				So(w.Code, ShouldEqual, http.StatusOK)
+				So(decodeView(t, w).Name, ShouldEqual, "GW-timeout Blast")
+			})
+		})
+	})
+}
