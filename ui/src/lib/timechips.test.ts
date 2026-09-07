@@ -200,3 +200,27 @@ describe("isTimeChipActive", () => {
     expect(isTimeChipActive("failed_after=2026-07-27T11:00:00Z", chip)).toBe(false);
   });
 });
+
+// Review #48: pending tasks with no queued-at record (RunTask / RunAll /
+// shutdown requeue) are invisible to pending_age>; the console offers
+// pending_age=unknown as the third outcome.
+describe("pending_age=unknown chip", () => {
+  const chip = TIME_CHIPS.pending.find((c) => c.value === "unknown") as TimeChip;
+
+  it("exists on the pending state and writes pending_age=unknown", () => {
+    expect(chip).toBeDefined();
+    expect(chip.field).toBe("pending_age");
+    expect(timeChipClause(chip, NOW)).toBe("pending_age=unknown");
+  });
+
+  it("replaces an age clause on the same field instead of stacking", () => {
+    expect(applyTimeChip("queue=email pending_age>2h", chip, NOW)).toBe(
+      "queue=email pending_age=unknown"
+    );
+  });
+
+  it("reads as active once the query carries it", () => {
+    expect(isTimeChipActive("pending_age=unknown", chip)).toBe(true);
+    expect(isTimeChipActive("pending_age>2h", chip)).toBe(false);
+  });
+});

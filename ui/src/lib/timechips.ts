@@ -31,6 +31,10 @@ export const TIME_CHIPS: Record<ConsoleTaskState, TimeChip[]> = {
     { label: "waiting >5m", field: "pending_age", op: ">", value: "5m" },
     { label: ">30m", field: "pending_age", op: ">", value: "30m" },
     { label: ">2h", field: "pending_age", op: ">", value: "2h" },
+    // Tasks with no pending_since record: re-run through RunTask/RunAll, or
+    // requeued by a worker shutdown. `pending_age>` cannot evaluate them, so
+    // this chip is the only way to list them.
+    { label: "no queued-at record", field: "pending_age", op: "=", value: "unknown" },
   ],
   active: [
     { label: "running >30s", field: "running", op: ">", value: "30s" },

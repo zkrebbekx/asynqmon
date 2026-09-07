@@ -106,6 +106,9 @@ interface SearchMeta {
   scanCursor: string;
   candidateEstimate: number;
   scanned: number;
+  // Scanned pending tasks with no queued-at record; `pending_age>` did not
+  // evaluate them (RunTask/RunAll/shutdown requeue write no pending_since).
+  pendingSinceUnknown: number;
 }
 
 export default function TasksGlobalView() {
@@ -199,6 +202,7 @@ export default function TasksGlobalView() {
   const [truncated, setTruncated] = useState(false);
   const [meta, setMeta] = useState<SearchMeta>({
     mode: "legacy", exact: false, cursor: "", scanCursor: "", candidateEstimate: 0, scanned: 0,
+    pendingSinceUnknown: 0,
   });
   const [facets, setFacets] = useState<{ key: string; value: string; count: number }[]>([]);
   const [error, setError] = useState("");
@@ -238,6 +242,7 @@ export default function TasksGlobalView() {
   // feeding the resume cursor; results append below the first window.
   const [extraTasks, setExtraTasks] = useState<TaskInfo[]>([]);
   const [extraScanned, setExtraScanned] = useState(0);
+  const [extraPendingUnknown, setExtraPendingUnknown] = useState(0);
   const [extraMatches, setExtraMatches] = useState(0);
   // null = not continued yet (follow the base response's cursor); "" = done.
   const [contCursor, setContCursor] = useState<string | null>(null);
@@ -273,6 +278,7 @@ export default function TasksGlobalView() {
       // The continuation window belonged to the live scan; drop it.
       setExtraTasks([]);
       setExtraScanned(0);
+      setExtraPendingUnknown(0);
       setExtraMatches(0);
       setContCursor(null);
     } else if (j.state === "failed") {
@@ -379,6 +385,7 @@ export default function TasksGlobalView() {
         scanCursor: resp.scan_cursor ?? "",
         candidateEstimate: resp.candidate_estimate ?? 0,
         scanned: resp.scanned ?? 0,
+        pendingSinceUnknown: resp.pending_since_unknown ?? 0,
       });
       setError("");
       setRejection(null);
@@ -490,6 +497,7 @@ export default function TasksGlobalView() {
     setCursorStack([]);
     setExtraTasks([]);
     setExtraScanned(0);
+    setExtraPendingUnknown(0);
     setExtraMatches(0);
     setContCursor(null);
     if (filterMounted.current) setScanJobParam(null);
@@ -571,6 +579,10 @@ export default function TasksGlobalView() {
   const effectiveScanCursor = contCursor ?? meta.scanCursor;
   const scanPartial = meta.mode === "scan" && effectiveScanCursor !== "";
   const scannedTotal = meta.scanned + extraScanned;
+  // Pending tasks the scan could not evaluate for age: asynq records
+  // pending_since on enqueue and scheduler forwarding only, so a task re-run
+  // through Run/Run all, or requeued by a worker shutdown, carries none.
+  const pendingUnknownTotal = meta.pendingSinceUnknown + extraPendingUnknown;
   const continueScan = async () => {
     if (!effectiveScanCursor || continuing) return;
     setContinuing(true);
@@ -584,6 +596,7 @@ export default function TasksGlobalView() {
       });
       setExtraTasks((prev) => [...prev, ...(resp.tasks ?? [])]);
       setExtraScanned((s) => s + (resp.scanned ?? 0));
+      setExtraPendingUnknown((n) => n + (resp.pending_since_unknown ?? 0));
       setExtraMatches((m) => m + (resp.total ?? 0));
       setContCursor(resp.scan_cursor ?? "");
     } catch (e) {
@@ -974,6 +987,27 @@ export default function TasksGlobalView() {
             </div>
           </div>
         )
+      )}
+
+      {/* Queued-at gap (review #48): asynq records pending_since on enqueue
+          and scheduler forwarding only, so a task re-run through Run / Run
+          all, or requeued by a worker shutdown, carries none and no
+          pending_age> query can evaluate it. Say so, and offer the list. */}
+      {pendingUnknownTotal > 0 && (
+        <div data-testid="pending-unknown-note" className="flex flex-wrap items-center gap-2 text-xs text-[var(--fc-warn)]">
+          <span>
+            {pendingUnknownTotal.toLocaleString()} pending tasks have no queued-at record and were not evaluated —
+            tasks re-run through Run or Run all, or requeued by a worker shutdown, carry no queued-at time.
+          </span>
+          <Button
+            size="sm"
+            variant="outline"
+            className="h-6 text-xs"
+            onClick={() => updateView({ q: setClause(view.q, "pending_age", "=", "unknown"), page: 0 })}
+          >
+            List them
+          </Button>
+        </div>
       )}
 
       {/* Metadata facet chips — clicking COMPOSES a meta.key=value clause
