@@ -194,20 +194,36 @@ func TestHygieneEndpoints(t *testing.T) {
 
 func TestHygieneReadOnlyMode(t *testing.T) {
 	env := newHygieneTestEnv(t)
-	h := env.newRouter(Options{ReadOnly: true})
 
-	// Run-now must survive read-only mode (reports are reads; the §3.10
-	// endpoint spec documents this) while the config PUT is blocked.
-	var rep hygiene.Report
-	runRec := doJSON(t, h, "POST", "/api/hygiene/scheduler-health/run", nil, &rep)
-	putRec := doJSON(t, h, "PUT", "/api/hygiene/scheduler-health/config",
+	// Default read-only replica: Run-now is a mutation like every other
+	// (#53.3) and the config PUT stays blocked.
+	strict := env.newRouter(Options{ReadOnly: true})
+	strictRun := doJSON(t, strict, "POST", "/api/hygiene/scheduler-health/run", nil, nil)
+	putRec := doJSON(t, strict, "PUT", "/api/hygiene/scheduler-health/config",
 		map[string]interface{}{"enabled": true, "interval_seconds": 3600}, nil)
-	listRec := doJSON(t, h, "GET", "/api/hygiene", nil, nil)
+	listRec := doJSON(t, strict, "GET", "/api/hygiene", nil, nil)
+	strictAudit, strictAuditErr := jobs.NewStore(env.rc).ReadAudit(context.Background(), 10)
 
+	// Opt-in replica: Run-now works and is audit-logged.
+	opted := env.newRouter(Options{ReadOnly: true, HygieneRunInReadOnly: true})
+	var rep hygiene.Report
+	runRec := doJSON(t, opted, "POST", "/api/hygiene/scheduler-health/run", nil, &rep)
 	audit, auditErr := jobs.NewStore(env.rc).ReadAudit(context.Background(), 10)
 
 	Convey("Given the hygiene surface in read-only mode", t, func() {
-		Convey("Then Run-now still works and is audit-logged", func() {
+		Convey("Then Run-now is refused by the read-only filter by default", func() {
+			So(strictRun.Code, ShouldEqual, http.StatusMethodNotAllowed)
+			So(strictRun.Body.String(), ShouldContainSubstring, "read-only")
+		})
+
+		Convey("Then a refused Run-now writes no audit entry", func() {
+			So(strictAuditErr, ShouldBeNil)
+			for _, e := range strictAudit {
+				So(e.Event, ShouldNotEqual, jobs.AuditHygieneRun)
+			}
+		})
+
+		Convey("Then --hygiene-run-in-read-only restores Run-now and audits it", func() {
 			So(runRec.Code, ShouldEqual, http.StatusOK)
 			So(rep.Kind, ShouldEqual, "scheduler-health")
 			So(auditErr, ShouldBeNil)
@@ -226,6 +242,53 @@ func TestHygieneReadOnlyMode(t *testing.T) {
 
 		Convey("Then reads keep working", func() {
 			So(listRec.Code, ShouldEqual, http.StatusOK)
+		})
+	})
+}
+
+// ----------------------------------------------------------------------------
+// #53.3: Run-now is throttled per kind. A refused run answers 429, writes no
+// report and no audit entry.
+// ----------------------------------------------------------------------------
+
+func TestHygieneRunThrottle(t *testing.T) {
+	env := newHygieneTestEnv(t)
+	h := env.newRouter(Options{})
+
+	var first hygiene.Report
+	firstRec := doJSON(t, h, "POST", "/api/hygiene/scheduler-health/run", nil, &first)
+	secondRec := doJSON(t, h, "POST", "/api/hygiene/scheduler-health/run", nil, nil)
+	thirdRec := doJSON(t, h, "POST", "/api/hygiene/scheduler-health/run", nil, nil)
+
+	var after hygiene.Report
+	afterRec := doJSON(t, h, "GET", "/api/hygiene/scheduler-health", nil, &after)
+
+	audit, auditErr := jobs.NewStore(env.rc).ReadAudit(context.Background(), 20)
+	var runs int
+	for _, e := range audit {
+		if e.Event == jobs.AuditHygieneRun {
+			runs++
+		}
+	}
+
+	Convey("Given three Run-now requests for the same kind inside 30s", t, func() {
+		Convey("Then the first generates the report", func() {
+			So(firstRec.Code, ShouldEqual, http.StatusOK)
+			So(first.Kind, ShouldEqual, "scheduler-health")
+		})
+		Convey("Then the next two answer 429 with Retry-After and guidance", func() {
+			So(secondRec.Code, ShouldEqual, http.StatusTooManyRequests)
+			So(thirdRec.Code, ShouldEqual, http.StatusTooManyRequests)
+			So(secondRec.Header().Get("Retry-After"), ShouldNotBeEmpty)
+			So(secondRec.Body.String(), ShouldContainSubstring, "GET /api/hygiene/scheduler-health")
+		})
+		Convey("Then the persisted report is still the first one", func() {
+			So(afterRec.Code, ShouldEqual, http.StatusOK)
+			So(after.GeneratedAt.Equal(first.GeneratedAt), ShouldBeTrue)
+		})
+		Convey("Then only the run that did work wrote an audit entry", func() {
+			So(auditErr, ShouldBeNil)
+			So(runs, ShouldEqual, 1)
 		})
 	})
 }

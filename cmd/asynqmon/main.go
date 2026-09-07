@@ -118,6 +118,18 @@ type Config struct {
 	AuthHeader      string
 	TrustedProxies  string
 	RequireIdentity bool
+	// TrustBasicAuthUser accepts the Basic-Auth username as the actor.
+	TrustBasicAuthUser bool
+	// AllowUntrustedAuthHeader lets the binary start with AuthHeader set
+	// and TrustedProxies empty (the header is then trusted from any peer).
+	AllowUntrustedAuthHeader bool
+
+	// MaxSSEConnections caps concurrent /api/fleet/events streams.
+	MaxSSEConnections int
+
+	// HygieneRunInReadOnly keeps POST /api/hygiene/{kind}/run available in
+	// read-only mode.
+	HygieneRunInReadOnly bool
 
 	// Enqueue capability (Fleet Console §5.10). Default off; always
 	// excluded in read-only mode.
@@ -197,6 +209,10 @@ func parseFlags(progname string, args []string) (cfg *Config, output string, err
 	flags.StringVar(&conf.AuthHeader, "auth-header", getEnvDefaultString("AUTH_HEADER", ""), "reverse-proxy header resolved as the acting user for the audit log (e.g. X-Auth-Request-User)")
 	flags.StringVar(&conf.TrustedProxies, "trusted-proxies", getEnvDefaultString("TRUSTED_PROXIES", ""), "comma separated CIDRs the auth header is trusted from (empty: trusted from any peer)")
 	flags.BoolVar(&conf.RequireIdentity, "require-identity", getEnvOrDefaultBool("REQUIRE_IDENTITY", false), "refuse mutating requests that carry no resolvable identity")
+	flags.BoolVar(&conf.TrustBasicAuthUser, "trust-basic-auth-user", getEnvOrDefaultBool("TRUST_BASIC_AUTH_USER", false), "accept the HTTP Basic-Auth username as the acting user for the audit log; asynqmon never verifies the password, so set this only behind a proxy that does")
+	flags.BoolVar(&conf.AllowUntrustedAuthHeader, "allow-untrusted-auth-header", getEnvOrDefaultBool("ALLOW_UNTRUSTED_AUTH_HEADER", false), "start with --auth-header set and --trusted-proxies empty; the header is then trusted from every peer (insecure)")
+	flags.IntVar(&conf.MaxSSEConnections, "max-sse-connections", getEnvOrDefaultInt("MAX_SSE_CONNECTIONS", 256), "maximum concurrent /api/fleet/events streams per replica; extra subscribers get 503 with Retry-After (negative: unlimited)")
+	flags.BoolVar(&conf.HygieneRunInReadOnly, "hygiene-run-in-read-only", getEnvOrDefaultBool("HYGIENE_RUN_IN_READ_ONLY", false), "keep POST /api/hygiene/{kind}/run available in --read-only mode (default: blocked like every other mutation)")
 	flags.BoolVar(&conf.EnableEnqueue, "enable-enqueue", getEnvOrDefaultBool("ENABLE_ENQUEUE", false), "enable creating tasks from the web ui (POST /api/queues/{qname}/tasks); always excluded in read-only mode")
 	flags.StringVar(&conf.CorrelationKeys, "correlation-keys", getEnvDefaultString("CORRELATION_KEYS", "trace_id,correlation_id,request_id"), "comma separated list of payload keys the task drawer's Flow view recognizes as correlation ids, in priority order")
 	flags.StringVar(&conf.CorsAllowedOrigins, "cors-allowed-origins", getEnvDefaultString("CORS_ALLOWED_ORIGINS", ""), "comma separated list of origins allowed to make cross-origin requests (default: same-origin only)")
@@ -209,6 +225,28 @@ func parseFlags(progname string, args []string) (cfg *Config, output string, err
 	}
 	conf.Args = flags.Args()
 	return &conf, buf.String(), nil
+}
+
+// validateAuthHeaderTrust returns the fatal startup message for an
+// --auth-header that would be trusted from every peer, or "" when the
+// configuration is acceptable. --allow-untrusted-auth-header downgrades the
+// refusal to the library's warning.
+func validateAuthHeaderTrust(cfg *Config) string {
+	if cfg.AuthHeader == "" || strings.TrimSpace(cfg.TrustedProxies) != "" || cfg.AllowUntrustedAuthHeader {
+		return ""
+	}
+	return "--auth-header needs --trusted-proxies: without it the identity header is " +
+		"trusted from every peer, so any direct client can forge the audit actor" +
+		requireIdentityNote(cfg) +
+		". Set --trusted-proxies to your reverse proxy's CIDRs (e.g. --trusted-proxies=10.0.0.0/8), " +
+		"or pass --allow-untrusted-auth-header to accept the risk."
+}
+
+func requireIdentityNote(cfg *Config) string {
+	if cfg.RequireIdentity {
+		return " and still satisfy --require-identity"
+	}
+	return ""
 }
 
 func makeTLSConfig(cfg *Config) *tls.Config {
@@ -389,6 +427,13 @@ func buildOptions(cfg *Config, redisConnOpt asynq.RedisConnOpt) asynqmon.Options
 		CorrelationKeys:    splitList(cfg.CorrelationKeys),
 		HygieneWebhookURL:  cfg.HygieneWebhookURL,
 		HygieneDisabled:    cfg.DisableHygiene,
+		// Identity hardening (#32), SSE cap (#35), hygiene run-now gate
+		// (#53.3). The library warns about an untrusted auth header instead
+		// of refusing; the refusal lives in validateConfig.
+		TrustBasicAuthUser:       cfg.TrustBasicAuthUser,
+		AllowUntrustedAuthHeader: cfg.AllowUntrustedAuthHeader,
+		MaxSSEConnections:        cfg.MaxSSEConnections,
+		HygieneRunInReadOnly:     cfg.HygieneRunInReadOnly,
 	}
 	if cfg.RedisClusterNodes != "" {
 		opts.StatsDisabled = true
@@ -438,17 +483,14 @@ func main() {
 
 // validateConfig rejects flag combinations the binary refuses to run with.
 func validateConfig(cfg *Config) error {
-	// A spoofable identity must not satisfy --require-identity: with
-	// --auth-header set and no --trusted-proxies, the header is trusted from
-	// EVERY peer, so any client that can reach the listener directly can
-	// forge the audit actor AND pass the identity requirement. The library
-	// keeps the permissive single-proxy default (with a loud warning); the
-	// binary refuses the misconfiguration outright.
-	if cfg.RequireIdentity && cfg.AuthHeader != "" && strings.TrimSpace(cfg.TrustedProxies) == "" {
-		return errors.New("--require-identity with --auth-header needs --trusted-proxies: " +
-			"without it the identity header is trusted from every peer, so any direct " +
-			"client can forge the audit actor and still satisfy the identity requirement. " +
-			"Set --trusted-proxies to your reverse proxy's CIDRs (e.g. --trusted-proxies=10.0.0.0/8).")
+	// With --auth-header set and no --trusted-proxies, the header is trusted
+	// from EVERY peer, so any client that can reach the listener directly
+	// can forge the audit actor (and, with --require-identity, satisfy the
+	// identity requirement). The library keeps the permissive single-proxy
+	// default with a loud warning; the binary refuses the misconfiguration
+	// unless the operator acknowledges it with --allow-untrusted-auth-header.
+	if msg := validateAuthHeaderTrust(cfg); msg != "" {
+		return errors.New(msg)
 	}
 	if _, err := parseTrustedProxyCIDRs(splitList(cfg.TrustedProxies)); err != nil {
 		return err

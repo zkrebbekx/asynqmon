@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sort"
 	"sync"
 	"time"
 
@@ -35,13 +36,43 @@ import (
 //   event: attention — data = the GET /api/fleet/attention response JSON
 //   event: jobs      — data = {"jobs": [<job public JSON>, ...]}; the
 //                      on-connect burst carries the current NON-TERMINAL jobs
-//                      snapshot, every later event carries the one job that
+//                      snapshot (served from the broker cache the relay keeps
+//                      current), every later event carries the one job that
 //                      just progressed / transitioned
+//   event: ping      — data = {"t": <unix ms>}; the liveness beat the browser
+//                      watchdog listens for (EventSource never surfaces a
+//                      comment)
 // plus a comment heartbeat every 15s so proxies keep the connection open.
 // ****************************************************************************
 
-// fleetEventsHeartbeat is how often an idle stream writes a comment line.
-const fleetEventsHeartbeat = 15 * time.Second
+const (
+	// fleetEventsHeartbeat is how often a stream writes its comment line and
+	// its `ping` event.
+	fleetEventsHeartbeat = 15 * time.Second
+
+	// defaultMaxSSEConnections caps concurrent subscribers per replica when
+	// Options.MaxSSEConnections is 0. Each connection costs a goroutine, a
+	// 16-slot channel and a ticker.
+	defaultMaxSSEConnections = 256
+
+	// sseRetryAfterSeconds is the Retry-After value on the 503 a refused
+	// subscriber gets.
+	sseRetryAfterSeconds = "5"
+
+	// sseWriteTimeout bounds one write to one subscriber. Without it a
+	// half-open TCP peer blocks the handler goroutine in Write until the
+	// kernel keepalive gives up (2 minutes or more).
+	sseWriteTimeout = 30 * time.Second
+
+	// jobsSnapshotReconcile is how long the broker serves its cached
+	// on-connect jobs snapshot before it reads Redis again. The relay keeps
+	// the cache exact between reconciles by applying every jobs event to it,
+	// so the read only repairs losses (a dropped pub/sub message, a job
+	// whose hash expired). A reconnect storm — every browser tab
+	// reconnecting after a pod restart — therefore costs one read, not one
+	// per connection.
+	jobsSnapshotReconcile = 30 * time.Second
+)
 
 // fleetEventsPayload is one broadcast unit: pre-rendered JSON per event. A
 // nil slice means that payload was unavailable (engine warming up, or the
@@ -71,6 +102,17 @@ type fleetEventsBroker struct {
 	// heartbeatEvery is per-connection; a field (not the const) so tests can
 	// shrink it.
 	heartbeatEvery time.Duration
+	// maxSubs caps concurrent subscribers; <= 0 means unlimited.
+	maxSubs int
+
+	// jobsSnapMu guards the cached on-connect jobs snapshot. It is separate
+	// from mu so a snapshot read never blocks a fan-out. jobsActive is the
+	// current non-terminal job set by id, jobsSnap its rendered
+	// {"jobs":[...]} body, and jobsSyncedAt the last full Redis reconcile.
+	jobsSnapMu   sync.Mutex
+	jobsActive   map[string]jobs.WireJob
+	jobsSnap     []byte
+	jobsSyncedAt time.Time
 
 	mu   sync.Mutex
 	subs map[chan fleetEventsPayload]struct{}
@@ -88,12 +130,19 @@ type fleetEventsBroker struct {
 	started bool
 }
 
-func newFleetEventsBroker(engine *stats.Engine, rc redis.UniversalClient, jobsStore *jobs.Store) *fleetEventsBroker {
+// newFleetEventsBroker creates the broker. maxSubs caps concurrent
+// subscribers: 0 uses defaultMaxSSEConnections, a negative value removes the
+// cap.
+func newFleetEventsBroker(engine *stats.Engine, rc redis.UniversalClient, jobsStore *jobs.Store, maxSubs int) *fleetEventsBroker {
+	if maxSubs == 0 {
+		maxSubs = defaultMaxSSEConnections
+	}
 	return &fleetEventsBroker{
 		engine:         engine,
 		rc:             rc,
 		jobsStore:      jobsStore,
 		heartbeatEvery: fleetEventsHeartbeat,
+		maxSubs:        maxSubs,
 		subs:           make(map[chan fleetEventsPayload]struct{}),
 	}
 }
@@ -184,6 +233,9 @@ func (b *fleetEventsBroker) startJobsRelay(ctx context.Context) {
 			// The payload is one job's public JSON object (jobs/events.go);
 			// wrap it in the uniform {"jobs":[...]} event body.
 			b.fanOutJobs([]byte(`{"jobs":[` + msg.Payload + `]}`))
+			// Keep the on-connect snapshot exact while jobs move, without
+			// re-reading Redis: the event IS the job's new state.
+			b.applyJobsEvent([]byte(msg.Payload))
 		}
 	}()
 }
@@ -202,41 +254,102 @@ func (b *fleetEventsBroker) fanOutJobs(body []byte) {
 	}
 }
 
-// renderJobsSnapshot builds the on-connect {"jobs":[...]} body: every
-// non-terminal job, newest first, so a fresh page knows the current state
-// (e.g. a reloaded console re-attaching to its running scan job). Returns nil
-// when the broker has no jobs wiring or the read fails (event skipped, never
+// applyJobsEvent folds one relayed job event into the cached snapshot: a
+// non-terminal job replaces its entry, a terminal job leaves the active set.
+// Callers hold no lock.
+func (b *fleetEventsBroker) applyJobsEvent(payload []byte) {
+	var wj jobs.WireJob
+	if json.Unmarshal(payload, &wj) != nil || wj.ID == "" {
+		return
+	}
+	b.jobsSnapMu.Lock()
+	defer b.jobsSnapMu.Unlock()
+	if b.jobsActive == nil {
+		// No snapshot has been built yet: the next connect reconciles from
+		// Redis and picks this job up there.
+		return
+	}
+	if jobs.State(wj.State).IsTerminal() {
+		delete(b.jobsActive, wj.ID)
+	} else {
+		b.jobsActive[wj.ID] = wj
+	}
+	b.renderCachedJobsLocked()
+}
+
+// renderCachedJobsLocked re-renders jobsSnap from jobsActive, newest first.
+// The caller holds jobsSnapMu.
+func (b *fleetEventsBroker) renderCachedJobsLocked() {
+	active := make([]jobs.WireJob, 0, len(b.jobsActive))
+	for _, wj := range b.jobsActive {
+		active = append(active, wj)
+	}
+	sort.Slice(active, func(i, j int) bool {
+		if active[i].CreatedAt != active[j].CreatedAt {
+			return active[i].CreatedAt > active[j].CreatedAt // newest first
+		}
+		return active[i].ID < active[j].ID
+	})
+	if body, err := json.Marshal(map[string]interface{}{"jobs": active}); err == nil {
+		b.jobsSnap = body
+	}
+}
+
+// cachedJobsSnapshot serves the on-connect snapshot from the broker cache.
+// It reads Redis only when the cache is empty or older than
+// jobsSnapshotReconcile, so N connections cost at most one read per
+// reconcile window instead of one read each. Returns nil when the broker has
+// no jobs wiring or the first read fails (the event is then skipped, never
 // fabricated).
-func (b *fleetEventsBroker) renderJobsSnapshot(ctx context.Context) []byte {
+func (b *fleetEventsBroker) cachedJobsSnapshot(ctx context.Context) []byte {
+	b.jobsSnapMu.Lock()
+	defer b.jobsSnapMu.Unlock()
+	if b.jobsSnap != nil && time.Since(b.jobsSyncedAt) < jobsSnapshotReconcile {
+		return b.jobsSnap
+	}
+	active, ok := b.readActiveJobs(ctx)
+	if !ok {
+		return b.jobsSnap // a failed read keeps the previous copy, never fabricates
+	}
+	b.jobsActive = active
+	b.jobsSyncedAt = time.Now()
+	b.renderCachedJobsLocked()
+	return b.jobsSnap
+}
+
+// readActiveJobs loads the current non-terminal jobs from the store. ok is
+// false when the broker has no jobs wiring or the read failed.
+func (b *fleetEventsBroker) readActiveJobs(ctx context.Context) (map[string]jobs.WireJob, bool) {
 	if b.jobsStore == nil {
-		return nil
+		return nil, false
 	}
 	list, err := b.jobsStore.List(ctx, 200)
 	if err != nil {
-		return nil
+		return nil, false
 	}
-	active := make([]jobs.WireJob, 0, len(list))
+	active := make(map[string]jobs.WireJob, len(list))
 	for _, j := range list {
 		if !j.State.IsTerminal() {
-			active = append(active, jobs.WireOf(j))
+			active[j.ID] = jobs.WireOf(j)
 		}
 	}
-	body, err := json.Marshal(map[string]interface{}{"jobs": active})
-	if err != nil {
-		return nil
-	}
-	return body
+	return active, true
 }
 
 // subscribe registers a new SSE connection. Returns the event channel, the
 // last broadcast payload (nil when the broker has not rendered yet — the
-// handler then renders once itself for the on-connect send), and a cancel
-// func the handler MUST call on disconnect.
-func (b *fleetEventsBroker) subscribe() (<-chan fleetEventsPayload, *fleetEventsPayload, func()) {
+// handler then renders once itself for the on-connect send), a cancel func
+// the handler MUST call on disconnect, and ok=false when the replica already
+// serves maxSubs streams (the handler then answers 503).
+func (b *fleetEventsBroker) subscribe() (<-chan fleetEventsPayload, *fleetEventsPayload, func(), bool) {
 	// Buffer sized for a burst of jobs ticks on top of the aggregate pair; a
 	// full buffer only ever costs one tick, never blocks a publisher.
 	ch := make(chan fleetEventsPayload, 16)
 	b.mu.Lock()
+	if b.maxSubs > 0 && len(b.subs) >= b.maxSubs {
+		b.mu.Unlock()
+		return nil, nil, nil, false
+	}
 	b.subs[ch] = struct{}{}
 	last := b.last
 	b.mu.Unlock()
@@ -244,7 +357,7 @@ func (b *fleetEventsBroker) subscribe() (<-chan fleetEventsPayload, *fleetEvents
 		b.mu.Lock()
 		delete(b.subs, ch)
 		b.mu.Unlock()
-	}
+	}, true
 }
 
 // render builds both payloads from the engine's current state (in-process on
@@ -340,35 +453,55 @@ func newFleetEventsHandlerFunc(broker *fleetEventsBroker) http.HandlerFunc {
 			return
 		}
 		ctrl := http.NewResponseController(w)
-		// An SSE stream must outlive the server's WriteTimeout; clear the
-		// write deadline for this response only. Best-effort: on servers
-		// without deadline support the stream simply lives within whatever
-		// timeout applies.
-		_ = ctrl.SetWriteDeadline(time.Time{})
+
+		// Take a slot BEFORE writing any header: a refused subscriber must
+		// get a plain 503, not a truncated event stream.
+		ch, last, unsubscribe, ok := broker.subscribe()
+		if !ok {
+			w.Header().Set("Retry-After", sseRetryAfterSeconds)
+			writeErrorMsg(w, http.StatusServiceUnavailable,
+				"too many live event streams on this replica — retry in a few seconds (--max-sse-connections)")
+			return
+		}
+		defer unsubscribe()
 
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.Header().Set("Cache-Control", "no-cache")
 		w.Header().Set("X-Accel-Buffering", "no") // defeat nginx response buffering
 		w.WriteHeader(http.StatusOK)
 
-		ch, last, unsubscribe := broker.subscribe()
-		defer unsubscribe()
+		// flushWithDeadline writes whatever body was produced, bounded by
+		// sseWriteTimeout, and clears the deadline again afterwards: an
+		// idle stream must outlive the server's WriteTimeout, but a stuck
+		// peer must be dropped in 30s instead of blocking this goroutine
+		// until the kernel keepalive gives up. Returns false when the
+		// stream is dead.
+		flushWithDeadline := func(write func()) bool {
+			_ = ctrl.SetWriteDeadline(time.Now().Add(sseWriteTimeout))
+			write()
+			err := ctrl.Flush()
+			_ = ctrl.SetWriteDeadline(time.Time{})
+			return err == nil
+		}
 
 		// On-connect: a comment so the client sees bytes immediately, then
 		// the current state (broker's last broadcast, or a fresh render when
 		// this is the first subscriber since boot), then the current
 		// non-terminal jobs snapshot so job trackers re-attach without a
-		// poll round-trip.
-		io.WriteString(w, ": connected\n\n")
+		// poll round-trip. The snapshot comes from the broker cache, so a
+		// reconnect storm costs one Redis read, not one per connection.
 		if last == nil {
 			p, _, _ := broker.render(r.Context())
 			last = &p
 		}
-		writeFleetEvents(w, *last)
-		if snap := broker.renderJobsSnapshot(r.Context()); snap != nil {
-			writeFleetEvents(w, fleetEventsPayload{jobs: snap})
-		}
-		if err := ctrl.Flush(); err != nil {
+		snap := broker.cachedJobsSnapshot(r.Context())
+		if !flushWithDeadline(func() {
+			io.WriteString(w, ": connected\n\n")
+			writeFleetEvents(w, *last)
+			if snap != nil {
+				writeFleetEvents(w, fleetEventsPayload{jobs: snap})
+			}
+		}) {
 			return
 		}
 
@@ -379,16 +512,26 @@ func newFleetEventsHandlerFunc(broker *fleetEventsBroker) http.HandlerFunc {
 			case <-r.Context().Done():
 				return // client disconnected (or server shutting down)
 			case p := <-ch:
-				writeFleetEvents(w, p)
-				if err := ctrl.Flush(); err != nil {
+				if !flushWithDeadline(func() { writeFleetEvents(w, p) }) {
 					return
 				}
 			case <-heartbeat.C:
-				io.WriteString(w, ": heartbeat\n\n")
-				if err := ctrl.Flush(); err != nil {
+				// The comment keeps proxies from idling the connection out;
+				// the `ping` event is the one EventSource surfaces, so the
+				// browser can run a liveness watchdog (#51).
+				if !flushWithDeadline(func() {
+					io.WriteString(w, ": heartbeat\n\n")
+					writePingEvent(w, time.Now())
+				}) {
 					return
 				}
 			}
 		}
 	}
+}
+
+// writePingEvent writes the liveness event the frontend watchdog listens for
+// (#51): `event: ping` with the server time in unix milliseconds.
+func writePingEvent(w io.Writer, now time.Time) {
+	fmt.Fprintf(w, "event: ping\ndata: {\"t\":%d}\n\n", now.UnixMilli())
 }

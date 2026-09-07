@@ -102,8 +102,12 @@ type Engine struct {
 	token int64 // atomic
 
 	// runMu serializes report generation on this replica: a scheduled pass
-	// and a Run-now must not interleave their bounded read bursts.
+	// and a Run-now must not interleave their bounded read bursts. It is
+	// released before the webhook delivery.
 	runMu sync.Mutex
+
+	// webhookWG tracks in-flight webhook deliveries so Stop waits for them.
+	webhookWG sync.WaitGroup
 
 	mu      sync.Mutex
 	cancel  context.CancelFunc
@@ -194,6 +198,7 @@ func (e *Engine) Stop() {
 
 	cancel()
 	e.wg.Wait()
+	e.webhookWG.Wait()
 
 	if atomic.LoadInt32(&e.holding) == 1 {
 		ctx, cancelRelease := context.WithTimeout(context.Background(), 2*time.Second)
@@ -333,7 +338,14 @@ func (e *Engine) run(ctx context.Context, kind string, token int64) (*Report, er
 		return nil, fmt.Errorf("unknown hygiene report kind %q", kind)
 	}
 	e.runMu.Lock()
-	defer e.runMu.Unlock()
+	unlocked := false
+	unlock := func() {
+		if !unlocked {
+			unlocked = true
+			e.runMu.Unlock()
+		}
+	}
+	defer unlock()
 
 	now := e.now()
 	rep := &Report{Kind: kind, GeneratedAt: now}
@@ -384,7 +396,19 @@ func (e *Engine) run(ctx context.Context, kind string, token int64) (*Report, er
 	if !ok {
 		return nil, ErrSuperseded
 	}
-	e.deliverWebhook(rep)
+	// Release the generation lock BEFORE the webhook: delivery has a 10s
+	// timeout, and holding runMu across it blocked every scheduled pass and
+	// every other Run-now for that long. Delivery runs in its own goroutine
+	// so the Run-now response never waits for a slow endpoint either; Stop
+	// waits for in-flight deliveries.
+	unlock()
+	if e.cfg.WebhookURL != "" {
+		e.webhookWG.Add(1)
+		go func() {
+			defer e.webhookWG.Done()
+			e.deliverWebhook(rep)
+		}()
+	}
 	return rep, nil
 }
 
@@ -404,8 +428,13 @@ func (e *Engine) readSnapshots(ctx context.Context) ([]*stats.QueueSnapshot, tim
 // deliverWebhook POSTs the report JSON. Best-effort: one attempt, bounded
 // timeout, failures logged — NO retries in v1 (documented on Options); a
 // missed delivery is recoverable because the report stays readable in-UI.
-// Synchronous by design: generation is already off the request hot path for
-// scheduled runs, and Run-now callers get delivery-before-response.
+// The caller runs it in its own goroutine, after releasing runMu: a slow
+// endpoint must not serialize report generation (#53).
+//
+// WaitForWebhooks blocks until every in-flight delivery finished. Exported
+// for tests; production waits through Stop.
+func (e *Engine) WaitForWebhooks() { e.webhookWG.Wait() }
+
 func (e *Engine) deliverWebhook(rep *Report) {
 	if e.cfg.WebhookURL == "" {
 		return

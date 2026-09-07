@@ -41,7 +41,7 @@ const enqueueAuditVerb = "enqueue"
 // enqueue through the embedded client, audit, and answer 201 with the created
 // task in the same taskInfo shape GET /api/queues/{qname}/tasks/{task_id}
 // returns (converted via the configured formatters).
-func newEnqueueTaskHandlerFunc(client *asynq.Client, store *jobs.Store, pf PayloadFormatter, rf ResultFormatter) http.HandlerFunc {
+func newEnqueueTaskHandlerFunc(client *asynq.Client, inspector *asynq.Inspector, store *jobs.Store, pf PayloadFormatter, rf ResultFormatter) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		qname := mux.Vars(r)["qname"]
 		r.Body = http.MaxBytesReader(w, r.Body, maxEnqueueBodyBytes)
@@ -54,6 +54,10 @@ func newEnqueueTaskHandlerFunc(client *asynq.Client, store *jobs.Store, pf Paylo
 		}
 		taskType, payload, taskOpts, errMsg := buildEnqueueTask(qname, &req, time.Now())
 		if errMsg != "" {
+			writeErrorMsg(w, http.StatusBadRequest, errMsg)
+			return
+		}
+		if errMsg := checkEnqueueQueueExists(inspector, qname, req.CreateQueue); errMsg != "" {
 			writeErrorMsg(w, http.StatusBadRequest, errMsg)
 			return
 		}
@@ -103,6 +107,29 @@ func newEnqueueTaskHandlerFunc(client *asynq.Client, store *jobs.Store, pf Paylo
 		w.WriteHeader(http.StatusCreated)
 		json.NewEncoder(w).Encode(toTaskInfo(info, pf, rf))
 	}
+}
+
+// checkEnqueueQueueExists refuses an unknown queue name unless the body asked
+// for the queue to be created. A typed queue name would otherwise create a
+// zero-consumer queue that the inventory hygiene report then flags (§3.10).
+// It returns "" when the request may proceed. A failed Queues() read also
+// returns "": the enqueue itself is the authority, and a Redis hiccup must
+// not block a legitimate task.
+func checkEnqueueQueueExists(inspector *asynq.Inspector, qname string, createQueue bool) string {
+	if createQueue || inspector == nil {
+		return ""
+	}
+	qnames, err := inspector.Queues()
+	if err != nil {
+		return ""
+	}
+	for _, q := range qnames {
+		if q == qname {
+			return ""
+		}
+	}
+	return fmt.Sprintf("queue: %q does not exist — check the name, "+
+		`or resend with "create_queue": true to create it`, qname)
 }
 
 // newEnqueueDisabledHandlerFunc answers the enqueue route when the capability

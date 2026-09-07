@@ -46,6 +46,7 @@ func TestParseFlags(t *testing.T) {
 				StatsInterval:         5 * time.Second,
 				DisableStats:          false,
 				CorrelationKeys:       "trace_id,correlation_id,request_id",
+				MaxSSEConnections:     256,
 
 				// Redis socket budget (#39) and the library-only options
 				// that gained flags (#43).

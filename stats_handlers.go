@@ -376,11 +376,6 @@ func newFleetQueuesHandlerFunc(engine *stats.Engine, tracker *stats.ViewTracker)
 			}
 		}
 		filter := stats.ParseFilter(q.Get("f"))
-		if tracker != nil {
-			for _, name := range filter.ExactNames() {
-				tracker.MarkViewed(r.Context(), name)
-			}
-		}
 
 		res, ok := readStats(w, r, engine)
 		if !ok {
@@ -417,6 +412,14 @@ func newFleetQueuesHandlerFunc(engine *stats.Engine, tracker *stats.ViewTracker)
 		if end < len(matched) {
 			next := end
 			resp.NextCursor = &next
+		}
+		// Record the views only now, on the answer path: marking before the
+		// validations let any GET write an arbitrary name into the shared
+		// asynqmon:viewed zset (#33).
+		if tracker != nil {
+			for _, name := range filter.ExactNames() {
+				tracker.MarkViewed(r.Context(), name)
+			}
 		}
 		writeResponseJSON(w, resp)
 	}
