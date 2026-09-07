@@ -20,6 +20,7 @@ import (
 	"github.com/redis/go-redis/v9"
 
 	"github.com/zkrebbekx/asynqmon/internal/leasefence"
+	"github.com/zkrebbekx/asynqmon/internal/safego"
 )
 
 // ****************************************************************************
@@ -422,8 +423,8 @@ func (e *Engine) Start(ctx context.Context) {
 	e.started = true
 	ctx, e.cancel = context.WithCancel(ctx)
 	e.wg.Add(2)
-	go e.leaseLoop(ctx)
-	go e.sweepLoop(ctx)
+	safego.GoLoop(ctx, "stats: lease loop", e.wg.Done, func() { e.leaseLoop(ctx) })
+	safego.GoLoop(ctx, "stats: sweep loop", e.wg.Done, func() { e.sweepLoop(ctx) })
 }
 
 // Stop cancels both loops, waits for them to exit (no goroutine leaks), and
@@ -517,8 +518,10 @@ func (e *Engine) notifySweeps() {
 // ~1/3 TTL while held. On any renewal failure — lost or errored — it
 // conservatively drops to standby; a transient Redis blip then costs one
 // lease TTL of sweep downtime, which the cache TTL comfortably absorbs.
+// leaseLoop renews or acquires the lease until ctx is done.
+// safego.GoLoop owns the WaitGroup slot and restarts the loop after a
+// panic, so the loop must not call Done itself.
 func (e *Engine) leaseLoop(ctx context.Context) {
-	defer e.wg.Done()
 	ticker := time.NewTicker(e.cfg.LeaseTTL / 3)
 	defer ticker.Stop()
 	for {
@@ -566,8 +569,10 @@ func (e *Engine) leaseTick(ctx context.Context) {
 }
 
 // sweepLoop runs a sweep every interval while this replica holds the lease.
+// sweepLoop runs one sweep per tick while this replica holds the lease.
+// safego.GoLoop owns the WaitGroup slot and restarts the loop after a
+// panic, so the loop must not call Done itself.
 func (e *Engine) sweepLoop(ctx context.Context) {
-	defer e.wg.Done()
 	ticker := time.NewTicker(e.cfg.Interval)
 	defer ticker.Stop()
 	for {
@@ -1356,8 +1361,7 @@ func (e *Engine) localStaleAfter() time.Duration {
 // message, then at most one line per minute while the same message repeats,
 // then one recovery line when the subsystem succeeds again.
 type errorLimiter struct {
-	now time.Time
-	mu  sync.Mutex
+	mu sync.Mutex
 	// state per subsystem: the last message logged and when.
 	last    map[string]string
 	lastLog map[string]time.Time

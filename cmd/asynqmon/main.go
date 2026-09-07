@@ -21,10 +21,12 @@ import (
 	"github.com/hibiken/asynq"
 	"github.com/hibiken/asynq/x/metrics"
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/collectors"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/redis/go-redis/v9"
 	"github.com/rs/cors"
 	"github.com/zkrebbekx/asynqmon"
+	"github.com/zkrebbekx/asynqmon/internal/safego"
 )
 
 // version is the build version stamped at link time:
@@ -572,14 +574,14 @@ func run(ctx context.Context, cfg *Config, onListen func(net.Addr)) error {
 		reg.MustRegister(
 			metrics.NewQueueMetricsCollector(inspector),
 			// Add the standard process and go metrics to the registry
-			prometheus.NewProcessCollector(prometheus.ProcessCollectorOpts{}),
-			prometheus.NewGoCollector(),
+			collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
+			collectors.NewGoCollector(),
 		)
 		mux.Handle("/metrics", promhttp.HandlerFor(reg, promhttp.HandlerOpts{}))
 	}
 
 	srv := &http.Server{
-		Handler:      loggingMiddleware(securityHeaders(mux)),
+		Handler:      recoverPanics(loggingMiddleware(securityHeaders(mux))),
 		WriteTimeout: 10 * time.Second,
 		ReadTimeout:  10 * time.Second,
 		BaseContext:  func(net.Listener) context.Context { return ctx },
@@ -594,7 +596,13 @@ func run(ctx context.Context, cfg *Config, onListen func(net.Addr)) error {
 	}
 
 	errCh := make(chan error, 1)
-	go func() { errCh <- srv.Serve(ln) }()
+	safego.Go("http: serve", func() {
+		// The shutdown path below reads errCh, so the send must happen even
+		// when Serve panics. The pre-set error is what a panic reports.
+		err := errors.New("the HTTP serve goroutine panicked")
+		defer func() { errCh <- err }()
+		err = srv.Serve(ln)
+	})
 
 	select {
 	case err := <-errCh:

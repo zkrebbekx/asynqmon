@@ -152,8 +152,6 @@ type fieldSpec struct {
 	backing string
 }
 
-var allStates []string // nil sentinel expanded lazily
-
 var fieldSpecs = map[string]fieldSpec{
 	"queue":   {ops: []Op{OpEq}, kind: kindString, backing: "matches the queue name"},
 	"type":    {ops: []Op{OpEq, OpSub}, kind: kindString, scan: true, backing: "matches the task type (msg decode)"},

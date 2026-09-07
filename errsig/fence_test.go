@@ -130,3 +130,27 @@ func TestStandDownSkipsStaleRejection(t *testing.T) {
 }
 
 var fenceTestRedisAddr = testRedisAddrFromEnv()
+
+// TestIndexerLockKey pins the documented lease key of the errsig indexer
+// role. The role const and the key that leasefence writes must stay the same
+// string, so an operator who greps for "asynqmon:lock:errsig" finds the live
+// lease.
+func TestIndexerLockKey(t *testing.T) {
+	rc := fenceTestRedis(t)
+	ctx := context.Background()
+
+	Convey("Given the errsig indexer fence", t, func() {
+		f := newIndexerFence(rc)
+
+		Convey("When it acquires the lease", func() {
+			token, err := f.Acquire(ctx, "inst-lock-key", time.Minute)
+			So(err, ShouldBeNil)
+			So(token, ShouldBeGreaterThan, 0)
+
+			Convey("Then Redis holds exactly the documented lock key", func() {
+				So(indexerLockKey, ShouldEqual, "asynqmon:lock:errsig")
+				So(rc.Exists(ctx, indexerLockKey).Val(), ShouldEqual, int64(1))
+			})
+		})
+	})
+}

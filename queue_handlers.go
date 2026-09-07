@@ -9,6 +9,8 @@ import (
 	"github.com/gorilla/mux"
 
 	"github.com/hibiken/asynq"
+
+	"github.com/zkrebbekx/asynqmon/internal/safego"
 )
 
 // ****************************************************************************
@@ -45,7 +47,9 @@ func newListQueuesHandlerFunc(inspector *asynq.Inspector) http.HandlerFunc {
 		sem := make(chan struct{}, queueInfoConcurrency)
 		for i, qname := range qnames {
 			wg.Add(1)
-			go func(i int, qname string) {
+			// Go 1.22 loop variables are per-iteration, so the closure
+			// captures this i and qname.
+			safego.Go("queues: queue-info fan-out", func() {
 				defer wg.Done()
 				sem <- struct{}{}
 				defer func() { <-sem }()
@@ -62,7 +66,7 @@ func newListQueuesHandlerFunc(inspector *asynq.Inspector) http.HandlerFunc {
 					return
 				}
 				snapshots[i] = toQueueStateSnapshot(qinfo)
-			}(i, qname)
+			})
 		}
 		wg.Wait()
 		if firstErr != nil {
@@ -168,7 +172,7 @@ func newListQueueStatsHandlerFunc(inspector *asynq.Inspector) http.HandlerFunc {
 		sem := make(chan struct{}, queueInfoConcurrency)
 		for _, qname := range qnames {
 			wg.Add(1)
-			go func(qname string) {
+			safego.Go("queues: history fan-out", func() {
 				defer wg.Done()
 				sem <- struct{}{}
 				defer func() { <-sem }()
@@ -187,7 +191,7 @@ func newListQueueStatsHandlerFunc(inspector *asynq.Inspector) http.HandlerFunc {
 				mu.Lock()
 				resp.Stats[qname] = toDailyStatsList(stats)
 				mu.Unlock()
-			}(qname)
+			})
 		}
 		wg.Wait()
 		if firstErr != nil {

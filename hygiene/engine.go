@@ -19,6 +19,7 @@ import (
 	"github.com/redis/go-redis/v9"
 
 	"github.com/zkrebbekx/asynqmon/internal/leasefence"
+	"github.com/zkrebbekx/asynqmon/internal/safego"
 	"github.com/zkrebbekx/asynqmon/stats"
 )
 
@@ -180,8 +181,8 @@ func (e *Engine) Start(ctx context.Context) {
 	e.started = true
 	ctx, e.cancel = context.WithCancel(ctx)
 	e.wg.Add(2)
-	go e.leaseLoop(ctx)
-	go e.tickLoop(ctx)
+	safego.GoLoop(ctx, "hygiene: lease loop", e.wg.Done, func() { e.leaseLoop(ctx) })
+	safego.GoLoop(ctx, "hygiene: tick loop", e.wg.Done, func() { e.tickLoop(ctx) })
 }
 
 // Stop cancels both loops, waits for them, and best-effort releases the
@@ -217,8 +218,10 @@ func (e *Engine) LeaseHeld() bool { return atomic.LoadInt32(&e.holding) == 1 }
 // InstanceID returns this replica's lease identity.
 func (e *Engine) InstanceID() string { return e.cfg.InstanceID }
 
+// leaseLoop renews or acquires the lease until ctx is done.
+// safego.GoLoop owns the WaitGroup slot and restarts the loop after a
+// panic, so the loop must not call Done itself.
 func (e *Engine) leaseLoop(ctx context.Context) {
-	defer e.wg.Done()
 	ticker := time.NewTicker(e.cfg.LeaseTTL / 3)
 	defer ticker.Stop()
 	for {
@@ -259,8 +262,11 @@ func (e *Engine) leaseTick(ctx context.Context) {
 	}
 }
 
+// tickLoop runs one schedule pass per tick while this replica holds the
+// lease.
+// safego.GoLoop owns the WaitGroup slot and restarts the loop after a
+// panic, so the loop must not call Done itself.
 func (e *Engine) tickLoop(ctx context.Context) {
-	defer e.wg.Done()
 	ticker := time.NewTicker(e.cfg.TickInterval)
 	defer ticker.Stop()
 	for {
@@ -404,10 +410,10 @@ func (e *Engine) run(ctx context.Context, kind string, token int64) (*Report, er
 	unlock()
 	if e.cfg.WebhookURL != "" {
 		e.webhookWG.Add(1)
-		go func() {
+		safego.Go("hygiene: webhook delivery", func() {
 			defer e.webhookWG.Done()
 			e.deliverWebhook(rep)
-		}()
+		})
 	}
 	return rep, nil
 }

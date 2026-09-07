@@ -281,7 +281,7 @@ func New(opts Options) *HTTPHandler {
 
 	// Make sure that RootPath starts with a slash if provided.
 	if opts.RootPath != "" && !strings.HasPrefix(opts.RootPath, "/") {
-		panic(fmt.Sprintf("asynqmon.New: RootPath must start with a slash"))
+		panic("asynqmon.New: RootPath must start with a slash")
 	}
 	// Remove tailing slash from RootPath.
 	opts.RootPath = strings.TrimSuffix(opts.RootPath, "/")

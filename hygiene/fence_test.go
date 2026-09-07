@@ -88,3 +88,27 @@ func TestSchedulerFencing(t *testing.T) {
 }
 
 var fenceTestRedisAddr = testRedisAddrFromEnv()
+
+// TestSchedulerLockKey pins the documented lease key of the hygiene
+// scheduler role. The role const and the key that leasefence writes must
+// stay the same string, so an operator who greps for "asynqmon:lock:hygiene"
+// finds the live lease.
+func TestSchedulerLockKey(t *testing.T) {
+	rc := fenceTestRedis(t)
+	ctx := context.Background()
+
+	Convey("Given the hygiene scheduler fence", t, func() {
+		f := newSchedulerFence(rc)
+
+		Convey("When it acquires the lease", func() {
+			token, err := f.Acquire(ctx, "inst-lock-key", time.Minute)
+			So(err, ShouldBeNil)
+			So(token, ShouldBeGreaterThan, 0)
+
+			Convey("Then Redis holds exactly the documented lock key", func() {
+				So(lockKey, ShouldEqual, "asynqmon:lock:hygiene")
+				So(rc.Exists(ctx, lockKey).Val(), ShouldEqual, int64(1))
+			})
+		})
+	})
+}

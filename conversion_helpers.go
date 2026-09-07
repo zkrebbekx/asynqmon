@@ -202,7 +202,7 @@ func taskTTL(task *asynq.TaskInfo) time.Duration {
 	if task.State != asynq.TaskStateCompleted {
 		return 0 // N/A
 	}
-	return task.CompletedAt.Add(task.Retention).Sub(time.Now())
+	return time.Until(task.CompletedAt.Add(task.Retention))
 }
 
 // formatTimeInRFC3339 formats t in RFC3339 if the value is non-zero.

@@ -20,6 +20,7 @@ import (
 	"github.com/redis/go-redis/v9"
 
 	"github.com/zkrebbekx/asynqmon/aql"
+	"github.com/zkrebbekx/asynqmon/internal/safego"
 )
 
 // ****************************************************************************
@@ -200,7 +201,7 @@ func (r *Runner) Start(ctx context.Context) {
 	r.started = true
 	ctx, r.cancel = context.WithCancel(ctx)
 	r.wg.Add(1)
-	go r.claimLoop(ctx)
+	safego.GoLoop(ctx, "jobs: claim loop", r.wg.Done, func() { r.claimLoop(ctx) })
 }
 
 // Stop cancels the claim loop and all in-flight job work, then waits for
@@ -221,8 +222,10 @@ func (r *Runner) Stop() {
 }
 
 // claimLoop periodically scans recent jobs for claimable work.
+// claimLoop claims and works claimable jobs until ctx is done.
+// safego.GoLoop owns the WaitGroup slot and restarts the loop after a
+// panic, so the loop must not call Done itself.
 func (r *Runner) claimLoop(ctx context.Context) {
-	defer r.wg.Done()
 	ticker := time.NewTicker(r.cfg.PollInterval)
 	defer ticker.Stop()
 	for {
@@ -268,11 +271,14 @@ func (r *Runner) claimTick(ctx context.Context) {
 		}
 		r.working.Store(j.ID, struct{}{})
 		r.wg.Add(1)
-		go func(id string, token int64) {
+		id := j.ID
+		safego.Go("jobs: job worker", func() {
 			defer r.wg.Done()
+			// Both deferred releases run while a panic unwinds, so a
+			// panicking job frees its slot instead of pinning it.
 			defer func() { r.working.Delete(id); <-r.slots }()
 			r.work(ctx, id, token)
-		}(j.ID, token)
+		})
 	}
 }
 
@@ -305,31 +311,42 @@ type claimSession struct {
 func (r *Runner) startRenewal(ctx context.Context, id string) *claimSession {
 	cs := &claimSession{stop: make(chan struct{})}
 	r.wg.Add(1)
-	go func() {
+	safego.Go("jobs: claim renewal", func() {
 		defer r.wg.Done()
-		// Renew at TTL/5, not TTL/3 (#40): a single missed renewal must not
-		// put the claim near expiry while a batch is still acting.
-		ticker := time.NewTicker(r.cfg.LeaseTTL / 5)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-cs.stop:
-				return
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				ok, err := r.store.RenewClaim(ctx, id, r.cfg.InstanceID, r.cfg.LeaseTTL)
-				if err != nil || !ok {
-					if err != nil && ctx.Err() == nil {
-						r.logf("asynqmon: jobs: renewing claim on %s: %v", id, err)
-					}
-					atomic.StoreInt32(&cs.lost, 1)
-					return
+		// A renewal loop that panicked stops renewing, so treat the claim as
+		// lost. The work loop then stops early instead of acting on a lease
+		// that nobody renews.
+		if safego.Run("jobs: claim renewal", func() { r.renewalLoop(ctx, cs, id) }) {
+			atomic.StoreInt32(&cs.lost, 1)
+		}
+	})
+	return cs
+}
+
+// renewalLoop renews the claim on id until the session stops, the context is
+// done, or one renewal fails. A failed renewal sets cs.lost.
+func (r *Runner) renewalLoop(ctx context.Context, cs *claimSession, id string) {
+	// Renew at TTL/5, not TTL/3 (#40): a single missed renewal must not
+	// put the claim near expiry while a batch is still acting.
+	ticker := time.NewTicker(r.cfg.LeaseTTL / 5)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-cs.stop:
+			return
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			ok, err := r.store.RenewClaim(ctx, id, r.cfg.InstanceID, r.cfg.LeaseTTL)
+			if err != nil || !ok {
+				if err != nil && ctx.Err() == nil {
+					r.logf("asynqmon: jobs: renewing claim on %s: %v", id, err)
 				}
+				atomic.StoreInt32(&cs.lost, 1)
+				return
 			}
 		}
-	}()
-	return cs
+	}
 }
 
 func (cs *claimSession) isLost() bool { return atomic.LoadInt32(&cs.lost) == 1 }

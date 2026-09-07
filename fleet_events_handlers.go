@@ -12,6 +12,7 @@ import (
 
 	"github.com/redis/go-redis/v9"
 
+	"github.com/zkrebbekx/asynqmon/internal/safego"
 	"github.com/zkrebbekx/asynqmon/jobs"
 	"github.com/zkrebbekx/asynqmon/stats"
 )
@@ -158,7 +159,7 @@ func (b *fleetEventsBroker) start(ctx context.Context) {
 	ctx, b.cancel = context.WithCancel(ctx)
 	if b.engine != nil {
 		b.wg.Add(1)
-		go b.run(ctx)
+		safego.GoLoop(ctx, "fleet events: publish loop", b.wg.Done, func() { b.run(ctx) })
 	}
 	if b.rc != nil {
 		b.startJobsRelay(ctx)
@@ -185,8 +186,9 @@ func (b *fleetEventsBroker) stop() {
 // holder) and by the interval ticker (standbys following the shared cache;
 // also the holder's fallback if sweeps stall). It renders at most once per
 // wake and only when someone is listening.
+// run publishes until ctx is done. safego.GoLoop owns the WaitGroup slot and
+// restarts run after a panic, so run must not call b.wg.Done itself.
 func (b *fleetEventsBroker) run(ctx context.Context) {
-	defer b.wg.Done()
 	sweeps, cancelSub := b.engine.SubscribeSweeps()
 	defer cancelSub()
 	ticker := time.NewTicker(b.engine.Interval())
@@ -219,25 +221,32 @@ func (b *fleetEventsBroker) subscriberCount() int {
 func (b *fleetEventsBroker) startJobsRelay(ctx context.Context) {
 	pubsub := b.rc.Subscribe(ctx, jobs.EventsChannel)
 	b.wg.Add(2)
-	go func() {
+	safego.Go("fleet events: jobs pubsub closer", func() {
 		defer b.wg.Done()
 		<-ctx.Done()
 		_ = pubsub.Close()
-	}()
-	go func() {
+	})
+	safego.Go("fleet events: jobs relay", func() {
 		defer b.wg.Done()
 		for msg := range pubsub.Channel() {
 			if b.subscriberCount() == 0 {
 				continue
 			}
-			// The payload is one job's public JSON object (jobs/events.go);
-			// wrap it in the uniform {"jobs":[...]} event body.
-			b.fanOutJobs([]byte(`{"jobs":[` + msg.Payload + `]}`))
-			// Keep the on-connect snapshot exact while jobs move, without
-			// re-reading Redis: the event IS the job's new state.
-			b.applyJobsEvent([]byte(msg.Payload))
+			// Recover per message, not per relay: the loop must drain the
+			// channel to its close, otherwise stop() waits for a goroutine
+			// that a single bad message ended.
+			safego.Run("fleet events: jobs relay", func() {
+				// The payload is one job's public JSON object
+				// (jobs/events.go); wrap it in the uniform
+				// {"jobs":[...]} event body.
+				b.fanOutJobs([]byte(`{"jobs":[` + msg.Payload + `]}`))
+				// Keep the on-connect snapshot exact while jobs move,
+				// without re-reading Redis: the event IS the job's new
+				// state.
+				b.applyJobsEvent([]byte(msg.Payload))
+			})
 		}
-	}()
+	})
 }
 
 // fanOutJobs delivers one jobs event body to every subscriber,

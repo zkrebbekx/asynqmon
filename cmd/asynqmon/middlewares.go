@@ -2,10 +2,13 @@ package main
 
 import (
 	"fmt"
+	"io"
+	"log"
 	"net"
 	"net/http"
 	"net/url"
 	"os"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"time"
@@ -173,6 +176,40 @@ func sameOrigin(origin string, r *http.Request, trustedProxies []*net.IPNet) boo
 	fwd, _, _ := strings.Cut(r.Header.Get("X-Forwarded-Host"), ",")
 	fwd = strings.TrimSpace(fwd)
 	return fwd != "" && strings.EqualFold(u.Host, fwd)
+}
+
+// recoverPanics answers a panicking handler with 500 and the JSON body
+// {"error":"internal error"}, and logs the panic value with the stack.
+// net/http would otherwise close the connection without a response and
+// print the stack itself.
+//
+// Apply it outermost, so that it also covers a panic inside another
+// middleware. A response that already started keeps its status code: the
+// panic is logged, but the body stays as the handler left it.
+//
+// http.ErrAbortHandler is re-raised, because net/http uses it to abort a
+// response on purpose and expects to see it.
+func recoverPanics(h http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rw := &responseRecorderWriter{ResponseWriter: w}
+		defer func() {
+			p := recover()
+			if p == nil {
+				return
+			}
+			if p == http.ErrAbortHandler {
+				panic(p)
+			}
+			log.Printf("asynqmon: panic in handler %s %s: %v\n%s", r.Method, r.URL.Path, p, debug.Stack())
+			if rw.status != 0 {
+				return // the response already started
+			}
+			rw.Header().Set("Content-Type", "application/json; charset=utf-8")
+			rw.WriteHeader(http.StatusInternalServerError)
+			io.WriteString(rw, `{"error":"internal error"}`)
+		}()
+		h.ServeHTTP(rw, r)
+	})
 }
 
 func loggingMiddleware(h http.Handler) http.Handler {
