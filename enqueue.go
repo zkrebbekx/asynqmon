@@ -66,8 +66,42 @@ type enqueueTaskRequest struct {
 	ProcessAt        string `json:"process_at"`
 	ProcessInSeconds *int64 `json:"process_in_seconds"`
 
+	// Headers is the asynq 0.26 task header map (trace context and other
+	// per-task metadata). asynq stores it on the task message and exposes it
+	// as TaskInfo.Headers; a clone that omits it enqueues a task without the
+	// source task's metadata. Absent or empty means no headers.
+	Headers map[string]string `json:"headers"`
+
 	// Reason is optional free text recorded on the audit entry.
 	Reason string `json:"reason"`
+}
+
+// Header bounds. asynq imposes none; these are dashboard guardrails, the
+// same kind as the numeric bounds above.
+const (
+	maxEnqueueHeaders        = 64
+	maxEnqueueHeaderKeyBytes = 256
+	maxEnqueueHeaderValBytes = 4096
+)
+
+// validateEnqueueHeaders checks the optional header map. It returns a
+// field-specific message on the first violation, or "" when the map is fine.
+func validateEnqueueHeaders(h map[string]string) string {
+	if len(h) > maxEnqueueHeaders {
+		return fmt.Sprintf("headers: at most %d entries (got %d)", maxEnqueueHeaders, len(h))
+	}
+	for k, v := range h {
+		if strings.TrimSpace(k) == "" {
+			return "headers: a header name must not be blank"
+		}
+		if len(k) > maxEnqueueHeaderKeyBytes {
+			return fmt.Sprintf("headers: name %q exceeds %d bytes", k, maxEnqueueHeaderKeyBytes)
+		}
+		if len(v) > maxEnqueueHeaderValBytes {
+			return fmt.Sprintf("headers: value of %q exceeds %d bytes", k, maxEnqueueHeaderValBytes)
+		}
+	}
+	return ""
 }
 
 // buildEnqueueTask validates the request against the §5.10 bounds and maps it
@@ -97,6 +131,9 @@ func buildEnqueueTask(qname string, req *enqueueTaskRequest, now time.Time) (tas
 	}
 	if len(payload) > maxEnqueuePayloadBytes {
 		return fail("payload: exceeds the %d byte (1MB) limit (got %d bytes)", maxEnqueuePayloadBytes, len(payload))
+	}
+	if msg := validateEnqueueHeaders(req.Headers); msg != "" {
+		return fail("%s", msg)
 	}
 
 	opts = []asynq.Option{asynq.Queue(qname)}

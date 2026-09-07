@@ -110,6 +110,9 @@ func prepareRequestEnv(ctx context.Context, rc redis.UniversalClient, insp *asyn
 	if plan.NeedsGroupScores {
 		env.GroupEnteredAt = make(map[string]time.Time)
 	}
+	if plan.NeedsArchivedScores {
+		env.ArchivedAt = make(map[string]time.Time)
+	}
 	return env, nil
 }
 
@@ -143,6 +146,22 @@ func fillBatchEnv(ctx context.Context, rc redis.UniversalClient, plan *aql.Plan,
 				continue
 			}
 			env.PendingSince[aql.EnvKey(batch[i].Queue, batch[i].ID)] = time.Unix(0, ns)
+		}
+	}
+	if plan.NeedsArchivedScores && len(batch) > 0 {
+		members := make([]string, len(batch))
+		for i, ti := range batch {
+			members[i] = ti.ID
+		}
+		scores, err := rc.ZMScore(ctx, aqlArchivedKey(qname), members...).Result()
+		if err != nil && !errors.Is(err, redis.Nil) {
+			return err
+		}
+		for i, s := range scores {
+			if i >= len(batch) || s == 0 {
+				continue
+			}
+			env.ArchivedAt[aql.EnvKey(batch[i].Queue, batch[i].ID)] = time.Unix(int64(s), 0)
 		}
 	}
 	if plan.NeedsGroupScores && gname != "" && len(batch) > 0 {

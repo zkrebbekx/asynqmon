@@ -189,6 +189,75 @@ func outcomesOf(resp schedulerOutcomesResponse, outcome string) []*schedulerOutc
 	return out
 }
 
+// TestSchedulersLiveCountDuplicateRegistration pins #54.4: one scheduler
+// process that registers the SAME task twice enqueues it twice every tick.
+// The stable key collapses both entries into one row, so the row carries
+// live_count instead of hiding the duplicate. Uses DB 10 (this suite's DB)
+// and a 1s heartbeat so the entries appear quickly.
+func TestSchedulersLiveCountDuplicateRegistration(t *testing.T) {
+	ctx := context.Background()
+	rc := redis.NewClient(&redis.Options{Addr: schedTestRedisAddr, DB: schedTestRedisDB})
+	if err := rc.Ping(ctx).Err(); err != nil {
+		rc.Close()
+		t.Skipf("skipping: redis not available on %s: %v", schedTestRedisAddr, err)
+	}
+	if err := rc.FlushDB(ctx).Err(); err != nil {
+		t.Fatalf("flushing test db: %v", err)
+	}
+	t.Cleanup(func() { rc.Close() })
+
+	opt := asynq.RedisClientOpt{Addr: schedTestRedisAddr, DB: schedTestRedisDB}
+	insp := asynq.NewInspector(opt)
+	t.Cleanup(func() { insp.Close() })
+
+	scheduler := asynq.NewScheduler(opt, &asynq.SchedulerOpts{
+		LogLevel:          asynq.FatalLevel,
+		HeartbeatInterval: time.Second,
+	})
+	dup := func() {
+		t.Helper()
+		if _, err := scheduler.Register("@every 1h", asynq.NewTask("dup:task", []byte(`{"n":1}`)),
+			asynq.Queue("dq")); err != nil {
+			t.Fatalf("registering dup:task: %v", err)
+		}
+	}
+	dup()
+	dup() // the same spec, type, payload and options — a real double register
+	if _, err := scheduler.Register("@every 2h", asynq.NewTask("solo:task", nil), asynq.Queue("dq")); err != nil {
+		t.Fatalf("registering solo:task: %v", err)
+	}
+	if err := scheduler.Start(); err != nil {
+		t.Fatalf("starting scheduler: %v", err)
+	}
+	t.Cleanup(scheduler.Shutdown)
+	schedWaitFor(t, 20*time.Second, "3 live scheduler entries", func() bool {
+		entries, err := insp.SchedulerEntries()
+		return err == nil && len(entries) == 3
+	})
+
+	router := schedRouter(&schedFixture{rc: rc, insp: insp, goneAfter: 30 * time.Second})
+	var list listSchedulersResponse
+	w := getJSONRouter(t, router, "/api/schedulers", &list)
+
+	Convey("Given one scheduler that registered the same entry twice (#54.4)", t, func() {
+		Convey("When GET /api/schedulers merges the live entries", func() {
+			Convey("Then the duplicate collapses to one row that counts both registrations", func() {
+				So(w.Code, ShouldEqual, http.StatusOK)
+				So(list.Entries, ShouldHaveLength, 2)
+				dupRow := rowByType(list, "dup:task")
+				So(dupRow, ShouldNotBeNil)
+				So(dupRow.Live, ShouldBeTrue)
+				So(dupRow.LiveCount, ShouldEqual, 2)
+			})
+			Convey("Then a single registration counts one", func() {
+				soloRow := rowByType(list, "solo:task")
+				So(soloRow, ShouldNotBeNil)
+				So(soloRow.LiveCount, ShouldEqual, 1)
+			})
+		})
+	})
+}
+
 // TestSchedulersEndToEnd drives the whole §3.8 story on one fixture: merged
 // live rows, the three-valued outcome joins, 404s, and — as the final,
 // mutating act — the stop-scheduler → SCHEDULER GONE transition.

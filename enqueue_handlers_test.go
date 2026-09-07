@@ -300,6 +300,68 @@ func TestFeaturesCorrelationKeys(t *testing.T) {
 // Validation 400s (field-specific messages) and the unique-conflict 409.
 // ----------------------------------------------------------------------------
 
+// TestEnqueueTaskHeaders pins the asynq 0.26 header round trip (#44): a
+// clone of a task that carries headers must re-encode them, and a blank
+// header name must be refused. asynq.NewTask builds a task WITHOUT headers,
+// so the enqueue path uses NewTaskWithHeaders when the body carries any.
+func TestEnqueueTaskHeaders(t *testing.T) {
+	env := newEnqueueTestEnv(t)
+	router := env.newRouter(Options{EnableEnqueue: true})
+
+	headers := map[string]string{
+		"traceparent": "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+		"tenant":      "acme",
+	}
+	var created taskInfo
+	w := doJSON(t, router, "POST", enqueueURL("emails"), map[string]interface{}{
+		"type": "email:send", "payload": `{"to":"ops@example.com"}`, "headers": headers,
+	}, &created)
+	var inspected *asynq.TaskInfo
+	if w.Code == http.StatusCreated {
+		inspected, _ = env.insp.GetTaskInfo("emails", created.ID)
+	}
+
+	var plain taskInfo
+	wp := doJSON(t, router, "POST", enqueueURL("emails"), map[string]interface{}{
+		"type": "email:send", "payload": "{}",
+	}, &plain)
+	var plainInspected *asynq.TaskInfo
+	if wp.Code == http.StatusCreated {
+		plainInspected, _ = env.insp.GetTaskInfo("emails", plain.ID)
+	}
+
+	wBlank := doJSON(t, router, "POST", enqueueURL("emails"), map[string]interface{}{
+		"type": "email:send", "payload": "{}", "headers": map[string]string{"  ": "v"},
+	}, nil)
+	var blankErr struct {
+		Error string `json:"error"`
+	}
+	_ = json.Unmarshal(wBlank.Body.Bytes(), &blankErr)
+
+	Convey("Given an enqueue-enabled router and asynq 0.26 task headers (#44)", t, func() {
+		Convey("When a task is enqueued with headers", func() {
+			Convey("Then asynq stores every header on the task message", func() {
+				So(w.Code, ShouldEqual, http.StatusCreated)
+				So(inspected, ShouldNotBeNil)
+				So(inspected.Headers, ShouldResemble, headers)
+			})
+		})
+		Convey("When a task is enqueued without headers", func() {
+			Convey("Then the stored task carries none", func() {
+				So(wp.Code, ShouldEqual, http.StatusCreated)
+				So(plainInspected, ShouldNotBeNil)
+				So(plainInspected.Headers, ShouldBeEmpty)
+			})
+		})
+		Convey("When a header name is blank", func() {
+			Convey("Then the request answers 400 with a field-specific message", func() {
+				So(wBlank.Code, ShouldEqual, http.StatusBadRequest)
+				So(blankErr.Error, ShouldContainSubstring, "headers: a header name must not be blank")
+			})
+		})
+	})
+}
+
 func TestEnqueueValidationAndConflicts(t *testing.T) {
 	env := newEnqueueTestEnv(t)
 	router := env.newRouter(Options{EnableEnqueue: true})

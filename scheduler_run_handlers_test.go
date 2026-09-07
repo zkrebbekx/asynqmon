@@ -3,6 +3,7 @@ package asynqmon
 import (
 	"context"
 	"net/http"
+	"os"
 	"testing"
 	"time"
 
@@ -362,13 +363,14 @@ func TestRunSchedulerEntryGating(t *testing.T) {
 // ----------------------------------------------------------------------------
 
 func TestBuildRunNowOptions(t *testing.T) {
+	now := time.Now()
 	richOpts, richApplied, richSkipped := buildRunNowOptions(stats.SchedulerEntryData{
 		TaskType: "t", Queue: "runq",
 		Opts: []string{
 			`Queue("runq")`, "MaxRetry(5)", "Timeout(2m0s)", "Retention(1h0m0s)",
 			"Unique(30m0s)", "ProcessIn(1m30s)",
 		},
-	})
+	}, now)
 
 	messyOpts, messyApplied, messySkipped := buildRunNowOptions(stats.SchedulerEntryData{
 		TaskType: "t", Queue: "",
@@ -381,7 +383,7 @@ func TestBuildRunNowOptions(t *testing.T) {
 			"Frobnicate(3)",          // unknown option from a future asynq
 			"Timeout(45s)",           // the one salvageable option
 		},
-	})
+	}, now)
 
 	Convey("Given buildRunNowOptions over entry option strings (#337)", t, func() {
 		Convey("When every option is parsable", func() {
@@ -405,6 +407,55 @@ func TestBuildRunNowOptions(t *testing.T) {
 					`Group("g") — grouping is not applied on a manual run`,
 					"Frobnicate(3) — unsupported option",
 				})
+			})
+		})
+	})
+}
+
+// TestBuildRunNowDeadlineZone pins the Deadline reconstruction under TZ=UTC
+// (#54.2). Go's UnixDate parse accepts a zone abbreviation it cannot
+// resolve, returns no error, and yields a zero-offset time — the enqueued
+// task would carry a deadline hours off, reported as applied.
+func TestBuildRunNowDeadlineZone(t *testing.T) {
+	prevTZ, hadTZ := os.LookupEnv("TZ")
+	prevLocal := time.Local
+	os.Setenv("TZ", "UTC")
+	time.Local = time.UTC
+	t.Cleanup(func() {
+		time.Local = prevLocal
+		if hadTZ {
+			os.Setenv("TZ", prevTZ)
+		} else {
+			os.Unsetenv("TZ")
+		}
+	})
+
+	now := time.Date(2026, time.September, 7, 10, 0, 0, 0, time.UTC)
+	future := now.Add(12 * time.Hour)
+	past := now.Add(-12 * time.Hour)
+	foreign := "Deadline(" + future.Format("Mon Jan _2 15:04:05") + " AEST 2026)"
+	futureUTC := "Deadline(" + future.Format(time.UnixDate) + ")"
+	pastUTC := "Deadline(" + past.Format(time.UnixDate) + ")"
+
+	opts, applied, skipped := buildRunNowOptions(stats.SchedulerEntryData{
+		TaskType: "t", Queue: "runq",
+		Opts: []string{foreign, pastUTC, futureUTC},
+	}, now)
+
+	Convey("Given a host under TZ=UTC and an entry with three Deadline options (#54.2)", t, func() {
+		Convey("When the run-now options are reconstructed", func() {
+			Convey("Then the AEST deadline is skipped with the unresolvable-zone reason", func() {
+				So(skipped, ShouldContain, foreign+" — zone abbreviation AEST is not resolvable on this host")
+				So(applied, ShouldNotContain, foreign)
+			})
+			Convey("Then the past deadline is skipped", func() {
+				So(skipped, ShouldContain, pastUTC+" — deadline is already in the past")
+				So(applied, ShouldNotContain, pastUTC)
+			})
+			Convey("Then only the future UTC deadline applies", func() {
+				So(applied, ShouldResemble, []string{`Queue("runq")`, futureUTC})
+				So(len(opts), ShouldEqual, 2) // Queue + Deadline
+				So(len(skipped), ShouldEqual, 2)
 			})
 		})
 	})

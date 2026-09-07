@@ -167,6 +167,22 @@ func StableKeyForAsynqEntry(e *asynq.SchedulerEntry) string {
 	return StableSchedulerKey(e.Spec, e.Task.Type(), e.Task.Payload(), opts)
 }
 
+// CountLiveByStableKey counts the live entries under each stable key. Two
+// schedulers in an HA pair register identical entries and collapse to one
+// key, which is intended; ONE process that registers the same task twice
+// collapses the same way and would silently double-enqueue every tick. The
+// count makes the duplicate visible (#54.4).
+func CountLiveByStableKey(entries []*asynq.SchedulerEntry) map[string]int {
+	counts := make(map[string]int, len(entries))
+	for _, e := range entries {
+		if e == nil {
+			continue
+		}
+		counts[StableKeyForAsynqEntry(e)]++
+	}
+	return counts
+}
+
 // ----------------------------------------------------------------------------
 // Sweep integration.
 // ----------------------------------------------------------------------------

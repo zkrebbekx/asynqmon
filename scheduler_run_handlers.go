@@ -81,8 +81,9 @@ type runSchedulerEntryResponse struct {
 // enqueue of the entry's task (#337). Queue comes from the snapshot's typed
 // field (default queue handled explicitly); the remaining options are parsed
 // from the entry's option strings. Unparsable or unsupported options land in
-// skipped with a reason — the enqueue proceeds with what did parse.
-func buildRunNowOptions(data stats.SchedulerEntryData) (opts []asynq.Option, applied, skipped []string) {
+// skipped with a reason — the enqueue proceeds with what did parse. now is
+// the request clock: a Deadline that is already past is skipped (#54.2).
+func buildRunNowOptions(data stats.SchedulerEntryData, now time.Time) (opts []asynq.Option, applied, skipped []string) {
 	queue := data.Queue
 	if queue == "" {
 		queue = stats.DefaultTargetQueue
@@ -139,14 +140,23 @@ func buildRunNowOptions(data stats.SchedulerEntryData) (opts []asynq.Option, app
 			opts = append(opts, asynq.Unique(d))
 			applied = append(applied, o)
 		case "Deadline":
-			// asynq renders Deadline in time.UnixDate. Best-effort parse: an
-			// unknown zone abbreviation would yield a zero-offset time, so
-			// resolve against the local zone first (the common deployment:
-			// scheduler and dashboard share a TZ) and honestly skip when the
-			// string does not parse at all.
+			// asynq renders Deadline in time.UnixDate. Resolve the zone
+			// abbreviation against the local zone first (the common
+			// deployment: scheduler and dashboard share a TZ). Go accepts
+			// an abbreviation it cannot resolve and silently yields a
+			// zero-offset time, so a foreign abbreviation is detected and
+			// skipped instead of enqueuing a deadline hours off (#54.2).
 			t, err := time.ParseInLocation(time.UnixDate, arg, time.Local)
 			if err != nil {
 				skip(o, "unparsable")
+				continue
+			}
+			if zone, off := t.Zone(); off == 0 && !isUTCZoneName(zone) {
+				skip(o, "zone abbreviation "+zone+" is not resolvable on this host")
+				continue
+			}
+			if !t.After(now) {
+				skip(o, "deadline is already in the past")
 				continue
 			}
 			opts = append(opts, asynq.Deadline(t))
@@ -168,6 +178,17 @@ func buildRunNowOptions(data stats.SchedulerEntryData) (opts []asynq.Option, app
 		}
 	}
 	return opts, applied, skipped
+}
+
+// isUTCZoneName reports whether a zero-offset zone abbreviation is one Go
+// resolves on every host. Any other zero-offset abbreviation means
+// ParseInLocation did not recognize it and kept the wall clock as-is.
+func isUTCZoneName(name string) bool {
+	switch name {
+	case "UTC", "GMT", "Z":
+		return true
+	}
+	return false
 }
 
 // splitOptString splits asynq's option rendering Name(arg) into (Name, arg).
@@ -251,7 +272,13 @@ func newRunSchedulerEntryHandlerFunc(inspector *asynq.Inspector, rc redis.Univer
 			return
 		}
 
-		taskOpts, applied, skipped := buildRunNowOptions(data)
+		taskOpts, applied, skipped := buildRunNowOptions(data, time.Now())
+		// Task headers (asynq 0.26) cannot ride along: asynq's persisted
+		// scheduler entry stores the spec, the task type, the payload and the
+		// option strings only (internal/base.SchedulerEntry), and
+		// Inspector.SchedulerEntries rebuilds the task with NewTask. A
+		// registered header map lives in the scheduler process alone, so
+		// neither the live entry nor the snapshot can supply it here.
 		info, err := client.EnqueueContext(r.Context(), asynq.NewTask(data.TaskType, data.Payload), taskOpts...)
 		if err != nil {
 			switch {

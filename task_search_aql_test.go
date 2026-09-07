@@ -369,6 +369,66 @@ func TestAqlParseRejection400(t *testing.T) {
 	})
 }
 
+// TestAqlDiedAgreesAcrossModes pins the #54.3 contract: a task archived by
+// hand (Inspector.ArchiveTask) has a live archived-zset score but a ZERO
+// LastFailedAt. Cursor mode ranges over the score and lists it; scan mode
+// used to read LastFailedAt only and dropped it, so a preview built in
+// cursor mode shrank at execution. Both modes must answer from the score.
+func TestAqlDiedAgreesAcrossModes(t *testing.T) {
+	env := newJobsTestEnv(t)
+	h := env.newRouter(Options{RedisConnOpt: asynq.RedisClientOpt{Addr: jobsTestRedisAddr, DB: jobsTestRedisDB}})
+
+	ti, err := env.client.Enqueue(asynq.NewTask("job:died", []byte(`{"n":1}`)), asynq.Queue("diedq"))
+	if err != nil {
+		t.Fatalf("seeding pending: %v", err)
+	}
+	if err := env.insp.ArchiveTask("diedq", ti.ID); err != nil {
+		t.Fatalf("archiving: %v", err)
+	}
+	archived, err := env.insp.GetTaskInfo("diedq", ti.ID)
+	if err != nil {
+		t.Fatalf("reading archived task: %v", err)
+	}
+
+	// died>0s alone is score-cursorable; adding type= forces the scan plan
+	// over the same task, which is the path the jobs runner re-verifies on.
+	var cursorResp aqlSearchResp
+	wCursor := aqlGetJSON(t, h, tasksURL(map[string]string{
+		"q": "state=archived died>0s", "queue": "diedq",
+	}), &cursorResp)
+	var scanResp aqlSearchResp
+	wScan := aqlGetJSON(t, h, tasksURL(map[string]string{
+		"q": "state=archived died>0s type=job:died", "queue": "diedq",
+	}), &scanResp)
+
+	Convey("Given one pending task archived by hand, with no failure stamp", t, func() {
+		Convey("When asynq records the archived task", func() {
+			Convey("Then its LastFailedAt is zero while the archived score is live", func() {
+				So(archived.State.String(), ShouldEqual, "archived")
+				So(archived.LastFailedAt.IsZero(), ShouldBeTrue)
+			})
+		})
+
+		Convey("When died>0s is answered in cursor mode", func() {
+			Convey("Then the task is listed", func() {
+				So(wCursor.Code, ShouldEqual, 200)
+				So(cursorResp.Mode, ShouldEqual, "cursor")
+				So(cursorResp.Tasks, ShouldHaveLength, 1)
+				So(cursorResp.Tasks[0].ID, ShouldEqual, ti.ID)
+			})
+		})
+
+		Convey("When the same predicate is answered in scan mode", func() {
+			Convey("Then the scan agrees with the cursor, task for task", func() {
+				So(wScan.Code, ShouldEqual, 200)
+				So(scanResp.Mode, ShouldEqual, "scan")
+				So(scanResp.Tasks, ShouldHaveLength, 1)
+				So(scanResp.Tasks[0].ID, ShouldEqual, ti.ID)
+			})
+		})
+	})
+}
+
 func TestStateCountsEndpoint(t *testing.T) {
 	env := newJobsTestEnv(t)
 	h := env.newRouter(Options{RedisConnOpt: asynq.RedisClientOpt{Addr: jobsTestRedisAddr, DB: jobsTestRedisDB}})

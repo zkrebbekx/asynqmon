@@ -337,7 +337,17 @@ function SchedulerEntryRow({
               </span>
             </span>
           ) : row.live ? (
-            <FcChip tone="good">LIVE</FcChip>
+            <span className="inline-flex items-center gap-1.5">
+              <FcChip tone="good">LIVE</FcChip>
+              {(row.live_count ?? 0) > 1 && (
+                <FcChip
+                  tone="warn"
+                  title={`${row.live_count} live entries share this registration. Two schedulers in an HA pair are expected; one process that registered the same task twice enqueues it twice every tick.`}
+                >
+                  x{row.live_count} registered
+                </FcChip>
+              )}
+            </span>
           ) : (
             <FcChip tone="mut" title="Not in the latest heartbeat; not yet past the gone threshold">
               NOT HEARTBEATING
