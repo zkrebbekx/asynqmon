@@ -16,8 +16,8 @@ import (
 	"github.com/redis/go-redis/v9"
 	. "github.com/smartystreets/goconvey/convey"
 
-	"github.com/hibiken/asynqmon/jobs"
-	"github.com/hibiken/asynqmon/stats"
+	"github.com/zkrebbekx/asynqmon/jobs"
+	"github.com/zkrebbekx/asynqmon/stats"
 )
 
 // ****************************************************************************
@@ -36,8 +36,7 @@ import (
 // ****************************************************************************
 
 const (
-	seriesTestRedisAddr = "127.0.0.1:6379"
-	seriesTestRedisDB   = 8
+	seriesTestRedisDB = 8
 )
 
 func seriesTestRedis(t *testing.T) redis.UniversalClient {
@@ -247,7 +246,7 @@ func TestSeriesSweepPipeline(t *testing.T) {
 			h(rr, req)
 			So(rr.Code, ShouldEqual, http.StatusOK)
 			var body struct {
-				Period        int64 `json:"period"`
+				Period        int64  `json:"period"`
 				LearningUntil string `json:"learning_until"`
 				Points        []struct {
 					T int64  `json:"t"`
@@ -443,3 +442,5 @@ func TestMarkersIntegration(t *testing.T) {
 		})
 	})
 }
+
+var seriesTestRedisAddr = testRedisAddrFromEnv()

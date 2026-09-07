@@ -16,9 +16,9 @@ import (
 	"github.com/redis/go-redis/v9"
 	. "github.com/smartystreets/goconvey/convey"
 
-	"github.com/hibiken/asynqmon/errsig"
-	"github.com/hibiken/asynqmon/hygiene"
-	"github.com/hibiken/asynqmon/stats"
+	"github.com/zkrebbekx/asynqmon/errsig"
+	"github.com/zkrebbekx/asynqmon/hygiene"
+	"github.com/zkrebbekx/asynqmon/stats"
 )
 
 // ****************************************************************************
@@ -75,7 +75,7 @@ func TestHygieneReportsIntegration(t *testing.T) {
 	t.Cleanup(srv.Shutdown)
 
 	// ---- Scheduler B: registers one entry, then dies (the GONE corpse). ----
-	schedB := asynq.NewScheduler(opt, nil)
+	schedB := asynq.NewScheduler(opt, &asynq.SchedulerOpts{HeartbeatInterval: time.Second})
 	if _, err := schedB.Register("@every 1h", asynq.NewTask("cron:dead", nil), asynq.Queue("orders")); err != nil {
 		t.Fatalf("registering cron:dead: %v", err)
 	}
@@ -85,7 +85,7 @@ func TestHygieneReportsIntegration(t *testing.T) {
 
 	// ---- Scheduler A: stays alive — retention-less + zero-consumer entry,
 	// and a fully-healthy traceable entry. ----
-	schedA := asynq.NewScheduler(opt, nil)
+	schedA := asynq.NewScheduler(opt, &asynq.SchedulerOpts{HeartbeatInterval: time.Second})
 	if _, err := schedA.Register("@every 1h", asynq.NewTask("cron:noretention", nil), asynq.Queue("maintenance")); err != nil {
 		t.Fatalf("registering cron:noretention: %v", err)
 	}
@@ -207,7 +207,15 @@ func TestHygieneReportsIntegration(t *testing.T) {
 	}
 
 	// ---- Error-signature index feed (real read path for the digest). ----
-	indexer := errsig.NewIndexer(errsig.Config{RedisClient: env.rc, Inspector: env.insp, Logf: t.Logf})
+	// The archived tail deliberately stops one safety lag short of the
+	// current second, so this sweep runs on a clock past that lag instead of
+	// sleeping; otherwise it would miss the tasks archived a moment ago.
+	indexer := errsig.NewIndexer(errsig.Config{
+		RedisClient: env.rc,
+		Inspector:   env.insp,
+		Now:         func() time.Time { return time.Now().Add(5 * time.Second) },
+		Logf:        t.Logf,
+	})
 	if err := indexer.SweepTailNow(ctx); err != nil {
 		t.Fatalf("errsig tail sweep: %v", err)
 	}

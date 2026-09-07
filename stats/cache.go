@@ -10,7 +10,7 @@ import (
 
 	"github.com/redis/go-redis/v9"
 
-	"github.com/hibiken/asynqmon/internal/leasefence"
+	"github.com/zkrebbekx/asynqmon/internal/leasefence"
 )
 
 // ****************************************************************************

@@ -11,8 +11,8 @@ import (
 	"github.com/redis/go-redis/v9"
 	. "github.com/smartystreets/goconvey/convey"
 
-	"github.com/hibiken/asynqmon/internal/leasefence"
-	"github.com/hibiken/asynqmon/stats"
+	"github.com/zkrebbekx/asynqmon/internal/leasefence"
+	"github.com/zkrebbekx/asynqmon/stats"
 )
 
 // ****************************************************************************

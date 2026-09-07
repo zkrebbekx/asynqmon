@@ -8,10 +8,10 @@ import (
 
 	"github.com/redis/go-redis/v9"
 
-	"github.com/hibiken/asynqmon/errsig"
-	"github.com/hibiken/asynqmon/hygiene"
-	"github.com/hibiken/asynqmon/internal/leasefence"
-	"github.com/hibiken/asynqmon/stats"
+	"github.com/zkrebbekx/asynqmon/errsig"
+	"github.com/zkrebbekx/asynqmon/hygiene"
+	"github.com/zkrebbekx/asynqmon/internal/leasefence"
+	"github.com/zkrebbekx/asynqmon/stats"
 )
 
 // ****************************************************************************

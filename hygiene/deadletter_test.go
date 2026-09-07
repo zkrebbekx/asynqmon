@@ -7,7 +7,7 @@ import (
 
 	. "github.com/smartystreets/goconvey/convey"
 
-	"github.com/hibiken/asynqmon/errsig"
+	"github.com/zkrebbekx/asynqmon/errsig"
 )
 
 // ****************************************************************************
@@ -21,7 +21,7 @@ func TestBuildDeadLetter(t *testing.T) {
 	Convey("Given per-queue age buckets, an errsig index and trim metadata", t, func() {
 		buckets := []deadLetterQueueBuckets{
 			{Queue: "billing", Buckets: []int64{100, 400, 1500, 8000}}, // 10000 = at trim cap
-			{Queue: "notif", Buckets: []int64{5, 10, 0, 0}},           // nothing over 30d
+			{Queue: "notif", Buckets: []int64{5, 10, 0, 0}},            // nothing over 30d
 		}
 		sigs := []*errsig.Signature{
 			{Sig: "sig-timeout", Template: "gw timeout after ~N~s", Counts: []errsig.QueueTypeCount{

@@ -9,7 +9,7 @@ import (
 	"github.com/redis/go-redis/v9"
 	. "github.com/smartystreets/goconvey/convey"
 
-	"github.com/hibiken/asynqmon/stats"
+	"github.com/zkrebbekx/asynqmon/stats"
 )
 
 // ****************************************************************************
@@ -25,8 +25,7 @@ import (
 // ****************************************************************************
 
 const (
-	coverageTestRedisAddr = "127.0.0.1:6379"
-	coverageTestRedisDB   = 11
+	coverageTestRedisDB = 11
 )
 
 // coverageRedis pings (or skips), flushes DB 11 only, and returns the shared
@@ -320,3 +319,5 @@ func TestListServersHandlerWorkerDeadline(t *testing.T) {
 		})
 	})
 }
+
+var coverageTestRedisAddr = testRedisAddrFromEnv()

@@ -10,8 +10,8 @@ import (
 	"github.com/gorilla/mux"
 	"github.com/redis/go-redis/v9"
 
-	"github.com/hibiken/asynqmon/hygiene"
-	"github.com/hibiken/asynqmon/jobs"
+	"github.com/zkrebbekx/asynqmon/hygiene"
+	"github.com/zkrebbekx/asynqmon/jobs"
 )
 
 // ****************************************************************************

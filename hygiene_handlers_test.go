@@ -9,8 +9,8 @@ import (
 	"github.com/redis/go-redis/v9"
 	. "github.com/smartystreets/goconvey/convey"
 
-	"github.com/hibiken/asynqmon/hygiene"
-	"github.com/hibiken/asynqmon/jobs"
+	"github.com/zkrebbekx/asynqmon/hygiene"
+	"github.com/zkrebbekx/asynqmon/jobs"
 )
 
 // ****************************************************************************
@@ -29,8 +29,7 @@ import (
 // ****************************************************************************
 
 const (
-	hygieneTestRedisAddr = "127.0.0.1:6379"
-	hygieneTestRedisDB   = 7
+	hygieneTestRedisDB = 7
 )
 
 type hygieneTestEnv struct {
@@ -230,3 +229,5 @@ func TestHygieneReadOnlyMode(t *testing.T) {
 		})
 	})
 }
+
+var hygieneTestRedisAddr = testRedisAddrFromEnv()

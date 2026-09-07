@@ -13,10 +13,10 @@ import (
 	"github.com/hibiken/asynq"
 	"github.com/redis/go-redis/v9"
 
-	"github.com/hibiken/asynqmon/errsig"
-	"github.com/hibiken/asynqmon/hygiene"
-	"github.com/hibiken/asynqmon/jobs"
-	"github.com/hibiken/asynqmon/stats"
+	"github.com/zkrebbekx/asynqmon/errsig"
+	"github.com/zkrebbekx/asynqmon/hygiene"
+	"github.com/zkrebbekx/asynqmon/jobs"
+	"github.com/zkrebbekx/asynqmon/stats"
 )
 
 // Options are used to configure HTTPHandler.
@@ -525,7 +525,7 @@ func muxRouter(opts Options, rc redis.UniversalClient, inspector *asynq.Inspecto
 
 	// ── Observed run history (opt-in observe/ middleware) ──
 	// Serves per-attempt records + run-duration summary written by workers
-	// that adopted github.com/hibiken/asynqmon/observe — data asynq itself
+	// that adopted github.com/zkrebbekx/asynqmon/observe — data asynq itself
 	// never stores. Reads asynqmon-owned keys only; 404 {"present": false}
 	// when absent (middleware not adopted, or TTL expired). GET-only, so
 	// read-only mode is unaffected. Handler: observed_handlers.go.

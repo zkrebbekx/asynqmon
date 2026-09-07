@@ -18,7 +18,7 @@ import (
 	"github.com/hibiken/asynq"
 	"github.com/redis/go-redis/v9"
 
-	"github.com/hibiken/asynqmon/internal/leasefence"
+	"github.com/zkrebbekx/asynqmon/internal/leasefence"
 )
 
 // ****************************************************************************
@@ -44,6 +44,17 @@ const (
 	defaultMaxTailPerQueue = 1000 // GetTaskInfo budget per queue per sweep
 	defaultMaxSamplePer    = 200  // retry window size per queue per sample
 	tailBatchSize          = 200  // ZRANGEBYSCORE page size
+
+	// defaultTailSafetyLag keeps the archived-tail cursor out of the second
+	// that is still running. asynq scores the archived zset in whole
+	// seconds (died_at). The cursor is a (score, id) pair and the sweep
+	// skips a tie it already served, so a task archived LATER in the same
+	// second as the cursor, whose random UUID sorts below the cursor id,
+	// would be skipped forever. The sweep therefore stops at
+	// now - defaultTailSafetyLag; entries above that boundary wait for the
+	// next sweep. Two seconds also absorb a small clock difference between
+	// the workers that write died_at and the Redis TIME the sweep reads.
+	defaultTailSafetyLag = 2 * time.Second
 
 	// defaultCommandBudget is the indexer's Redis command spend cap in
 	// commands per second. The stats engine's §5.1 governor covers only
@@ -87,6 +98,14 @@ type Config struct {
 	// second, governing tail sweeps and retry samples alike. Runs that
 	// exceed it rotate across ticks from a holder-local cursor. Default 500.
 	CommandBudget int
+	// TailSafetyLag holds the archived-tail sweep back from the current
+	// second, so no task can be archived into a second the cursor already
+	// passed. Default 2s. Raise it when worker clocks differ from the Redis
+	// clock by more than that.
+	TailSafetyLag time.Duration
+	// Now returns the current time. Default time.Now. Tests inject a clock
+	// so they can step over TailSafetyLag instead of sleeping.
+	Now func() time.Time
 	// InstanceID identifies this replica in the lease. Default
 	// "hostname:pid:<random>".
 	InstanceID string
@@ -157,6 +176,12 @@ func NewIndexer(cfg Config) *Indexer {
 	}
 	if cfg.CommandBudget <= 0 {
 		cfg.CommandBudget = defaultCommandBudget
+	}
+	if cfg.TailSafetyLag <= 0 {
+		cfg.TailSafetyLag = defaultTailSafetyLag
+	}
+	if cfg.Now == nil {
+		cfg.Now = time.Now
 	}
 	if cfg.InstanceID == "" {
 		cfg.InstanceID = defaultInstanceID()
@@ -410,7 +435,7 @@ func rotateFrom(qnames []string, last string) []string {
 // of lease ownership (exposed for tests and operational tooling; running it
 // off-lease only costs duplicate reads and idempotent merges).
 func (ix *Indexer) SweepTailNow(ctx context.Context) error {
-	now := time.Now()
+	now := ix.cfg.Now()
 	// Capture the fencing token ONCE, up front. A lease lost mid-sweep zeroes
 	// ix.token, and reading it at write time would silently convert the
 	// fenced merge into an unfenced one — the exact stale-holder overwrite
@@ -450,6 +475,12 @@ func (ix *Indexer) SweepTailNow(ctx context.Context) error {
 		budget = 4 * metaChunkSize // floor: always complete at least one chunk
 	}
 	spent := 1 // SMEMBERS
+
+	// Highest died-at second this sweep may examine (see
+	// defaultTailSafetyLag). Entries at or above the boundary stay for the
+	// next sweep, so the cursor never enters a second that can still
+	// receive entries.
+	maxScore := now.Add(-ix.cfg.TailSafetyLag).Unix()
 
 	agg := make(map[string]*tailAccum)
 	newCursors := make(map[string]string)
@@ -498,7 +529,7 @@ func (ix *Indexer) SweepTailNow(ctx context.Context) error {
 			if v, err := metas[i].cursor.Result(); err == nil {
 				cur = decodeCursor(v)
 			}
-			newCur, tailSpent, err := ix.tailQueue(ctx, q, cur, agg)
+			newCur, tailSpent, err := ix.tailQueue(ctx, q, cur, maxScore, agg)
 			spent += tailSpent
 			if err != nil {
 				return fmt.Errorf("tailing archived %q: %w", q, err)
@@ -537,12 +568,12 @@ func (ix *Indexer) SweepTailNow(ctx context.Context) error {
 	return nil
 }
 
-// tailQueue walks one queue's archived zset from its cursor, died-at
-// ascending, decoding up to MaxTailPerQueue entries. Every entry examined —
+// tailQueue walks one queue's archived zset from its cursor up to maxScore,
+// died-at ascending, decoding up to MaxTailPerQueue entries. Every entry examined —
 // including ones whose task vanished (trim/delete) or moved state between
 // the ZRANGE and the fetch — advances the cursor, so a poisoned or trimmed
 // range can never wedge the tail.
-func (ix *Indexer) tailQueue(ctx context.Context, q string, cur tailCursor, agg map[string]*tailAccum) (tailCursor, int, error) {
+func (ix *Indexer) tailQueue(ctx context.Context, q string, cur tailCursor, maxScore int64, agg map[string]*tailAccum) (tailCursor, int, error) {
 	// Paging strategy: advance the score window (Min) to the ROLLING cursor
 	// after every page, with an offset used only to step through runs of
 	// equal scores. A fixed Min with a globally growing offset was not
@@ -557,6 +588,13 @@ func (ix *Indexer) tailQueue(ctx context.Context, q string, cur tailCursor, agg 
 	if cur.valid {
 		minStr = strconv.FormatInt(cur.score, 10) // inclusive; ties filtered below
 	}
+	// The window stops at maxScore (inclusive), never at +inf: a second that
+	// is still running can still receive entries, and the tie filter below
+	// would skip every one of them whose id sorts under the cursor id.
+	maxStr := strconv.FormatInt(maxScore, 10)
+	if cur.valid && cur.score > maxScore {
+		return cur, 0, nil // cursor already past the safe boundary
+	}
 	newCur := cur
 	examined := 0
 	spent := 0
@@ -564,7 +602,7 @@ func (ix *Indexer) tailQueue(ctx context.Context, q string, cur tailCursor, agg 
 
 	for examined < ix.cfg.MaxTailPerQueue {
 		entries, err := ix.rc.ZRangeByScoreWithScores(ctx, archivedKey(q), &redis.ZRangeBy{
-			Min: minStr, Max: "+inf", Offset: offset, Count: tailBatchSize,
+			Min: minStr, Max: maxStr, Offset: offset, Count: tailBatchSize,
 		}).Result()
 		spent++
 		if err != nil && !errors.Is(err, redis.Nil) {
@@ -798,7 +836,7 @@ type retryAccum struct {
 // task reappears in every sample. A signature whose retry tasks drained (and
 // which has no archived observations) is removed entirely.
 func (ix *Indexer) SampleRetryNow(ctx context.Context) error {
-	now := time.Now()
+	now := ix.cfg.Now()
 	// Captured up front for the same reason as SweepTailNow: a lease lost
 	// mid-run must fail the fence CAS, not silently write unfenced.
 	token := ix.currentToken()

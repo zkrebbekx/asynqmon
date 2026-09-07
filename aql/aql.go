@@ -191,15 +191,15 @@ var fieldSpecs = map[string]fieldSpec{
 		backing: "reads live WorkerInfo.Started/Deadline, which exist only for active tasks",
 	},
 	"next_run": {
-		ops:    []Op{OpLt, OpGt},
-		states: []string{"scheduled", "retry"},
-		kind:   kindTimeOrDur,
+		ops:     []Op{OpLt, OpGt},
+		states:  []string{"scheduled", "retry"},
+		kind:    kindTimeOrDur,
 		backing: "reads the zset score (next run time), which exists only for scheduled and retry tasks",
 	},
 	"past_due": {
-		ops:    nil,
-		states: []string{"scheduled", "retry"},
-		kind:   kindFlag,
+		ops:     nil,
+		states:  []string{"scheduled", "retry"},
+		kind:    kindFlag,
 		backing: "reads the zset score (next run time), which exists only for scheduled and retry tasks",
 	},
 	"failed_after": {
@@ -215,21 +215,21 @@ var fieldSpecs = map[string]fieldSpec{
 		backing: "reads msg.LastFailedAt, which asynq stores only for retry and archived tasks",
 	},
 	"died": {
-		ops:    []Op{OpGt},
-		states: []string{"archived"},
-		kind:   kindDuration,
+		ops:     []Op{OpGt},
+		states:  []string{"archived"},
+		kind:    kindDuration,
 		backing: "reads the archived zset score (died-at), which exists only for archived tasks",
 	},
 	"expires": {
-		ops:    []Op{OpLt},
-		states: []string{"completed"},
-		kind:   kindTimeOrDur,
+		ops:     []Op{OpLt},
+		states:  []string{"completed"},
+		kind:    kindTimeOrDur,
 		backing: "reads the completed zset score (expire-at), which exists only for completed tasks",
 	},
 	"group": {
-		ops:    []Op{OpEq},
-		states: []string{"aggregating"},
-		kind:   kindString,
+		ops:     []Op{OpEq},
+		states:  []string{"aggregating"},
+		kind:    kindString,
 		backing: "matches the aggregation group, which exists only for aggregating tasks",
 	},
 	"group_age": {
@@ -630,8 +630,8 @@ func parseValue(c *Clause, spec fieldSpec, valuePos int) *ParseError {
 			return nil
 		}
 		return &ParseError{
-			Msg: fmt.Sprintf("`%s` needs a duration (5m, 2h, 7d) or an RFC3339 time, got %q", c.Field, c.Value),
-			Pos: valuePos,
+			Msg:  fmt.Sprintf("`%s` needs a duration (5m, 2h, 7d) or an RFC3339 time, got %q", c.Field, c.Value),
+			Pos:  valuePos,
 			Hint: fmt.Sprintf("write `%s%s2h` or `%s%s2026-07-25T00:00:00Z`", c.Field, c.Op, c.Field, c.Op),
 		}
 	}

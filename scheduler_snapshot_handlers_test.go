@@ -14,7 +14,7 @@ import (
 	"github.com/redis/go-redis/v9"
 	. "github.com/smartystreets/goconvey/convey"
 
-	"github.com/hibiken/asynqmon/stats"
+	"github.com/zkrebbekx/asynqmon/stats"
 )
 
 // ****************************************************************************
@@ -33,8 +33,7 @@ import (
 // ****************************************************************************
 
 const (
-	schedTestRedisAddr = "127.0.0.1:6379"
-	schedTestRedisDB   = 10
+	schedTestRedisDB = 10
 )
 
 // schedFixture is the shared end-to-end environment.
@@ -359,7 +358,7 @@ func TestSchedulersEndToEnd(t *testing.T) {
 					So(okAfter.StableKey, ShouldEqual, okBefore.StableKey) // identity survived the restart
 					So(okAfter.Live, ShouldBeTrue)
 					So(okAfter.GoneSince, ShouldBeEmpty)
-					So(okAfter.FirstSeen, ShouldEqual, okBefore.FirstSeen) // history, not a fresh row
+					So(okAfter.FirstSeen, ShouldEqual, okBefore.FirstSeen)  // history, not a fresh row
 					So(okAfter.Entry.ID, ShouldNotEqual, okBefore.Entry.ID) // ephemeral ID changed
 
 					snaps, err := stats.ReadSchedulerSnapshots(ctx, f.rc)
@@ -391,3 +390,5 @@ func TestSchedulersEndToEnd(t *testing.T) {
 func jsonUnmarshalBody(w *httptest.ResponseRecorder, out interface{}) error {
 	return json.Unmarshal(w.Body.Bytes(), out)
 }
+
+var schedTestRedisAddr = testRedisAddrFromEnv()

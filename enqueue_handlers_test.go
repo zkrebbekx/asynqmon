@@ -14,7 +14,7 @@ import (
 	"github.com/redis/go-redis/v9"
 	. "github.com/smartystreets/goconvey/convey"
 
-	"github.com/hibiken/asynqmon/jobs"
+	"github.com/zkrebbekx/asynqmon/jobs"
 )
 
 // ****************************************************************************
@@ -35,8 +35,7 @@ import (
 // ****************************************************************************
 
 const (
-	enqueueTestRedisAddr = "127.0.0.1:6379"
-	enqueueTestRedisDB   = 8
+	enqueueTestRedisDB = 8
 )
 
 type enqueueTestEnv struct {
@@ -392,3 +391,5 @@ func TestEnqueueValidationAndConflicts(t *testing.T) {
 		})
 	})
 }
+
+var enqueueTestRedisAddr = testRedisAddrFromEnv()

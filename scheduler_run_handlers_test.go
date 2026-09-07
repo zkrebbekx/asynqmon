@@ -10,8 +10,8 @@ import (
 	"github.com/redis/go-redis/v9"
 	. "github.com/smartystreets/goconvey/convey"
 
-	"github.com/hibiken/asynqmon/jobs"
-	"github.com/hibiken/asynqmon/stats"
+	"github.com/zkrebbekx/asynqmon/jobs"
+	"github.com/zkrebbekx/asynqmon/stats"
 )
 
 // ****************************************************************************
@@ -31,8 +31,7 @@ import (
 // ****************************************************************************
 
 const (
-	runTestRedisAddr = "127.0.0.1:6379"
-	runTestRedisDB   = 10
+	runTestRedisDB = 10
 )
 
 type runNowResponse struct {
@@ -410,3 +409,5 @@ func TestBuildRunNowOptions(t *testing.T) {
 		})
 	})
 }
+
+var runTestRedisAddr = testRedisAddrFromEnv()

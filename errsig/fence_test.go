@@ -19,8 +19,7 @@ import (
 // ****************************************************************************
 
 const (
-	fenceTestRedisAddr = "127.0.0.1:6379"
-	fenceTestRedisDB   = 6
+	fenceTestRedisDB = 6
 )
 
 func fenceTestRedis(t *testing.T) redis.UniversalClient {
@@ -88,3 +87,5 @@ func TestIndexerFencing(t *testing.T) {
 		})
 	})
 }
+
+var fenceTestRedisAddr = testRedisAddrFromEnv()

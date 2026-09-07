@@ -11,7 +11,7 @@ import (
 	"github.com/redis/go-redis/v9"
 	. "github.com/smartystreets/goconvey/convey"
 
-	"github.com/hibiken/asynqmon/stats"
+	"github.com/zkrebbekx/asynqmon/stats"
 )
 
 // ****************************************************************************
@@ -23,8 +23,7 @@ import (
 // ****************************************************************************
 
 const (
-	statsTestRedisAddr = "127.0.0.1:6379"
-	statsTestRedisDB   = 13
+	statsTestRedisDB = 13
 )
 
 // newStatsTestEngine flushes DB 13, seeds three queues through the real
@@ -244,3 +243,5 @@ func TestFleetQueuesHandler(t *testing.T) {
 		})
 	})
 }
+
+var statsTestRedisAddr = testRedisAddrFromEnv()
