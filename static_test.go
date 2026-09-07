@@ -2,6 +2,7 @@ package asynqmon
 
 import (
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	. "github.com/smartystreets/goconvey/convey"
@@ -175,6 +176,96 @@ func TestIndexAssetURLsHonorRootPath(t *testing.T) {
 			// includes("[[") probe; unrendered actions would carry the
 			// full delimiter+field form.
 			So(body, ShouldNotContainSubstring, `[[.RootPath`)
+		})
+	})
+}
+
+// Security headers on the SPA and the API (#34). The dashboard has no login
+// and renders untrusted task payloads, so every response carries the
+// clickjacking, sniffing, referrer, and CSP guards. Requests run
+// imperatively before the Convey tree (the repo's goconvey discipline); the
+// tree only reads captured results.
+func TestSecurityHeadersOnSPAAndAPI(t *testing.T) {
+	h := &uiAssetsHandler{
+		rootPath:      "",
+		contents:      staticContents,
+		staticDirPath: "ui/build",
+		indexFileName: "index.html",
+	}
+
+	indexRec := httptest.NewRecorder()
+	h.ServeHTTP(indexRec, httptest.NewRequest("GET", "/", nil))
+
+	assetRec := httptest.NewRecorder()
+	h.ServeHTTP(assetRec, httptest.NewRequest("GET", "/favicon.svg", nil))
+
+	// An unmatched /api path is answered by the same handler; it must carry
+	// the headers too.
+	apiRec := httptest.NewRecorder()
+	h.ServeHTTP(apiRec, httptest.NewRequest("GET", "/api/queues", nil))
+
+	// A second index render must not reuse the first nonce.
+	secondRec := httptest.NewRecorder()
+	h.ServeHTTP(secondRec, httptest.NewRequest("GET", "/", nil))
+
+	nonceOf := func(rec *httptest.ResponseRecorder) string {
+		csp := rec.Header().Get("Content-Security-Policy")
+		_, after, ok := strings.Cut(csp, "'nonce-")
+		if !ok {
+			return ""
+		}
+		v, _, _ := strings.Cut(after, "'")
+		return v
+	}
+
+	Convey("Given the asynqmon SPA handler (#34)", t, func() {
+		for name, rec := range map[string]*httptest.ResponseRecorder{
+			"the index page": indexRec, "a static asset": assetRec, "an API path": apiRec,
+		} {
+			Convey("When "+name+" is served", func() {
+				Convey("Then it carries the sniffing and framing guards", func() {
+					So(rec.Header().Get("X-Content-Type-Options"), ShouldEqual, "nosniff")
+					So(rec.Header().Get("X-Frame-Options"), ShouldEqual, "DENY")
+					So(rec.Header().Get("Referrer-Policy"), ShouldEqual, "same-origin")
+				})
+				Convey("Then it carries a CSP that forbids framing", func() {
+					csp := rec.Header().Get("Content-Security-Policy")
+					So(csp, ShouldContainSubstring, "default-src 'self'")
+					So(csp, ShouldContainSubstring, "frame-ancestors 'none'")
+					So(csp, ShouldContainSubstring, "connect-src 'self'")
+					So(csp, ShouldContainSubstring, "style-src 'self' 'unsafe-inline'")
+				})
+			})
+		}
+
+		Convey("When the index page is rendered", func() {
+			body := indexRec.Body.String()
+			nonce := nonceOf(indexRec)
+
+			Convey("Then the CSP allows the inline bootstrap script by nonce", func() {
+				So(nonce, ShouldNotBeEmpty)
+				So(indexRec.Header().Get("Content-Security-Policy"), ShouldContainSubstring, "script-src 'self' 'nonce-"+nonce+"'")
+			})
+			Convey("Then the inline script tag carries the same nonce", func() {
+				So(body, ShouldContainSubstring, `<script nonce="`+nonce+`">`)
+				// No bare inline <script> is left; it would be blocked.
+				So(body, ShouldNotContainSubstring, "<script>")
+			})
+			Convey("Then the module bundle tags are untouched", func() {
+				So(body, ShouldContainSubstring, `<script type="module"`)
+			})
+			Convey("Then the page still serves as HTML that must be revalidated", func() {
+				So(indexRec.Code, ShouldEqual, 200)
+				So(indexRec.Header().Get("Content-Type"), ShouldContainSubstring, "text/html")
+				So(indexRec.Header().Get("Cache-Control"), ShouldEqual, "no-cache")
+			})
+		})
+
+		Convey("When the index page is rendered twice", func() {
+			Convey("Then each response gets a fresh nonce", func() {
+				So(nonceOf(secondRec), ShouldNotBeEmpty)
+				So(nonceOf(secondRec), ShouldNotEqual, nonceOf(indexRec))
+			})
 		})
 	})
 }
