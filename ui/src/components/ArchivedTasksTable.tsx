@@ -66,7 +66,7 @@ function Row({ task, isSelected, onSelectChange }: RowProps) {
           <TooltipProvider>
             <div className="flex items-center justify-center gap-1">
               <Tooltip><TooltipTrigger asChild>
-                <Button size="icon" variant="ghost" className="h-7 w-7" onClick={() => dispatch(runArchivedTaskAsync(task.queue, task.id))}>
+                <Button size="icon" variant="ghost" className="h-7 w-7" onClick={() => dispatch(runArchivedTaskAsync(task.queue, task.id))} aria-label="Run task">
                   <Play size={13} />
                 </Button>
               </TooltipTrigger><TooltipContent>Run now</TooltipContent></Tooltip>

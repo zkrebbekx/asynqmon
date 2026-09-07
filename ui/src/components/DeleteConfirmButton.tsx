@@ -10,11 +10,13 @@ interface Props {
   onDelete: () => void;
   disabled?: boolean;
   className?: string;
+  // Accessible name of the icon-only button. Defaults to "Delete task".
+  ariaLabel?: string;
 }
 
 // Per-row delete icon button that asks for confirmation before firing —
 // deletes are irreversible and the rest of the row actions are one click.
-export default function DeleteConfirmButton({ description, onDelete, disabled, className }: Props) {
+export default function DeleteConfirmButton({ description, onDelete, disabled, className, ariaLabel = "Delete task" }: Props) {
   const [open, setOpen] = useState(false);
   return (
     <>
@@ -26,6 +28,7 @@ export default function DeleteConfirmButton({ description, onDelete, disabled, c
             className={cn("h-7 w-7 text-[var(--fc-crit)]", className)}
             disabled={disabled}
             onClick={() => setOpen(true)}
+            aria-label={ariaLabel}
           >
             <Trash2 size={13} />
           </Button>

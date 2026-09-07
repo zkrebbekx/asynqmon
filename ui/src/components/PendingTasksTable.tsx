@@ -88,7 +88,7 @@ function Row({ task, isSelected, onSelectChange }: RowProps) {
               />
               <Tooltip>
                 <TooltipTrigger asChild>
-                  <Button size="icon" variant="ghost" className="h-7 w-7" onClick={() => dispatch(archivePendingTaskAsync(task.queue, task.id))}>
+                  <Button size="icon" variant="ghost" className="h-7 w-7" onClick={() => dispatch(archivePendingTaskAsync(task.queue, task.id))} aria-label="Archive task">
                     <Archive size={13} />
                   </Button>
                 </TooltipTrigger>

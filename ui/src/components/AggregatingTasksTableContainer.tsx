@@ -58,12 +58,12 @@ function Row({ task, isSelected, onSelectChange }: RowProps) {
           <TooltipProvider>
             <div className="flex items-center justify-center gap-1">
               <Tooltip><TooltipTrigger asChild>
-                <Button size="icon" variant="ghost" className="h-7 w-7" onClick={() => dispatch(runAggregatingTaskAsync(task.queue, task.group, task.id))}>
+                <Button size="icon" variant="ghost" className="h-7 w-7" onClick={() => dispatch(runAggregatingTaskAsync(task.queue, task.group, task.id))} aria-label="Run task">
                   <Play size={13} />
                 </Button>
               </TooltipTrigger><TooltipContent>Run now</TooltipContent></Tooltip>
               <Tooltip><TooltipTrigger asChild>
-                <Button size="icon" variant="ghost" className="h-7 w-7" onClick={() => dispatch(archiveAggregatingTaskAsync(task.queue, task.group, task.id))}>
+                <Button size="icon" variant="ghost" className="h-7 w-7" onClick={() => dispatch(archiveAggregatingTaskAsync(task.queue, task.group, task.id))} aria-label="Archive task">
                   <Archive size={13} />
                 </Button>
               </TooltipTrigger><TooltipContent>Archive</TooltipContent></Tooltip>

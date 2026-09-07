@@ -35,6 +35,7 @@ export default function MetricsFetchControls({ endTime, duration }: Props) {
         variant="outline"
         className="h-8 w-8"
         onClick={() => updateParams(endTime - duration, duration)}
+        aria-label="Earlier time window"
       >
         <ChevronLeft size={14} />
       </Button>
@@ -57,6 +58,7 @@ export default function MetricsFetchControls({ endTime, duration }: Props) {
         className="h-8 w-8"
         disabled={endTime >= currentUnixtime()}
         onClick={() => updateParams(Math.min(endTime + duration, currentUnixtime()), duration)}
+        aria-label="Later time window"
       >
         <ChevronRight size={14} />
       </Button>
