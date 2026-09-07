@@ -302,9 +302,12 @@ func (e *Engine) SchedulePass(ctx context.Context) error {
 		}
 		if _, err := e.run(ctx, kind, token); err != nil {
 			if errors.Is(err, ErrSuperseded) {
-				// Stand down: a newer scheduler owns the cadence now.
-				atomic.StoreInt32(&e.holding, 0)
-				atomic.StoreInt64(&e.token, 0)
+				// Stand down: a newer scheduler owns the cadence now. The
+				// guard skips the stand-down when this pass's token is
+				// older than the token the replica holds now (#52.1) — the
+				// replica re-acquired the lease mid-pass, so the rejection
+				// is stale.
+				leasefence.StandDown(&e.token, &e.holding, token)
 				return err
 			}
 			// One report failing (e.g. stats not ready) must not starve the

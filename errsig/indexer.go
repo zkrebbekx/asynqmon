@@ -351,11 +351,14 @@ var ErrSuperseded = errors.New("errsig: fencing token superseded; another replic
 // writes, the documented *Now semantics).
 func (ix *Indexer) currentToken() int64 { return atomic.LoadInt64(&ix.token) }
 
-// standDown clears holder state after a fence rejection so the lease loop
-// re-contends instead of retrying doomed writes.
-func (ix *Indexer) standDown() {
-	atomic.StoreInt32(&ix.holding, 0)
-	atomic.StoreInt64(&ix.token, 0)
+// standDown clears holder state after the fenced write carrying `rejected`
+// was refused, so the lease loop re-contends instead of retrying doomed
+// writes. It skips the stand-down when `rejected` is older than the token
+// this replica holds now (#52.1): the replica re-acquired the lease after
+// its own lease expired mid-run, so the rejection is stale and the fresh
+// lease must survive.
+func (ix *Indexer) standDown(rejected int64) {
+	leasefence.StandDown(&ix.token, &ix.holding, rejected)
 }
 
 // hsetCmd flattens a field map into one HSET command.
@@ -781,7 +784,7 @@ func (ix *Indexer) mergeAndWrite(ctx context.Context, now time.Time, token int64
 		return fmt.Errorf("writing signature index: %w", err)
 	}
 	if !ok {
-		ix.standDown()
+		ix.standDown(token)
 		return ErrSuperseded
 	}
 
@@ -811,7 +814,7 @@ func (ix *Indexer) enforceCap(ctx context.Context, token int64) error {
 		return err
 	}
 	if !ok {
-		ix.standDown()
+		ix.standDown(token)
 		return ErrSuperseded
 	}
 	return nil
@@ -1027,7 +1030,7 @@ func (ix *Indexer) SampleRetryNow(ctx context.Context) error {
 		return fmt.Errorf("writing retry sample: %w", err)
 	}
 	if !ok {
-		ix.standDown()
+		ix.standDown(token)
 		return ErrSuperseded
 	}
 	return nil
