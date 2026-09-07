@@ -127,12 +127,19 @@ func fillBatchEnv(ctx context.Context, rc redis.UniversalClient, plan *aql.Plan,
 			return err
 		}
 		for i, cmd := range cmds {
+			// A missing or unparsable field is counted, not guessed: asynq
+			// writes pending_since on Enqueue and scheduler forwarding only,
+			// so a task that reached pending through RunTask, RunAll or a
+			// shutdown requeue has no record (review #48). pending_age>
+			// reports false for it; pending_age=unknown lists it.
 			v, err := cmd.Result()
 			if err != nil {
-				continue // vanished mid-scan: predicate reports false, honestly
+				env.PendingSinceUnknown++
+				continue
 			}
 			ns, perr := strconv.ParseInt(v, 10, 64)
-			if perr != nil || ns == 0 {
+			if perr != nil || ns <= 0 {
+				env.PendingSinceUnknown++
 				continue
 			}
 			env.PendingSince[aql.EnvKey(batch[i].Queue, batch[i].ID)] = time.Unix(0, ns)
@@ -201,8 +208,9 @@ const taskFetchWorkers = 16
 // fetchTaskInfos fetches TaskInfo for (queue, id) refs with bounded
 // concurrency, preserving order. A ref whose task vanished (or errored)
 // yields nil at its position — callers skip it, honestly, exactly like the
-// old sequential loop.
-func fetchTaskInfos(insp *asynq.Inspector, refs [][2]string) []*asynq.TaskInfo {
+// old sequential loop. A canceled ctx stops the fan-out: the remaining refs
+// stay nil and the caller sees ctx.Err() on its next check (review #39).
+func fetchTaskInfos(ctx context.Context, insp *asynq.Inspector, refs [][2]string) []*asynq.TaskInfo {
 	out := make([]*asynq.TaskInfo, len(refs))
 	if len(refs) == 0 {
 		return out
@@ -218,6 +226,9 @@ func fetchTaskInfos(insp *asynq.Inspector, refs [][2]string) []*asynq.TaskInfo {
 		go func() {
 			defer wg.Done()
 			for i := range idx {
+				if ctx.Err() != nil {
+					continue // drain without fetching
+				}
 				ti, err := insp.GetTaskInfo(refs[i][0], refs[i][1])
 				if err == nil {
 					out[i] = ti
@@ -283,6 +294,9 @@ func execCursorPlan(ctx context.Context, rc redis.UniversalClient, insp *asynq.I
 		}
 		offset := int64(0)
 		for len(tasks) < size {
+			if cerr := ctx.Err(); cerr != nil {
+				return nil, 0, "", cerr
+			}
 			want := int64(size-len(tasks)) + 16 // headroom for tie-skips and vanished tasks
 			entries, zerr := rc.ZRangeByScoreWithScores(ctx, key, &redis.ZRangeBy{
 				Min: minStr, Max: fmtScore(plan.ScoreMax), Offset: offset, Count: want,
@@ -309,7 +323,7 @@ func execCursorPlan(ctx context.Context, rc redis.UniversalClient, insp *asynq.I
 				eligible = append(eligible, pageEntry{id: id, score: e.Score})
 				refs = append(refs, [2]string{qname, id})
 			}
-			infos := fetchTaskInfos(insp, refs)
+			infos := fetchTaskInfos(ctx, insp, refs)
 			for i, pe := range eligible {
 				if len(tasks) >= size {
 					exhausted = false
@@ -350,21 +364,24 @@ func execCursorPlan(ctx context.Context, rc redis.UniversalClient, insp *asynq.I
 // Progressive scan (ModeScan): budgeted, resumable (§5.9)
 // ----------------------------------------------------------------------------
 
-// scanOutcome is one budgeted scan call's result.
+// scanOutcome is one budgeted scan call's result. Matches are streamed to
+// the caller's sink as the scan produces them; only counters live here
+// (review #27).
 type scanOutcome struct {
-	matches []*searchTask
+	matched int    // matches produced THIS call
 	scanned int    // tasks examined THIS call
 	cursor  string // resume cursor; "" when the scan completed
 }
 
 // execScanPlan walks the plan's scope in listing pages, applying the
-// compiled predicate (plus any extra legacy filters), until the budget is
-// spent or the scope is exhausted. The cursor is (queue, group, page) at
+// compiled predicate (plus any extra legacy filters) and streaming every
+// match into sink, until the budget is spent, the scope is exhausted, the
+// sink asks to stop, or ctx ends. The cursor is (queue, group, page) at
 // page granularity — the resolved queue order is sorted, so a resume
 // continues where the previous call stopped even across requests. Budget is
 // TOTAL per call (unlike the legacy per-queue max_scan), because the §5.9
-// meter reports one number.
-func execScanPlan(ctx context.Context, rc redis.UniversalClient, insp *asynq.Inspector, plan *aql.Plan, env *aql.Env, queues []string, extra func(*searchTask) bool, cursorStr string, budget int, pf PayloadFormatter) (*scanOutcome, error) {
+// meter reports one number. A stopped scan always carries a cursor.
+func execScanPlan(ctx context.Context, rc redis.UniversalClient, insp *asynq.Inspector, plan *aql.Plan, env *aql.Env, queues []string, extra func(*searchTask) bool, cursorStr string, budget int, pf PayloadFormatter, sink matchSink) (*scanOutcome, error) {
 	var cur aql.ScanCursor
 	if cursorStr != "" {
 		var err error
@@ -374,7 +391,7 @@ func execScanPlan(ctx context.Context, rc redis.UniversalClient, insp *asynq.Ins
 		}
 	}
 
-	out := &scanOutcome{matches: make([]*searchTask, 0)}
+	out := &scanOutcome{}
 
 	for _, qname := range queues {
 		if cur.Queue != "" && qname < cur.Queue {
@@ -416,6 +433,9 @@ func execScanPlan(ctx context.Context, rc redis.UniversalClient, insp *asynq.Ins
 					out.cursor = aql.EncodeScanCursor(aql.ScanCursor{Queue: qname, Group: gname, Page: page})
 					return out, nil
 				}
+				if cerr := ctx.Err(); cerr != nil {
+					return nil, cerr // client gone: stop burning Redis (review #39)
+				}
 				batch, lerr := listTasksByState(insp, qname, gname, plan.State, page, searchBatchSize)
 				if lerr != nil {
 					if errors.Is(lerr, asynq.ErrQueueNotFound) {
@@ -437,7 +457,14 @@ func execScanPlan(ctx context.Context, rc redis.UniversalClient, insp *asynq.Ins
 					if extra != nil && !extra(st) {
 						continue
 					}
-					out.matches = append(out.matches, st)
+					out.matched++
+					if !sink(st) {
+						// The sink stopped the scan; the next page of this
+						// group is the honest resume point.
+						out.scanned += len(batch)
+						out.cursor = aql.EncodeScanCursor(aql.ScanCursor{Queue: qname, Group: gname, Page: page + 1})
+						return out, nil
+					}
 				}
 				out.scanned += len(batch)
 				if len(batch) < searchBatchSize {

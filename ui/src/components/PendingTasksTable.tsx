@@ -35,6 +35,18 @@ const columns = [
   ...(!window.READ_ONLY ? [{ key: "actions", label: "Actions", align: "center" as const }] : []),
 ];
 
+// queuedForHelp explains the gap behind an empty "Queued For" cell: asynq
+// writes the queued-at record (pending_since) on enqueue and scheduler
+// forwarding only. A task an operator re-ran with Run or Run all, or that a
+// worker requeued on shutdown, keeps no record for the rest of its pending
+// life, so this column shows "-" and pending_age> cannot evaluate it. List
+// such tasks in the Tasks console with pending_age=unknown.
+const queuedForHelp =
+  "How long the task has waited, from the queued-at record asynq writes on enqueue " +
+  "and scheduler forwarding. A task re-run through Run or Run all, or requeued by a " +
+  "worker shutdown, has no record and shows \"-\"; list those with pending_age=unknown " +
+  "in the Tasks console.";
+
 function Row({ task, isSelected, onSelectChange }: RowProps) {
   const dispatch = useAppDispatch();
   const navigate = useNavigate();
@@ -52,7 +64,18 @@ function Row({ task, isSelected, onSelectChange }: RowProps) {
           <SyntaxHighlighter>{prettifyPayload(task.payload)}</SyntaxHighlighter>
         </div>
       </TableCell>
-      <TableCell className="text-xs text-[hsl(var(--muted-foreground))]">{durationSince(task.pending_since ?? "")}</TableCell>
+      <TableCell className="text-xs text-[hsl(var(--muted-foreground))]">
+        <TooltipProvider>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <span data-testid="queued-for">{durationSince(task.pending_since ?? "")}</span>
+            </TooltipTrigger>
+            <TooltipContent className="max-w-xs">
+              {queuedForHelp}
+            </TooltipContent>
+          </Tooltip>
+        </TooltipProvider>
+      </TableCell>
       <TableCell className="text-xs">{task.retried}/{task.max_retry}</TableCell>
       <TableCell className="text-xs text-[hsl(var(--muted-foreground))] max-w-xs truncate">{task.error_message || "–"}</TableCell>
       {!window.READ_ONLY && (

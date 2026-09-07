@@ -622,3 +622,83 @@ func TestQueryHelpers(t *testing.T) {
 		})
 	})
 }
+
+// ----------------------------------------------------------------------------
+// Review #48 — pending_age=unknown, and #54.6 — numeric meta coercion
+// ----------------------------------------------------------------------------
+
+func TestPendingAgeUnknown(t *testing.T) {
+	now := time.Date(2026, 7, 25, 12, 0, 0, 0, time.UTC)
+
+	Convey("Given the pending_age field", t, func() {
+		Convey("When the query asks for tasks with no queued-at record", func() {
+			q, err := Parse("state=pending pending_age=unknown")
+			So(err, ShouldBeNil)
+			plan, cerr := Compile(q, "pending", now)
+			So(cerr, ShouldBeNil)
+
+			known := testTask("q", "t", "known", asynq.TaskStatePending, "{}")
+			gap := testTask("q", "t", "gap", asynq.TaskStatePending, "{}")
+			env := &Env{Now: now, PendingSince: map[string]time.Time{
+				EnvKey("q", "known"): now.Add(-2 * time.Hour),
+			}}
+
+			Convey("Then the plan needs pending_since and lists only the task without a record", func() {
+				So(plan.NeedsPendingSince, ShouldBeTrue)
+				So(plan.Match(env, gap), ShouldBeTrue)
+				So(plan.Match(env, known), ShouldBeFalse)
+			})
+		})
+
+		Convey("When the value is anything other than unknown", func() {
+			_, err := Parse("state=pending pending_age=2h")
+
+			Convey("Then it is rejected with a hint naming both forms", func() {
+				So(err, ShouldNotBeNil)
+				So(err.Msg, ShouldContainSubstring, "accepts only `unknown`")
+				So(err.Hint, ShouldContainSubstring, "pending_age=unknown")
+			})
+		})
+
+		Convey("When the field spec explains the backing data", func() {
+			_, err := Parse("state=retry pending_age>2h")
+
+			Convey("Then the rejection names the RunTask/RunAll/requeue gap", func() {
+				So(err, ShouldNotBeNil)
+				So(err.Msg+err.Hint, ShouldContainSubstring, "pending_age")
+				So(fieldSpecs["pending_age"].backing, ShouldContainSubstring, "RunTask")
+				So(fieldSpecs["pending_age"].backing, ShouldContainSubstring, "pending_age=unknown")
+			})
+		})
+	})
+}
+
+func TestMetaNumericCoercion(t *testing.T) {
+	now := time.Date(2026, 7, 25, 12, 0, 0, 0, time.UTC)
+
+	Convey("Given a meta clause with a numeric value", t, func() {
+		env := &Env{Now: now}
+		match := func(clause, payload string) bool {
+			q, err := Parse("state=pending " + clause)
+			So(err, ShouldBeNil)
+			plan, cerr := Compile(q, "pending", now)
+			So(cerr, ShouldBeNil)
+			return plan.Match(env, testTask("q", "t", "id", asynq.TaskStatePending, payload))
+		}
+
+		Convey("Then every spelling of the same number matches", func() {
+			So(match("meta.x=10", `{"x":10}`), ShouldBeTrue)
+			So(match("meta.x=10.0", `{"x":10}`), ShouldBeTrue)
+			So(match("meta.x=1e3", `{"x":1000}`), ShouldBeTrue)
+			So(match("meta.x=2.50", `{"x":2.5}`), ShouldBeTrue)
+		})
+		Convey("Then a different number does not match", func() {
+			So(match("meta.x=10", `{"x":11}`), ShouldBeFalse)
+			So(match("meta.x=eu", `{"x":10}`), ShouldBeFalse)
+		})
+		Convey("Then a string payload value keeps exact-text semantics", func() {
+			So(match("meta.x=10", `{"x":"10"}`), ShouldBeTrue)
+			So(match("meta.region=eu", `{"region":"eu"}`), ShouldBeTrue)
+		})
+	})
+}

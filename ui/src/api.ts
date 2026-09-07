@@ -39,6 +39,11 @@ export interface SearchTasksResponse {
   scan_cursor?: string; // scan-mode resume ("" / absent = scan complete)
   candidate_estimate?: number;
   budget?: number;
+  // Scanned pending tasks with no queued-at record (pending_since), which
+  // `pending_age>` could not evaluate. asynq writes pending_since on enqueue
+  // and scheduler forwarding only, so RunTask, RunAll and a worker's
+  // shutdown requeue leave none. List them with `pending_age=unknown`.
+  pending_since_unknown?: number;
 }
 
 // The structured 400 rejection body for unanswerable AQL:

@@ -55,6 +55,14 @@ type Env struct {
 	// PendingSince: pending task → pending_since (task-hash field).
 	PendingSince map[string]time.Time
 
+	// PendingSinceUnknown counts prepared pending tasks whose task hash
+	// carries no usable pending_since. asynq writes the field on Enqueue
+	// and scheduler forwarding only; RunTask, RunAll and a worker's
+	// shutdown requeue move a task to pending without it (review #48).
+	// pending_age> reports false for such a task; pending_age=unknown
+	// lists it.
+	PendingSinceUnknown int
+
 	// GroupEnteredAt: aggregating task → group zset score.
 	GroupEnteredAt map[string]time.Time
 }
@@ -316,13 +324,23 @@ func clausePredicate(c *Clause, now time.Time) func(*Env, *asynq.TaskInfo) bool 
 		}
 	case "meta":
 		key, want := cc.MetaKey, cc.Value
+		// A numeric clause value compares numerically against a numeric
+		// payload value (10 = 10.0 = 1e1); parsed once here (review #54.6).
+		wantNum, wantErr := strconv.ParseFloat(want, 64)
+		wantIsNum := wantErr == nil
 		return func(_ *Env, ti *asynq.TaskInfo) bool {
 			var obj map[string]interface{}
 			if err := json.Unmarshal(ti.Payload, &obj); err != nil {
 				return false
 			}
 			v, ok := obj[key]
-			return ok && metaScalarString(v) == want
+			if !ok {
+				return false
+			}
+			if f, isNum := v.(float64); isNum {
+				return wantIsNum && f == wantNum
+			}
+			return metaScalarString(v) == want
 		}
 	case "retries":
 		n := int(cc.Num)
@@ -356,6 +374,18 @@ func clausePredicate(c *Clause, now time.Time) func(*Env, *asynq.TaskInfo) bool 
 			return !ti.LastFailedAt.IsZero() && ti.LastFailedAt.Before(bound)
 		}
 	case "pending_age":
+		if cc.Op == OpEq {
+			// pending_age=unknown: the task has no pending_since record
+			// (review #48). Without a prepared env nothing is known, so
+			// the predicate reports false rather than guess.
+			return func(env *Env, ti *asynq.TaskInfo) bool {
+				if env == nil || env.PendingSince == nil {
+					return false
+				}
+				_, ok := env.PendingSince[EnvKey(ti.Queue, ti.ID)]
+				return !ok
+			}
+		}
 		d := cc.Dur
 		return func(env *Env, ti *asynq.TaskInfo) bool {
 			if env == nil || env.PendingSince == nil {
@@ -406,7 +436,10 @@ func clausePredicate(c *Clause, now time.Time) func(*Env, *asynq.TaskInfo) bool 
 
 // metaScalarString renders a JSON scalar the way the console chips do;
 // nested values render "" and therefore never match. Mirrors the search
-// endpoint's semantics exactly.
+// endpoint's semantics exactly. Numbers are compared numerically before
+// this renderer runs (see the meta predicate); it stays the fallback for a
+// non-numeric clause value. An integer beyond 2^53 cannot match exactly:
+// the float64 JSON decode gives neighbouring integers one value (#54.6).
 func metaScalarString(v interface{}) string {
 	switch val := v.(type) {
 	case nil:

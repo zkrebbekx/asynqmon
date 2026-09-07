@@ -265,7 +265,7 @@ func newJobResultsHandlerFunc(store *jobs.Store, insp *asynq.Inspector, pf Paylo
 		// Hydrate the page with the same bounded-concurrency, order-preserving
 		// fan-out the cursor listing uses (aql_exec.go). A nil slot means the
 		// task vanished since enumeration — skipped, honestly counted.
-		infos := fetchTaskInfos(insp, refs)
+		infos := fetchTaskInfos(r.Context(), insp, refs)
 		tasks := make([]*searchTask, 0, len(infos))
 		vanished := 0
 		for _, ti := range infos {
