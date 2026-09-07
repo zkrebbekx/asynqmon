@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/zkrebbekx/asynqmon/security/advisories/new
+    about: Report a vulnerability privately. Do not open a public issue.
+  - name: Question about asynq itself
+    url: https://github.com/hibiken/asynq/discussions
+    about: asynqmon only reads the queues that asynq writes.

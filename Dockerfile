@@ -7,7 +7,10 @@
 # BUILD platform so npm/go run natively (no QEMU emulation); Go cross-compiles
 # to the TARGET platform via TARGETOS/TARGETARCH below. The frontend bundle is
 # architecture-independent.
-FROM --platform=$BUILDPLATFORM node:20-alpine AS frontend
+# Base images are digest-pinned so a rebuild of the same commit gives the
+# same toolchain. Dependabot (docker ecosystem) bumps the digests. Resolve a
+# new digest with: docker buildx imagetools inspect <image:tag>
+FROM --platform=$BUILDPLATFORM node:22-alpine@sha256:c610fcdfb1d5b4740dd70c284ed3cb16bb857e0f7166196e36a5501df7a3aa32 AS frontend
 
 # Move to a working directory (/static).
 WORKDIR /static
@@ -26,7 +29,7 @@ RUN npm ci && npm run build
 # Building a backend.
 #
 
-FROM --platform=$BUILDPLATFORM golang:1.26-alpine AS backend
+FROM --platform=$BUILDPLATFORM golang:1.26.8-alpine@sha256:ce864e7223ac17b1775e6fd0b4c0db580c2eb50e7953a427916379e4b92a1628 AS backend
 
 # CA bundle for the final scratch image: the binary dials TLS Redis
 # (--redis-tls / rediss:// URLs) and HTTPS Prometheus (--prometheus-addr),
@@ -54,11 +57,17 @@ COPY --from=frontend ["/static/build", "ui/build"]
 ARG TARGETOS
 ARG TARGETARCH
 
+# Version stamp for `asynqmon --version` and /api/features. The publish
+# workflow passes the semver tag; a plain `docker build` gets "devel".
+# .git/ is dockerignored, so the linker cannot read vcs.* info; the stamp is
+# the only in-binary identity of the image.
+ARG VERSION=devel
+
 # Set necessary environmet variables needed for the image and build the server.
 ENV CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH}
 
 # Run go build (with ldflags to reduce binary size).
-RUN go build -ldflags="-s -w" -o asynqmon ./cmd/asynqmon
+RUN go build -trimpath -ldflags="-s -w -X main.version=${VERSION}" -o asynqmon ./cmd/asynqmon
 
 #
 # Third stage:

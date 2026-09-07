@@ -19,20 +19,23 @@ jobs:
     permissions:
       contents: read
       packages: write
+      # cosign signs keylessly with the job's OIDC token. Without this the
+      # signing step cannot mint a Fulcio certificate.
+      id-token: write
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # QEMU lets buildx assemble the non-native (arm64) image layers
       # (hibiken/asynqmon#292). Compilation itself cross-compiles natively via
       # the Dockerfile's $BUILDPLATFORM/TARGETARCH split, so QEMU only backs
       # the few non-build steps of the foreign-arch stages.
       - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
+        uses: docker/setup-qemu-action@1f40c72289eff860ee54a304f1438e3cff362e0a # v4.3.0
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
       - name: Docker meta
         id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         with:
           images: ghcr.io/${{ github.repository }}
           tags: |
@@ -42,14 +45,14 @@ jobs:
             type=semver,pattern={{major}}.{{minor}}
             type=raw,value=latest,enable={{is_default_branch}}
       - name: Login to GHCR
-        uses: docker/login-action@v3
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Build and push
         id: docker_build
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: .
           # Publish amd64 + arm64 manifests (hibiken/asynqmon#292).
@@ -57,5 +60,30 @@ jobs:
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          # `asynqmon --version` and /api/features report this. On a tag build
+          # metadata-action resolves {{version}} to the semver; on a branch
+          # build it resolves to the branch name.
+          build-args: |
+            VERSION=${{ steps.meta.outputs.version }}
+          # Full SLSA provenance plus an SPDX SBOM attached to the manifest,
+          # so `docker buildx imagetools inspect` and Sigstore consumers can
+          # tell what is in the image and how it was built.
+          provenance: mode=max
+          sbom: true
+      - name: Install cosign
+        if: github.event_name != 'pull_request'
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+      - name: Sign the published digest
+        # Keyless signing: the signature and the certificate go to the
+        # Sigstore transparency log, so anyone can run
+        #   cosign verify ghcr.io/<repo>@<digest> \
+        #     --certificate-identity-regexp '^https://github.com/<repo>/' \
+        #     --certificate-oidc-issuer https://token.actions.githubusercontent.com
+        # Sign the digest, never a tag: a tag can be moved after signing.
+        if: github.event_name != 'pull_request'
+        env:
+          DIGEST: ${{ steps.docker_build.outputs.digest }}
+          IMAGE: ghcr.io/${{ github.repository }}
+        run: cosign sign --yes "${IMAGE}@${DIGEST}"
       - name: Image digest
         run: echo ${{ steps.docker_build.outputs.digest }}

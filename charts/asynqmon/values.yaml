@@ -11,26 +11,110 @@ nameOverride: ""
 fullnameOverride: ""
 
 # Redis connection. Use either `url` OR (`addr`/`db`/`password`) OR `clusterNodes`.
+#
+# A value left empty keeps the binary's own default. The default is named in
+# the comment so the chart never pins a stale copy of it.
 redis:
   url: ""          # REDIS_URL (redis://, rediss://, redis-sentinel://...)
   addr: ""         # REDIS_ADDR (host:port); ignored if url/clusterNodes set
   db: 0            # REDIS_DB
   password: ""     # REDIS_PASSWORD (inline; prefer existingSecret below)
+  username: ""     # REDIS_USERNAME (redis 6 ACL user; not a secret)
   clusterNodes: "" # REDIS_CLUSTER_NODES (comma-separated host:port)
   tls: ""          # REDIS_TLS (server name for TLS validation)
   insecureTLS: false
-  # Mount the redis password from an existing secret instead of inlining it.
+  # REDIS_TIMEOUT: dial/read/write timeout for every redis call. Binary
+  # default 2s. Keep it below readinessProbe.timeoutSeconds.
+  timeout: ""
+  # REDIS_SENTINEL_PASSWORD authenticates to the sentinel nodes themselves.
+  # Inline here or supply it through existingSecret below.
+  sentinelPassword: ""
+  # Mount the redis credentials from an existing secret instead of inlining
+  # them. Set only the keys the secret actually holds; an unset key is not
+  # referenced.
   existingSecret: ""
   existingSecretPasswordKey: redis-password
+  # Read the whole connection URL from the secret, so the password never
+  # appears in the Deployment spec. Set this INSTEAD of redis.url.
+  existingSecretUrlKey: ""
+  existingSecretSentinelPasswordKey: ""
 
 # Run the Web UI in read-only mode.
 readOnly: false
+# Allow creating tasks from the Web UI (POST /api/queues/{qname}/tasks).
+# Always excluded in read-only mode.
+enableEnqueue: false
+# Let the destructive maintenance actions delete keys asynqmon itself owns.
+purgeOwnedKeys: false
+
+# Identity of the acting user, resolved from a reverse proxy.
+auth:
+  header: ""                       # AUTH_HEADER, e.g. X-Auth-Request-User
+  trustedProxies: ""               # TRUSTED_PROXIES, comma-separated CIDRs
+  requireIdentity: false           # REQUIRE_IDENTITY
+  trustBasicAuthUser: false        # TRUST_BASIC_AUTH_USER
+  allowUntrustedAuthHeader: false  # ALLOW_UNTRUSTED_AUTH_HEADER
+
+# Web UI display limits. Empty keeps the binary default.
+ui:
+  maxPayloadLength: ""        # MAX_PAYLOAD_LENGTH (default 200)
+  maxResultLength: ""         # MAX_RESULT_LENGTH (default 200)
+  maxDetailPayloadLength: ""  # MAX_DETAIL_PAYLOAD_LENGTH (default 262144)
+  # CORRELATION_KEYS: payload keys the task drawer's Flow view follows.
+  # Default "trace_id,correlation_id,request_id".
+  correlationKeys: ""
+
+# CORS_ALLOWED_ORIGINS: comma-separated origins allowed to call the API.
+# Empty means same-origin only.
+corsAllowedOrigins: ""
 
 prometheus:
   # Expose /metrics for Prometheus to scrape.
   enableExporter: false
   # Address of a Prometheus server to query for the metrics view (PROMETHEUS_ADDR).
   address: ""
+  # user:password sent with every query to prometheus.address. Supplied
+  # through a secret so it stays out of the pod spec and out of argv.
+  basicAuth: ""
+  existingSecret: ""
+  existingSecretBasicAuthKey: prometheus-basic-auth
+
+# Background fleet stats sweeper.
+stats:
+  interval: ""    # STATS_INTERVAL (default 5s)
+  disabled: false # DISABLE_STATS
+
+# Guard rails for task scans and the SSE streams.
+scans:
+  maxConcurrent: ""     # MAX_CONCURRENT_SCANS (default 4)
+  maxCeiling: ""        # MAX_SCAN_CEILING (default 20000)
+  maxSSEConnections: "" # MAX_SSE_CONNECTIONS (default 256)
+
+# Background job runner.
+jobs:
+  disabled: false # DISABLE_JOBS
+  concurrency: "" # JOB_CONCURRENCY (default 2)
+
+# Error signature index.
+errorIndex:
+  disabled: false # DISABLE_ERROR_INDEX
+
+# Queue hygiene engine.
+hygiene:
+  disabled: false      # DISABLE_HYGIENE
+  runInReadOnly: false # HYGIENE_RUN_IN_READ_ONLY
+  # HYGIENE_WEBHOOK_URL. Passed as an env var, not a flag, because the URL
+  # often carries a token.
+  webhookUrl: ""
+  existingSecret: ""
+  existingSecretWebhookUrlKey: hygiene-webhook-url
+
+# Attention thresholds. Empty keeps the binary default.
+attention:
+  pendingAgeSlo: ""       # ATTENTION_PENDING_AGE_SLO (default 5m)
+  retryStormThreshold: "" # ATTENTION_RETRY_STORM_THRESHOLD (default 1000)
+  pausedLongAfter: ""     # ATTENTION_PAUSED_LONG_AFTER (default 168h)
+  groupStallAfter: ""     # ATTENTION_GROUP_STALL_AFTER (default 5m)
 
 # Extra raw flags appended to the container args, e.g. ["--max-payload-length=500"].
 extraArgs: []
@@ -43,6 +127,10 @@ serviceAccount:
   # Annotations for cloud IAM (e.g. AWS IRSA eks.amazonaws.com/role-arn,
   # GCP Workload Identity iam.gke.io/gcp-service-account).
   annotations: {}
+
+# asynqmon calls no Kubernetes API, so the pod needs no service account
+# token. Mounting one only widens the blast radius of an RCE.
+automountServiceAccountToken: false
 
 service:
   type: ClusterIP
@@ -73,13 +161,36 @@ serviceMonitor:
   relabelings: []
   metricRelabelings: []
 
-resources: {}
-  # limits:
-  #   cpu: 200m
-  #   memory: 128Mi
-  # requests:
-  #   cpu: 50m
-  #   memory: 64Mi
+# PodDisruptionBudget. Enable it with replicaCount > 1; with a single replica
+# minAvailable 1 blocks every voluntary node drain.
+pdb:
+  enabled: false
+  minAvailable: 1
+  # Set maxUnavailable instead of minAvailable when you prefer that form.
+  maxUnavailable: ""
+
+# Spread replicas over zones/nodes, e.g.
+#   - maxSkew: 1
+#     topologyKey: topology.kubernetes.io/zone
+#     whenUnsatisfiable: ScheduleAnyway
+#     labelSelector:
+#       matchLabels:
+#         app.kubernetes.io/name: asynqmon
+topologySpreadConstraints: []
+
+# Sized for the default workload: the process is I/O bound on redis and holds
+# one page of tasks at a time. Raise memory before raising CPU.
+resources:
+  requests:
+    cpu: 50m
+    memory: 128Mi
+  limits:
+    memory: 256Mi
+
+# GOMEMLIMIT makes the Go GC work harder as it approaches the limit, which
+# turns an OOM kill into slower requests. Keep it under
+# resources.limits.memory. Empty removes the env var.
+goMemLimit: 200MiB
 
 podAnnotations: {}
 podLabels: {}
@@ -87,6 +198,8 @@ podLabels: {}
 podSecurityContext:
   runAsNonRoot: true
   runAsUser: 65534
+  seccompProfile:
+    type: RuntimeDefault
 
 securityContext:
   allowPrivilegeEscalation: false
@@ -106,13 +219,18 @@ livenessProbe:
   initialDelaySeconds: 5
   periodSeconds: 15
 # /healthz PINGs redis with a 2s budget: 200 ok / 503 unavailable
-# (upstream hibiken/asynqmon#276).
+# (upstream hibiken/asynqmon#276). timeoutSeconds must exceed that budget,
+# otherwise the kubelet gives up before the handler answers and readiness
+# flaps on every redis stall. failureThreshold 2 still removes the pod from
+# the Service within ~20s of a real outage.
 readinessProbe:
   httpGet:
     path: /healthz
     port: http
   initialDelaySeconds: 3
   periodSeconds: 10
+  timeoutSeconds: 4
+  failureThreshold: 2
 
 nodeSelector: {}
 tolerations: []

@@ -1,0 +1,18 @@
+{{- if .Values.pdb.enabled -}}
+{{- include "asynqmon.validateValues" . -}}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "asynqmon.fullname" . }}
+  labels:
+    {{- include "asynqmon.labels" . | nindent 4 }}
+spec:
+  {{- if .Values.pdb.maxUnavailable }}
+  maxUnavailable: {{ .Values.pdb.maxUnavailable }}
+  {{- else }}
+  minAvailable: {{ .Values.pdb.minAvailable }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "asynqmon.selectorLabels" . | nindent 6 }}
+{{- end }}

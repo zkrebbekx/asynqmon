@@ -23,7 +23,7 @@ Port-forward to access the Web UI locally:
   open http://localhost:8080
 {{- end }}
 
-{{- if and (not .Values.redis.url) (not .Values.redis.addr) (not .Values.redis.clusterNodes) }}
+{{- if and (not .Values.redis.url) (not .Values.redis.addr) (not .Values.redis.clusterNodes) (not .Values.redis.existingSecretUrlKey) }}
 
 WARNING: no Redis connection configured. Set one of redis.url, redis.addr, or
 redis.clusterNodes. asynqmon defaults to 127.0.0.1:6379 which will not resolve

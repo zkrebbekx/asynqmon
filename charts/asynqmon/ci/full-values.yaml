@@ -1,0 +1,66 @@
+# Every knob set at once. The render check uses this file to compare the
+# flags the chart can emit with the flags the chart README documents.
+# chart-testing (ct) also installs the files in this directory.
+redis:
+  addr: redis.example:6379
+  db: 3
+  username: acl-user
+  password: s3cret
+  tls: redis.example
+  insecureTLS: true
+  timeout: 3s
+  sentinelPassword: sentinel-secret
+readOnly: true
+enableEnqueue: true
+purgeOwnedKeys: true
+auth:
+  header: X-Auth-Request-User
+  trustedProxies: 10.0.0.0/8
+  requireIdentity: true
+  trustBasicAuthUser: true
+  allowUntrustedAuthHeader: true
+ui:
+  maxPayloadLength: 500
+  maxResultLength: 500
+  maxDetailPayloadLength: 1048576
+  correlationKeys: trace_id,span_id
+corsAllowedOrigins: https://ops.example.com
+prometheus:
+  enableExporter: true
+  address: https://prom.example
+  basicAuth: prom:pass
+stats:
+  interval: 10s
+  disabled: true
+scans:
+  maxConcurrent: 8
+  maxCeiling: 50000
+  maxSSEConnections: 512
+jobs:
+  disabled: true
+  concurrency: 4
+errorIndex:
+  disabled: true
+hygiene:
+  disabled: true
+  runInReadOnly: true
+  webhookUrl: https://hooks.example/asynqmon
+attention:
+  pendingAgeSlo: 10m
+  retryStormThreshold: 2000
+  pausedLongAfter: 72h
+  groupStallAfter: 15m
+serviceMonitor:
+  enabled: true
+ingress:
+  enabled: true
+pdb:
+  enabled: true
+replicaCount: 3
+topologySpreadConstraints:
+  - maxSkew: 1
+    topologyKey: topology.kubernetes.io/zone
+    whenUnsatisfiable: ScheduleAnyway
+    labelSelector:
+      matchLabels:
+        app.kubernetes.io/name: asynqmon

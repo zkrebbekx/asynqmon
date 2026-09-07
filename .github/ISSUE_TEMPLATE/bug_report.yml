@@ -1,0 +1,66 @@
+name: Bug report
+description: Report incorrect behaviour in asynqmon.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not report a security vulnerability here. Use
+        [private vulnerability reporting](https://github.com/zkrebbekx/asynqmon/security/advisories/new)
+        instead.
+  - type: input
+    id: version
+    attributes:
+      label: asynqmon version
+      description: Output of `asynqmon --version`, or the image tag and digest.
+      placeholder: v0.8.0
+    validations:
+      required: true
+  - type: dropdown
+    id: deployment
+    attributes:
+      label: Deployment
+      options:
+        - Binary
+        - Docker image
+        - Helm chart
+        - Imported as a library
+    validations:
+      required: true
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: Give the exact wrong output or failure, and the exact input that caused it.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: Include the flags or values you run with, and remove every secret.
+      placeholder: |
+        1. Start asynqmon with `--redis-addr=...`
+        2. Open ...
+        3. See ...
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Redis version and topology (single, sentinel, cluster), asynq version, browser if the problem is in the Web UI.
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: Relevant log lines or the API response. Remove every secret.
+      render: text

@@ -5,13 +5,17 @@ on:
       - "master"
   pull_request:
 
+# Least privilege for every job below. Nothing in CI writes to the repo.
+permissions:
+  contents: read
+
 jobs:
   go:
     name: Go build, vet, test
     runs-on: ubuntu-latest
     services:
       # The root-package suites are integration tests against a real Redis
-      # (127.0.0.1:6379, DBs 12-14); without one they self-skip and CI would
+      # (127.0.0.1:6379, DBs 4-15); without one they self-skip and CI would
       # green-light untested changes.
       redis:
         image: redis:7-alpine
@@ -24,17 +28,38 @@ jobs:
           --health-retries 10
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
+      # The toolchain that runs the tests must be the one the image ships.
+      # Printing it makes drift between go.mod, CI and the Dockerfile visible
+      # in the log.
+      - name: Go version
+        run: go version
+      - name: Gofmt
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "::error::gofmt reports unformatted files — run 'gofmt -w .'"
+            echo "$unformatted"
+            exit 1
+          fi
       - name: Build
         run: go build ./...
       - name: Vet
         run: go vet ./...
       - name: Test
-        run: go test ./...
+        run: go test -race ./...
+      - name: Staticcheck
+        run: |
+          go install honnef.co/go/tools/cmd/staticcheck@latest
+          staticcheck ./...
+      - name: Govulncheck
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          govulncheck ./...
 
   ui:
     name: UI lint, test, embedded-build drift
@@ -44,11 +69,11 @@ jobs:
         working-directory: ui
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Set up Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: 20
+          node-version: 22
           cache: npm
           cache-dependency-path: ui/package-lock.json
       - name: Install
@@ -71,12 +96,25 @@ jobs:
             git diff --stat -- build | tail -5
             exit 1
           fi
+      - name: Charts are code-split out of the entry chunk
+        # recharts is the largest dependency. It must stay in its own lazily
+        # loaded chunk, so index.html must not preload it. A stray static
+        # import pulls it back into the entry graph and adds ~400 kB to the
+        # first paint; this assertion fails the build when that happens.
+        run: |
+          if grep -q recharts build/index.html; then
+            echo "::error::ui/build/index.html preloads recharts — a static import pulled the chart bundle into the entry chunk."
+            grep -n recharts build/index.html
+            exit 1
+          fi
 
   helm:
-    name: Helm chart lint
+    name: Helm chart lint and render
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Lint chart
-        run: helm lint charts/asynqmon
+        run: helm lint --strict charts/asynqmon
+      - name: Render value combinations
+        run: ./scripts/helm-render-check.sh
