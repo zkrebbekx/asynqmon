@@ -242,6 +242,12 @@ export interface SchedulerRow {
   // Present only when the entry is GONE: no live counterpart and last_seen
   // older than the server's gone threshold. Equals last_seen.
   gone_since?: string;
+  // How many live entries share this stable key: 1 for a normal
+  // registration, 0 for a snapshot-only row, n>1 when n identical entries
+  // are live. Two schedulers in an HA pair register the same entry
+  // (expected); one process registering the same task twice enqueues it
+  // twice every tick. Absent on older backends.
+  live_count?: number;
 }
 
 export interface SchedulersResponse {

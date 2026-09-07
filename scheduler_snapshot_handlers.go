@@ -56,6 +56,13 @@ type schedulerRow struct {
 	// GoneSince (== last_seen) is present only when the entry is GONE: no
 	// live counterpart and last_seen older than the gone threshold.
 	GoneSince string `json:"gone_since,omitempty"`
+	// LiveCount is how many live entries share this stable key: 1 for a
+	// normal registration, 0 for a snapshot-only row, and n>1 when n live
+	// entries are identical. Two schedulers in an HA pair register the same
+	// entry (expected); one process registering the same task twice enqueues
+	// it twice every tick, and the count is the only place that shows
+	// (#54.4).
+	LiveCount int `json:"live_count"`
 }
 
 type listSchedulersResponse struct {
@@ -102,6 +109,8 @@ func newListSchedulersHandlerFunc(inspector *asynq.Inspector, rc redis.Universal
 			snapByKey[s.StableKey] = s
 		}
 
+		liveCounts := stats.CountLiveByStableKey(live)
+
 		now := time.Now()
 		rows := make([]*schedulerRow, 0, len(live)+len(snaps))
 		seen := make(map[string]bool, len(live))
@@ -111,7 +120,12 @@ func newListSchedulersHandlerFunc(inspector *asynq.Inspector, rc redis.Universal
 				continue // two schedulers heartbeating identical entries
 			}
 			seen[key] = true
-			row := &schedulerRow{StableKey: key, Entry: toSchedulerEntry(le, pf), Live: true}
+			row := &schedulerRow{
+				StableKey: key,
+				Entry:     toSchedulerEntry(le, pf),
+				Live:      true,
+				LiveCount: liveCounts[key],
+			}
 			if s, ok := snapByKey[key]; ok {
 				row.FirstSeen = rfc3339OrEmpty(s.FirstSeen)
 				row.LastSeen = rfc3339OrEmpty(s.LastSeen)

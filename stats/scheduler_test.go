@@ -78,6 +78,36 @@ func TestSchedulerEntryDataFromAsynq(t *testing.T) {
 	})
 }
 
+func TestCountLiveByStableKey(t *testing.T) {
+	entry := func(id, spec, typ string) *asynq.SchedulerEntry {
+		return &asynq.SchedulerEntry{
+			ID:   id,
+			Spec: spec,
+			Task: asynq.NewTask(typ, []byte(`{"k":"v"}`)),
+			Opts: []asynq.Option{asynq.Queue("cache")},
+		}
+	}
+
+	Convey("Given live entries with one registration duplicated (#54.4)", t, func() {
+		counts := CountLiveByStableKey([]*asynq.SchedulerEntry{
+			entry("eph-1", "@every 5m", "cache:warm"),
+			entry("eph-2", "@every 5m", "cache:warm"),
+			entry("eph-3", "@every 1h", "report:build"),
+			nil,
+		})
+
+		Convey("Then the duplicated key counts two", func() {
+			So(counts[StableKeyForAsynqEntry(entry("eph-1", "@every 5m", "cache:warm"))], ShouldEqual, 2)
+		})
+		Convey("Then a single registration counts one", func() {
+			So(counts[StableKeyForAsynqEntry(entry("eph-3", "@every 1h", "report:build"))], ShouldEqual, 1)
+		})
+		Convey("Then a nil entry is ignored and only the two keys exist", func() {
+			So(counts, ShouldHaveLength, 2)
+		})
+	})
+}
+
 func TestSchedulerSnapshotHashRoundTrip(t *testing.T) {
 	Convey("Given a snapshot with history", t, func() {
 		now := time.Now().Truncate(time.Second)
