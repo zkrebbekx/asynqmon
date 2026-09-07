@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -113,7 +114,10 @@ func newGetMetricsHandlerFunc(client *http.Client, prometheusAddr string, basicA
 		for r := range ch {
 			n--
 			if r.err != nil {
-				writeErrorMsg(w, http.StatusBadGateway, fmt.Sprintf("failed to fetch %q: %v", r.query, r.err))
+				// The transport error carries the Prometheus URL; log it and
+				// answer with a generic body.
+				log.Printf("asynqmon: metrics: failed to fetch %q: %v", r.query, r.err)
+				writeErrorMsg(w, http.StatusBadGateway, "prometheus unreachable")
 				return
 			}
 			switch r.query {
@@ -142,7 +146,7 @@ func newGetMetricsHandlerFunc(client *http.Client, prometheusAddr string, basicA
 		}
 		bytes, err := json.Marshal(resp)
 		if err != nil {
-			writeErrorMsg(w, http.StatusInternalServerError, fmt.Sprintf("failed to marshal response into JSON: %v", err))
+			writeError(w, http.StatusInternalServerError, fmt.Errorf("failed to marshal response into JSON: %w", err))
 			return
 		}
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")

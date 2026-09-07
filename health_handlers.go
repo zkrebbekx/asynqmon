@@ -3,6 +3,7 @@ package asynqmon
 import (
 	"context"
 	"encoding/json"
+	"log"
 	"net/http"
 	"time"
 
@@ -38,24 +39,32 @@ import (
 // healthzResponse is the GET /healthz probe body (upstream
 // hibiken/asynqmon#276).
 type healthzResponse struct {
-	Status string `json:"status"`          // "ok" | "unavailable"
-	Error  string `json:"error,omitempty"` // redis error when unavailable
+	Status string `json:"status"` // "ok" | "unavailable"
 }
+
+// healthzTimeout is the PING budget of GET /healthz. The Redis client's own
+// read/write timeouts must be at or below it (the binary sets both from
+// --redis-timeout, default 2s), otherwise a hung Redis answers later than
+// the probe budget promises.
+const healthzTimeout = 2 * time.Second
 
 // newHealthzHandlerFunc serves GET /healthz (upstream hibiken/asynqmon#276):
 // a liveness/readiness probe that PINGs redis with a 2-second budget so a
 // hung Redis cannot stall the orchestrator's probe loop. 200 {"status":"ok"}
-// when redis answers, 503 {"status":"unavailable","error":...} otherwise.
+// when redis answers, 503 {"status":"unavailable"} otherwise. The Redis
+// error is logged, never echoed: the probe is reachable outside /api and
+// the raw error carries the Redis address.
 // Registered on the parent router (outside /api): no auth, no read-only
 // filter, no side effects.
 func newHealthzHandlerFunc(rc redis.UniversalClient) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+		ctx, cancel := context.WithTimeout(r.Context(), healthzTimeout)
 		defer cancel()
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
 		if err := rc.Ping(ctx).Err(); err != nil {
+			log.Printf("asynqmon: healthz: redis PING failed: %v", err)
 			w.WriteHeader(http.StatusServiceUnavailable)
-			_ = json.NewEncoder(w).Encode(healthzResponse{Status: "unavailable", Error: err.Error()})
+			_ = json.NewEncoder(w).Encode(healthzResponse{Status: "unavailable"})
 			return
 		}
 		_ = json.NewEncoder(w).Encode(healthzResponse{Status: "ok"})
