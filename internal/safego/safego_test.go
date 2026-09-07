@@ -266,3 +266,34 @@ func waitFor(cond func() bool) {
 		time.Sleep(time.Millisecond)
 	}
 }
+
+func TestGoLoop(t *testing.T) {
+	Convey("Given a loop that panics once and then finishes", t, func() {
+		newCapture(t)
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		var wg sync.WaitGroup
+		wg.Add(1)
+		var mu sync.Mutex
+		runs := 0
+
+		Convey("When GoLoop starts it with wg.Done as the done hook", func() {
+			GoLoop(ctx, "unit: tracked loop", wg.Done, func() {
+				mu.Lock()
+				runs++
+				n := runs
+				mu.Unlock()
+				if n == 1 {
+					panic("first tick failed")
+				}
+			})
+			wg.Wait()
+
+			Convey("Then done runs exactly once, after the restart", func() {
+				mu.Lock()
+				defer mu.Unlock()
+				So(runs, ShouldEqual, 2)
+			})
+		})
+	})
+}

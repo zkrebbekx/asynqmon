@@ -19,6 +19,7 @@ import (
 	"github.com/redis/go-redis/v9"
 
 	"github.com/zkrebbekx/asynqmon/internal/leasefence"
+	"github.com/zkrebbekx/asynqmon/internal/safego"
 )
 
 // ****************************************************************************
@@ -286,8 +287,8 @@ func (ix *Indexer) Start(ctx context.Context) {
 	ix.started = true
 	ctx, ix.cancel = context.WithCancel(ctx)
 	ix.wg.Add(2)
-	go ix.leaseLoop(ctx)
-	go ix.workLoop(ctx)
+	safego.GoLoop(ctx, "errsig: lease loop", ix.wg.Done, func() { ix.leaseLoop(ctx) })
+	safego.GoLoop(ctx, "errsig: work loop", ix.wg.Done, func() { ix.workLoop(ctx) })
 }
 
 // Stop cancels both loops, waits for them, and best-effort releases the
@@ -322,8 +323,10 @@ func (ix *Indexer) LeaseHeld() bool { return atomic.LoadInt32(&ix.holding) == 1 
 // InstanceID returns this replica's lease identity.
 func (ix *Indexer) InstanceID() string { return ix.cfg.InstanceID }
 
+// leaseLoop renews or acquires the lease until ctx is done.
+// safego.GoLoop owns the WaitGroup slot and restarts the loop after a
+// panic, so the loop must not call Done itself.
 func (ix *Indexer) leaseLoop(ctx context.Context) {
-	defer ix.wg.Done()
 	ticker := time.NewTicker(ix.cfg.LeaseTTL / 3)
 	defer ticker.Stop()
 	for {
@@ -372,8 +375,11 @@ func (ix *Indexer) leaseTick(ctx context.Context) {
 // (both feeders run sequentially on one goroutine — no concurrent writes to
 // merge, so read-modify-write of signature hashes stays race-free under the
 // single lease).
+// workLoop sweeps the archived tail and samples retries while this replica
+// holds the lease.
+// safego.GoLoop owns the WaitGroup slot and restarts the loop after a
+// panic, so the loop must not call Done itself.
 func (ix *Indexer) workLoop(ctx context.Context) {
-	defer ix.wg.Done()
 	ticker := time.NewTicker(ix.cfg.TailInterval)
 	defer ticker.Stop()
 	var lastSample time.Time

@@ -11,6 +11,7 @@
 //   - Run runs fn on the calling goroutine and reports whether fn panicked.
 //   - Go runs fn on a new goroutine.
 //   - Loop runs fn on the calling goroutine and restarts fn after a panic.
+//   - GoLoop runs Loop on a new goroutine.
 //
 // Recovery hides a bug, so every recovered panic writes the panic value and
 // the stack to the logger. Use SetLogger to capture that output in a test.
@@ -83,6 +84,23 @@ func Run(name string, fn func()) (recovered bool) {
 // WaitGroup contract.
 func Go(name string, fn func()) {
 	go Run(name, fn)
+}
+
+// GoLoop runs Loop on a new goroutine. It calls done, when done is not nil,
+// after the loop returns; pass wg.Done to keep a WaitGroup contract that
+// survives a restart, because Loop calls fn again instead of returning.
+//
+// Every background loop of asynqmon starts this way:
+//
+//	e.wg.Add(1)
+//	safego.GoLoop(ctx, "stats: lease loop", e.wg.Done, func() { e.leaseLoop(ctx) })
+func GoLoop(ctx context.Context, name string, done func(), fn func()) {
+	Go(name, func() {
+		if done != nil {
+			defer done()
+		}
+		Loop(ctx, name, fn)
+	})
 }
 
 // Loop calls fn on the calling goroutine and restarts fn after a panic,

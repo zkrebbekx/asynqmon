@@ -3,6 +3,7 @@ package asynqmon
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -12,6 +13,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/zkrebbekx/asynqmon/internal/safego"
 )
 
 type getMetricsResponse struct {
@@ -105,11 +108,16 @@ func newGetMetricsHandlerFunc(client *http.Client, prometheusAddr string, basicA
 		n := len(queries)
 		ch := make(chan res, len(queries))
 		for _, q := range queries {
-			go func(q string) {
+			safego.Go("metrics: prometheus fetch", func() {
+				// The reader below counts one result per query, so the
+				// send must happen even when the fetch panics. The
+				// pre-set error is what a panicking fetch reports.
+				out := res{query: q, err: errors.New("metrics fetch panicked")}
+				defer func() { ch <- out }()
 				url := buildPrometheusURL(prometheusAddr, q, opts)
 				msg, err := fetchPrometheusMetrics(r.Context(), client, url, basicAuth)
-				ch <- res{q, msg, err}
-			}(q)
+				out = res{query: q, msg: msg, err: err}
+			})
 		}
 		for r := range ch {
 			n--

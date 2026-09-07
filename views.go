@@ -14,6 +14,8 @@ import (
 	"time"
 
 	"github.com/redis/go-redis/v9"
+
+	"github.com/zkrebbekx/asynqmon/internal/safego"
 )
 
 // ****************************************************************************
@@ -347,7 +349,7 @@ const (
 // channel closes when the goroutine exits.
 func seedSystemViewsInBackground(ctx context.Context, store viewStore) <-chan struct{} {
 	done := make(chan struct{})
-	go func() {
+	safego.Go("views: system view seeder", func() {
 		defer close(done)
 		backoff := seedBackoffInitial
 		for {
@@ -371,7 +373,7 @@ func seedSystemViewsInBackground(ctx context.Context, store viewStore) <-chan st
 				backoff = seedBackoffMax
 			}
 		}
-	}()
+	})
 	return done
 }
 

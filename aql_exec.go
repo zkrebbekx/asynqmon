@@ -14,6 +14,7 @@ import (
 	"github.com/redis/go-redis/v9"
 
 	"github.com/zkrebbekx/asynqmon/aql"
+	"github.com/zkrebbekx/asynqmon/internal/safego"
 	"github.com/zkrebbekx/asynqmon/stats"
 )
 
@@ -242,18 +243,22 @@ func fetchTaskInfos(ctx context.Context, insp *asynq.Inspector, refs [][2]string
 	idx := make(chan int)
 	wg.Add(workers)
 	for w := 0; w < workers; w++ {
-		go func() {
+		safego.Go("aql: task-info fetch worker", func() {
 			defer wg.Done()
 			for i := range idx {
 				if ctx.Err() != nil {
 					continue // drain without fetching
 				}
-				ti, err := insp.GetTaskInfo(refs[i][0], refs[i][1])
-				if err == nil {
-					out[i] = ti
-				}
+				// Recover per reference, not per worker: a worker that
+				// died would leave the sender below blocked on idx.
+				safego.Run("aql: task-info fetch", func() {
+					ti, err := insp.GetTaskInfo(refs[i][0], refs[i][1])
+					if err == nil {
+						out[i] = ti
+					}
+				})
 			}
-		}()
+		})
 	}
 	for i := range refs {
 		idx <- i
