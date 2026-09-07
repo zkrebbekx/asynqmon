@@ -33,6 +33,12 @@ import {
   AqlRejection,
 } from "../lib/aql";
 import { TIME_CHIPS, TimeChip, applyTimeChip, isTimeChipActive, timeChipClause } from "../lib/timechips";
+import {
+  BATCH_SELECTION_THRESHOLD,
+  SELECTION_CONCURRENCY,
+  groupByQueue,
+  runWithConcurrency,
+} from "../lib/selection";
 import { cn, clickableRowClass, clickableRowProps } from "../lib/utils";
 import { useLatestOnly, usePolling } from "../hooks";
 import { useKeymap } from "../hooks/useKeymap";
@@ -76,6 +82,23 @@ const actionFns: Record<State, { run?: ActionFn; archive?: ActionFn; delete?: Ac
   retry: { run: api.runRetryTask, archive: api.archiveRetryTask, delete: api.deleteRetryTask },
   archived: { run: api.runArchivedTask, delete: api.deleteArchivedTask },
   completed: { delete: api.deleteCompletedTask },
+};
+
+// Batch counterparts of actionFns: one POST per queue instead of one
+// request per task. A selection above BATCH_SELECTION_THRESHOLD rows takes
+// this path (review #55.7).
+type BatchActionFn = (qname: string, taskIds: string[]) => Promise<unknown>;
+
+const batchActionFns: Record<State, { run?: BatchActionFn; archive?: BatchActionFn; delete?: BatchActionFn; cancel?: BatchActionFn }> = {
+  active: { cancel: api.batchCancelActiveTasks },
+  pending: { delete: api.batchDeletePendingTasks, archive: api.batchArchivePendingTasks },
+  // Aggregating batch endpoints are scoped by group, not by queue alone, and
+  // the console offers no aggregating verbs — nothing to map.
+  aggregating: {},
+  scheduled: { run: api.batchRunScheduledTasks, archive: api.batchArchiveScheduledTasks, delete: api.batchDeleteScheduledTasks },
+  retry: { run: api.batchRunRetryTasks, archive: api.batchArchiveRetryTasks, delete: api.batchDeleteRetryTasks },
+  archived: { run: api.batchRunArchivedTasks, delete: api.batchDeleteArchivedTasks },
+  completed: { delete: api.batchDeleteCompletedTasks },
 };
 
 // Bulk-on-filter capabilities per state (the backend acts by queue + task id,
@@ -762,9 +785,20 @@ export default function TasksGlobalView() {
     if (!verb) return;
     const fn = acts[verb];
     if (!fn) return;
+    // Rows whose queue name the API cannot address are dropped: acting on
+    // them would target a different queue (review #49).
     const targets = selectedTasks.filter((t) => isAddressableName(t.queue));
+    // A 100-row selection used to fire 100 concurrent single-task requests.
+    // Above the threshold, send one batch request per queue; below it, cap
+    // the single-task fan-out at SELECTION_CONCURRENCY (review #55.7).
+    const batchFn = batchActionFns[view.state][verb];
     try {
-      await Promise.all(targets.map((t) => fn(t.queue, t.id)));
+      if (batchFn && targets.length > BATCH_SELECTION_THRESHOLD) {
+        const groups = groupByQueue(targets);
+        await runWithConcurrency(groups, SELECTION_CONCURRENCY, (g) => batchFn(g.queue, g.ids));
+      } else {
+        await runWithConcurrency(targets, SELECTION_CONCURRENCY, (t) => fn(t.queue, t.id));
+      }
       setError("");
     } catch (e) {
       setError(toErrorString(e));
