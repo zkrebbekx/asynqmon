@@ -139,6 +139,40 @@ func TestRejectionMessages(t *testing.T) {
 			})
 		})
 
+		Convey("When free text that contains an operator is parsed as a clause (#54.1)", func() {
+			_, unknownErr := Parse("user=42")
+			_, timeErr := Parse("oldness>2h")
+			_, opErr := Parse("queue>billing")
+
+			Convey("Then the unknown-field hint says how to search the text literally", func() {
+				So(unknownErr, ShouldNotBeNil)
+				So(unknownErr.Msg, ShouldContainSubstring, "unknown field `user`")
+				So(unknownErr.Hint, ShouldContainSubstring, `to search this text literally, quote it: "user=42"`)
+			})
+
+			Convey("Then the unknown-time-field hint carries the same advice", func() {
+				So(timeErr, ShouldNotBeNil)
+				So(timeErr.Msg, ShouldContainSubstring, "unknown time field `oldness`")
+				So(timeErr.Hint, ShouldContainSubstring, `o search this text literally, quote it: "oldness>2h"`)
+			})
+
+			Convey("Then the operator-unsupported hint carries the same advice", func() {
+				So(opErr, ShouldNotBeNil)
+				So(opErr.Msg, ShouldContainSubstring, "`queue` does not support `>`")
+				So(opErr.Hint, ShouldContainSubstring, "supported:")
+				So(opErr.Hint, ShouldContainSubstring, `to search this text literally, quote it: "queue>billing"`)
+			})
+
+			Convey("Then the quoted form is free text, not a clause", func() {
+				q, err := Parse(`"user=42"`)
+				So(err, ShouldBeNil)
+				So(q.Clauses, ShouldHaveLength, 1)
+				So(q.Clauses[0].Field, ShouldEqual, "")
+				So(q.Clauses[0].Value, ShouldEqual, "user=42")
+				So(IsQuery(`"user=42"`), ShouldBeFalse)
+			})
+		})
+
 		Convey("When an age field is used in the wrong single state", func() {
 			_, err := Parse("state=pending died>3d")
 

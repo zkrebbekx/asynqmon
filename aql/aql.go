@@ -446,7 +446,7 @@ func parseClause(t token) (*Clause, *ParseError) {
 
 	spec, known := fieldSpecs[name]
 	if !known {
-		return nil, unknownFieldError(field, value, t.pos)
+		return nil, unknownFieldError(field, value, text, t.pos)
 	}
 	if spec.kind == kindFlag {
 		return nil, &ParseError{
@@ -458,7 +458,7 @@ func parseClause(t token) (*Clause, *ParseError) {
 		return nil, &ParseError{
 			Msg:  fmt.Sprintf("`%s` does not support `%s`", field, op),
 			Pos:  t.pos,
-			Hint: fmt.Sprintf("supported: %s", opsLabel(field, spec)),
+			Hint: fmt.Sprintf("supported: %s; %s", opsLabel(field, spec), literalQuoteHint(text)),
 		}
 	}
 	if value == "" {
@@ -536,7 +536,23 @@ func unquote(s string) string {
 // unknownFieldError implements the §3.4 special case: an unknown field whose
 // value (or name) is time-shaped gets the no-enqueue-timestamp explanation
 // and the supported-ages catalog, verbatim.
-func unknownFieldError(field, value string, pos int) *ParseError {
+// literalQuoteHint tells the operator how to search a clause-shaped token
+// as plain text: a quoted token is free text, never a clause (#54.1).
+func literalQuoteHint(text string) string {
+	return fmt.Sprintf("to search this text literally, quote it: %q", text)
+}
+
+func upperFirst(s string) string {
+	if s == "" {
+		return s
+	}
+	return strings.ToUpper(s[:1]) + s[1:]
+}
+
+// unknownFieldError explains an unknown field. text is the whole offending
+// token; every hint ends with the literal-quote advice because a bare token
+// such as user=42 is most often free text that happens to contain =.
+func unknownFieldError(field, value, text string, pos int) *ParseError {
 	timeShaped := enqueuedAliases[field]
 	if !timeShaped {
 		if _, ok := parseDur(strings.TrimPrefix(value, "-")); ok {
@@ -550,7 +566,7 @@ func unknownFieldError(field, value string, pos int) *ParseError {
 		if enqueuedAliases[field] {
 			msg = "asynq stores no enqueue timestamp"
 		}
-		return &ParseError{Msg: msg, Pos: pos, Hint: supportedAgesHint}
+		return &ParseError{Msg: msg, Pos: pos, Hint: supportedAgesHint + " " + upperFirst(literalQuoteHint(text))}
 	}
 	known := make([]string, 0, len(fieldSpecs))
 	for name := range fieldSpecs {
@@ -563,7 +579,7 @@ func unknownFieldError(field, value string, pos int) *ParseError {
 	return &ParseError{
 		Msg:  fmt.Sprintf("unknown field `%s`", field),
 		Pos:  pos,
-		Hint: "known fields: " + strings.Join(known, ", "),
+		Hint: "known fields: " + strings.Join(known, ", ") + "; " + literalQuoteHint(text),
 	}
 }
 
