@@ -11,6 +11,7 @@ import (
 	"os"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -111,6 +112,11 @@ type Runner struct {
 	// pending_since/group scores per batch.
 	envB *aql.EnvBuilder
 
+	// actFn applies one verb to one task. It is r.act in production; tests
+	// replace it to drive the act loop's error classification without a
+	// live worker fleet.
+	actFn func(v Verb, qname, taskID string) error
+
 	working sync.Map // job id -> struct{} (jobs this replica is working)
 	slots   chan struct{}
 
@@ -153,7 +159,7 @@ func NewRunner(cfg Config) *Runner {
 	if logf == nil {
 		logf = log.Printf
 	}
-	return &Runner{
+	r := &Runner{
 		cfg:   cfg,
 		store: NewStore(cfg.RedisClient),
 		insp:  cfg.Inspector,
@@ -161,6 +167,8 @@ func NewRunner(cfg Config) *Runner {
 		envB:  &aql.EnvBuilder{RC: cfg.RedisClient, Inspector: cfg.Inspector},
 		slots: make(chan struct{}, cfg.Concurrency),
 	}
+	r.actFn = r.act
+	return r
 }
 
 func defaultInstanceID() string {
@@ -299,7 +307,9 @@ func (r *Runner) startRenewal(ctx context.Context, id string) *claimSession {
 	r.wg.Add(1)
 	go func() {
 		defer r.wg.Done()
-		ticker := time.NewTicker(r.cfg.LeaseTTL / 3)
+		// Renew at TTL/5, not TTL/3 (#40): a single missed renewal must not
+		// put the claim near expiry while a batch is still acting.
+		ticker := time.NewTicker(r.cfg.LeaseTTL / 5)
 		defer ticker.Stop()
 		for {
 			select {
@@ -759,6 +769,18 @@ func (r *Runner) execute(ctx context.Context, j *Job, token int64, cs *claimSess
 		if cs.isLost() {
 			return
 		}
+		// Synchronous renewal before every batch (#40): the background
+		// renewal only samples the lease every TTL/5, so a batch could start
+		// on a lease that had already expired and act on tasks a successor
+		// was acting on at the same time. One EVALSHA per 100 tasks buys the
+		// guarantee that the lease was alive when the batch began.
+		if ok, rerr := r.store.RenewClaim(ctx, j.ID, r.cfg.InstanceID, r.cfg.LeaseTTL); rerr != nil || !ok {
+			if rerr != nil && ctx.Err() == nil {
+				r.logf("asynqmon: jobs: %s: renewing claim before execute batch: %v", j.ID, rerr)
+			}
+			atomic.StoreInt32(&cs.lost, 1)
+			return
+		}
 
 		refs, err := r.store.Candidates(ctx, j.ID, j.actCursor, int64(r.cfg.ExecBatch))
 		if err != nil {
@@ -801,17 +823,53 @@ func (r *Runner) execute(ctx context.Context, j *Job, token int64, cs *claimSess
 			}
 			return
 		}
+		acted := 0
 		for _, ti := range fetched {
+			// Per-task guards (#40): a claim lost mid-batch must stop the
+			// loop at the next task, not at the next batch. Up to
+			// ExecBatch-1 further acts happened before, each of them a
+			// duplicate of what the successor was already doing.
+			if ctx.Err() != nil || cs.isLost() {
+				break
+			}
 			if !matcher.Matches(ti) {
 				j.Counts.Skipped++
+				acted++
 				continue
 			}
-			if aerr := r.act(j.Verb, ti.Queue, ti.ID); aerr != nil {
+			aerr := r.actFn(j.Verb, ti.Queue, ti.ID)
+			switch {
+			case aerr == nil:
+				j.Counts.Acted++
+			case isAlreadyInStateErr(aerr):
+				// A successor (or an operator) already moved this task into
+				// the target state. That is the intended outcome, so it
+				// counts as skipped, never as a failure (#40).
+				j.Counts.Skipped++
+			default:
 				j.Counts.Failed++
 				failures = append(failures, ItemFailure{Queue: ti.Queue, ID: ti.ID, Error: aerr.Error()})
-			} else {
-				j.Counts.Acted++
 			}
+			acted++
+		}
+		// An early stop (claim lost or context canceled) leaves the cursor
+		// where it was, so the next claimer redoes this page; its acts on
+		// the tasks already acted on report "already <state>" and count as
+		// skipped. The counts of the partial page are still persisted when
+		// the fence allows it, so Acted does not undercount.
+		if acted < len(fetched) {
+			ok, werr := r.store.WriteProgress(ctx, j.ID, token, ProgressWrite{
+				Fields: map[string]string{
+					"acted":   strconv.FormatInt(j.Counts.Acted, 10),
+					"skipped": strconv.FormatInt(j.Counts.Skipped, 10),
+					"failed":  strconv.FormatInt(j.Counts.Failed, 10),
+				},
+				Failures: failures,
+			})
+			if (werr != nil || !ok) && ctx.Err() == nil {
+				r.logf("asynqmon: jobs: %s: persisting a partial execute batch after the claim was lost: ok=%t err=%v", j.ID, ok, werr)
+			}
+			return
 		}
 		j.actCursor += int64(len(refs))
 
@@ -848,6 +906,33 @@ func (r *Runner) execute(ctx context.Context, j *Job, token int64, cs *claimSess
 		case <-time.After(sleep):
 		}
 	}
+}
+
+// alreadyStates are the task states an Inspector verb reports back when the
+// task is already there. asynq (v0.26.0) returns plain fmt.Errorf values for
+// these — no typed error, no sentinel — so the classification is a string
+// match, kept in one place with its own table test.
+var alreadyStates = []string{"archived", "pending", "completed", "active", "retry", "scheduled", "aggregating"}
+
+// isAlreadyInStateErr reports whether err says the task is already in the
+// state the verb wanted to put it in (for example "task is already
+// archived"). Such an error is an idempotent no-op, not a failure: after a
+// claim handover both the stalled holder and its successor can act on the
+// same task, and the loser must count the task as skipped (#40).
+func isAlreadyInStateErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	if !strings.Contains(msg, "already") {
+		return false
+	}
+	for _, state := range alreadyStates {
+		if strings.Contains(msg, state) {
+			return true
+		}
+	}
+	return false
 }
 
 // act applies the verb via the Inspector (§7: all mutations via public

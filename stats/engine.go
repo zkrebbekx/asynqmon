@@ -860,9 +860,10 @@ func (e *Engine) sweep(ctx context.Context) error {
 		// as fresh SourceLocal data (preferred over the new holder's cache)
 		// for up to localStaleAfter after a failover, so two replicas
 		// briefly answered with diverging fleets.
-		atomic.StoreInt32(&e.holding, 0)
-		atomic.StoreInt64(&e.token, 0)
-		e.logf("asynqmon: stats: %v", ErrSuperseded)
+		// Stale-rejection guard (#52.1): see the series stand-down above.
+		if leasefence.StandDown(&e.token, &e.holding, token) {
+			e.logf("asynqmon: stats: %v", ErrSuperseded)
+		}
 		return ErrSuperseded
 	}
 	// Publish to memory even if the cache write failed: local data is good,
@@ -918,9 +919,14 @@ func (e *Engine) sweep(ctx context.Context) error {
 	}
 
 	if superseded {
-		atomic.StoreInt32(&e.holding, 0)
-		atomic.StoreInt64(&e.token, 0)
-		e.logf("asynqmon: stats: %v", ErrSuperseded)
+		// Stale-rejection guard (#52.1): stand down only while this sweep's
+		// token is still the token this replica holds. A rejection carried by
+		// an OLDER token means the replica already re-acquired the lease after
+		// its own lease expired mid-sweep, and dropping the fresh lease would
+		// idle the role until the lock expired.
+		if leasefence.StandDown(&e.token, &e.holding, token) {
+			e.logf("asynqmon: stats: %v", ErrSuperseded)
+		}
 		return ErrSuperseded
 	}
 	if werr != nil {

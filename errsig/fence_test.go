@@ -88,4 +88,45 @@ func TestIndexerFencing(t *testing.T) {
 	})
 }
 
+// TestStandDownSkipsStaleRejection: a rejection carried by an older token
+// must not drop the lease this replica re-acquired in the meantime (#52.1).
+func TestStandDownSkipsStaleRejection(t *testing.T) {
+	rc := fenceTestRedis(t)
+	ctx := context.Background()
+	opt := asynq.RedisClientOpt{Addr: fenceTestRedisAddr, DB: fenceTestRedisDB}
+	insp := asynq.NewInspector(opt)
+	t.Cleanup(func() { insp.Close() })
+
+	ix := NewIndexer(Config{RedisClient: rc, Inspector: insp, Logf: func(string, ...interface{}) {}})
+
+	Convey("Given an indexer that re-acquired the lease while an old write was in flight", t, func() {
+		old, err := ix.fence.Acquire(ctx, ix.cfg.InstanceID, time.Minute)
+		So(err, ShouldBeNil)
+		So(ix.fence.Release(ctx, ix.cfg.InstanceID), ShouldBeNil)
+		current, err := ix.fence.Acquire(ctx, ix.cfg.InstanceID, time.Minute)
+		So(err, ShouldBeNil)
+		So(current, ShouldBeGreaterThan, old)
+		atomic.StoreInt64(&ix.token, current)
+		atomic.StoreInt32(&ix.holding, 1)
+
+		Convey("When the OLD token's write is rejected", func() {
+			ix.standDown(old)
+
+			Convey("Then the replica keeps the newer lease", func() {
+				So(ix.LeaseHeld(), ShouldBeTrue)
+				So(atomic.LoadInt64(&ix.token), ShouldEqual, current)
+			})
+		})
+
+		Convey("When the CURRENT token's write is rejected", func() {
+			ix.standDown(current)
+
+			Convey("Then the replica stands down", func() {
+				So(ix.LeaseHeld(), ShouldBeFalse)
+				So(atomic.LoadInt64(&ix.token), ShouldEqual, int64(0))
+			})
+		})
+	})
+}
+
 var fenceTestRedisAddr = testRedisAddrFromEnv()
