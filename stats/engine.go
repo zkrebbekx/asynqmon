@@ -32,9 +32,11 @@ import (
 //     GROUP_STALL group-head reads
 // ****************************************************************************
 
-// ErrNotReady is returned by Read when no sweep has ever published to the
-// cache (sweeper still warming up, disabled everywhere, or dead long enough
-// for the cache TTL to expire). Handlers translate this into a 503 rather
+// ErrNotReady is returned by Read when this process has never seen a
+// published snapshot: no sweep has completed here and the shared cache has
+// never been read successfully (sweeper still warming up, or disabled
+// everywhere). Once a read succeeded, a later cache expiry degrades to
+// SourceStaleCache instead. Handlers translate ErrNotReady into a 503 rather
 // than serving fabricated zeros.
 var ErrNotReady = errors.New("stats: fleet cache is empty; no sweep has completed yet")
 
@@ -42,6 +44,11 @@ var ErrNotReady = errors.New("stats: fleet cache is empty; no sweep has complete
 const (
 	SourceLocal = "local" // in-process copy on the replica holding the lease
 	SourceCache = "cache" // shared Redis cache (standby replica, or stale local)
+	// SourceStaleCache is the last cache read this process made, served
+	// after the shared cache expired (no replica is publishing). The result
+	// keeps its original RefreshedAt, so the UI renders the true staleness
+	// instead of the console answering 503 during a Redis write outage.
+	SourceStaleCache = "stale-cache"
 )
 
 const (
@@ -66,9 +73,10 @@ const (
 	// sweep at most maxGroupStallQueues queues' groups are examined — a
 	// rotating cursor walks the grouped-queue set across sweeps so every
 	// grouped queue is eventually observed — and at most maxGroupsPerQueue
-	// groups per queue (name order). Worst-case added cost per sweep:
-	// 25 SMEMBERS + 25x20 ZRANGE = 525 commands, only when >25 queues use
-	// grouping heavily; the common case (few grouped queues) is a handful.
+	// groups per queue, drawn with SRANDMEMBER. Worst-case added cost per
+	// sweep: 25 SRANDMEMBER + 25x20 ZRANGE = 525 commands, only when >25
+	// queues use grouping heavily; the common case (few grouped queues) is a
+	// handful.
 	maxGroupStallQueues = 25
 	maxGroupsPerQueue   = 20
 )
@@ -126,8 +134,8 @@ type Config struct {
 
 	// SchedulerGoneAfter is the SCHEDULER_GONE threshold: a scheduler-entry
 	// snapshot with no live counterpart whose last_seen is older than this is
-	// GONE (§3.8/§5.12). Default DefaultSchedulerGoneAfter (30s). Exposed for
-	// tests.
+	// GONE (§3.8/§5.12). Default DefaultSchedulerGoneAfter (derived from the
+	// asynq scheduler heartbeat contract). Exposed for tests.
 	SchedulerGoneAfter time.Duration
 
 	// FailSpikeRatio raises a FAIL_SPIKE finding when today's failed counter
@@ -230,6 +238,16 @@ type Engine struct {
 	rotationCursor int
 
 	holding int32 // atomic; 1 while this replica holds the sweeper lease
+
+	// lastCache is the most recent successful shared-cache read of this
+	// process, kept so a cache expiry (Redis write outage, no replica
+	// publishing) degrades to visibly stale data instead of a 503 (#36).
+	cacheMu     sync.RWMutex
+	lastCache   *ReadResult
+	lastAttnRep *AttentionReport
+
+	// errLog rate-limits repeated identical sweep-error lines.
+	errLog *errorLimiter
 
 	// subs are sweep-completion listeners (the SSE fan-out). Buffered size-1
 	// channels signaled non-blockingly: a slow listener coalesces signals
@@ -351,6 +369,7 @@ func NewEngine(cfg Config) *Engine {
 		series: newSeriesSampler(cfg.RedisClient, cfg.SeriesQueueCeiling, seriesFlushCap),
 		base:   newBaselineRefresher(cfg.RedisClient, baselineCmdCap),
 		fence:  newSweeperFence(cfg.RedisClient),
+		errLog: newErrorLimiter(cfg.Now),
 		subs:   make(map[chan struct{}]struct{}),
 	}
 }
@@ -426,6 +445,14 @@ func (e *Engine) Stop() {
 	if atomic.LoadInt32(&e.holding) == 1 {
 		ctx, cancelRelease := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancelRelease()
+		// Flush the sampler BEFORE releasing the lease (#28): the queued
+		// slots and the partial accumulator are only writable while this
+		// replica still holds the fencing token. Without the flush every
+		// SIGTERM dropped the current 30s hot slot and the current 1h rollup
+		// slot of every metric.
+		if err := e.series.flushAll(ctx, e.now(), e.fence, atomic.LoadInt64(&e.token)); err != nil {
+			e.logf("asynqmon: stats: flushing series on shutdown: %v", err)
+		}
 		if err := releaseLease(ctx, e.fence, e.cfg.InstanceID); err != nil {
 			// The TTL is the backstop; a failed release only delays takeover.
 			e.logf("asynqmon: stats: releasing sweeper lease: %v", err)
@@ -553,10 +580,16 @@ func (e *Engine) sweepLoop(ctx context.Context) {
 		if atomic.LoadInt32(&e.holding) != 1 {
 			continue
 		}
-		if err := e.sweep(ctx); err != nil && ctx.Err() == nil {
-			// Keep looping: a failed sweep leaves the previous snapshots in
-			// place with their honest (aging) RefreshedAt stamps.
-			e.logf("asynqmon: stats: sweep failed: %v", err)
+		err := e.sweep(ctx)
+		if ctx.Err() != nil {
+			continue
+		}
+		// Keep looping: a failed sweep leaves the previous snapshots in
+		// place with their honest (aging) RefreshedAt stamps. Identical
+		// errors are rate-limited (#36): one Redis incident used to print
+		// one line per subsystem per tick.
+		if msg, ok := e.errLog.observe("sweep", err); ok {
+			e.logf("asynqmon: stats: %s", msg)
 		}
 	}
 }
@@ -747,11 +780,12 @@ func (e *Engine) sweep(ctx context.Context) error {
 		return fmt.Errorf("reading group heads: %w", err)
 	}
 
-	// Scheduler-entry snapshot pass (§3.8/§5.12): upsert every live entry
-	// under its stable key and diff for GONE observations. One SchedulerEntries
-	// call (uncounted, Inspector's client — the Servers() precedent), 1 index
-	// read + 1 HGETALL per known snapshot, 2 writes per live entry.
-	schedGone, n, schedWrites, err := e.sweepSchedulers(ctx, now, token)
+	// Scheduler-entry snapshot pass (§3.8/§5.12): read every known snapshot,
+	// plan the upsert of every live entry under its stable key, and diff for
+	// GONE observations. One SchedulerEntries call (uncounted, Inspector's
+	// client — the Servers() precedent), 1 index read + 1 HGETALL per known
+	// snapshot. The planned writes are applied after the publish below.
+	schedGone, schedCmds, n, err := e.sweepSchedulers(ctx, now)
 	reads += n
 	if err != nil {
 		return fmt.Errorf("sweeping scheduler entries: %w", err)
@@ -767,11 +801,6 @@ func (e *Engine) sweep(ctx context.Context) error {
 	fleet.HotSetSize = plan.hotSetSize
 	fleet.FullRotationEstSec = plan.fullRotationEstSec
 
-	// §5.8 ring-buffer sampling (phase 10; phase-12 tiering): only refreshed
-	// queues feed per-queue series — hot queues at full resolution (both
-	// rings), cold queues rollup-only on their rotation visit. Fleet and
-	// per-server series sample every tick. Runs before the baseline refresher
-	// so the learning anchor (asynqmon:series:since) exists.
 	universe := make(map[string]bool, len(qnames))
 	for _, q := range qnames {
 		universe[q] = true
@@ -779,21 +808,6 @@ func (e *Engine) sweep(ctx context.Context) error {
 	hotLookup := make(map[string]bool, len(plan.hot))
 	for _, q := range plan.hot {
 		hotLookup[q] = true
-	}
-	seriesReads, seriesWrites, err := e.series.sample(ctx, now, snaps, universe, seriesTick{
-		tier:      plan.tier,
-		fleetSize: len(qnames),
-		hot:       hotLookup,
-	}, fleet, servers, e.fence, token)
-	reads += seriesReads
-	if err != nil {
-		if errors.Is(err, ErrSuperseded) {
-			atomic.StoreInt32(&e.holding, 0)
-			atomic.StoreInt64(&e.token, 0)
-			e.logf("asynqmon: stats: %v", ErrSuperseded)
-			return ErrSuperseded
-		}
-		return fmt.Errorf("sampling time series: %w", err)
 	}
 
 	// Phase-10 detector baselines (baseline.go): cadenced reads — 7-day
@@ -852,13 +866,13 @@ func (e *Engine) sweep(ctx context.Context) error {
 		return ErrSuperseded
 	}
 	// Publish to memory even if the cache write failed: local data is good,
-	// and this replica keeps serving it while Redis recovers.
+	// and this replica keeps serving it while Redis recovers (#36).
 	e.mem.replace(fleet, merged, report, SweepStats{
 		At:                 now,
 		Queues:             len(qnames),
 		Refreshed:          len(refresh),
 		ReadCmds:           reads,
-		WriteCmds:          writes + schedWrites + seriesWrites,
+		WriteCmds:          writes,
 		Duration:           time.Since(begin),
 		Tier:               plan.tier,
 		HotSetSize:         plan.hotSetSize,
@@ -868,10 +882,78 @@ func (e *Engine) sweep(ctx context.Context) error {
 	// least as fresh as the signal (cache-write failures still notify: the
 	// in-process copy is current and Read prefers it here).
 	e.notifySweeps()
+
+	// Auxiliary fenced writes run AFTER the publish (#36): a failure to
+	// persist a scheduler snapshot or a series slot costs history, never the
+	// tick's own numbers. Both are logged (rate-limited) instead of aborting
+	// the sweep. Supersession still stands the replica down.
+	superseded := false
+	if err := e.writeSchedulerSnapshots(ctx, schedCmds, token); err != nil {
+		if errors.Is(err, ErrSuperseded) {
+			superseded = true
+		} else if msg, ok := e.errLog.observe("schedulers", err); ok {
+			e.logf("asynqmon: stats: %s", msg)
+		}
+	} else {
+		e.mem.addWriteCmds(len(schedCmds))
+	}
+
+	// §5.8 ring-buffer sampling (phase 10; phase-12 tiering): only refreshed
+	// queues feed per-queue series — hot queues at full resolution (both
+	// rings), cold queues rollup-only on their rotation visit. Fleet and
+	// per-server series sample every tick.
+	seriesReads, seriesWrites, serr := e.series.sample(ctx, now, snaps, universe, seriesTick{
+		tier:      plan.tier,
+		fleetSize: len(qnames),
+		hot:       hotLookup,
+		servers:   serverScopeIDs(servers),
+	}, fleet, servers, e.fence, token)
+	e.mem.addSweepCmds(seriesReads, seriesWrites)
+	if serr != nil {
+		if errors.Is(serr, ErrSuperseded) {
+			superseded = true
+		} else if msg, ok := e.errLog.observe("series", serr); ok {
+			e.logf("asynqmon: stats: %s", msg)
+		}
+	}
+
+	if superseded {
+		atomic.StoreInt32(&e.holding, 0)
+		atomic.StoreInt64(&e.token, 0)
+		e.logf("asynqmon: stats: %v", ErrSuperseded)
+		return ErrSuperseded
+	}
 	if werr != nil {
 		return fmt.Errorf("writing cache: %w", werr)
 	}
 	return nil
+}
+
+// writeSchedulerSnapshots applies the fenced scheduler-snapshot batch planned
+// by sweepSchedulers. ErrSuperseded means a newer claimant holds the role.
+func (e *Engine) writeSchedulerSnapshots(ctx context.Context, cmds []leasefence.Cmd, token int64) error {
+	if len(cmds) == 0 {
+		return nil
+	}
+	ok, err := e.fence.Exec(ctx, token, cmds)
+	if err != nil {
+		return fmt.Errorf("writing scheduler snapshots: %w", err)
+	}
+	if !ok {
+		return ErrSuperseded
+	}
+	return nil
+}
+
+// serverScopeIDs lists the series scope ids (host:pid) of the servers asynq
+// currently reports. The sampler tracks them to expire the series of pods
+// that are gone (§5.8 retention, #52.3).
+func serverScopeIDs(servers []*asynq.ServerInfo) map[string]bool {
+	out := make(map[string]bool, len(servers))
+	for _, s := range servers {
+		out[serverScopeID(s.Host, s.PID)] = true
+	}
+	return out
 }
 
 // readRedisMemory issues INFO memory (1 command) and extracts used_memory
@@ -896,12 +978,18 @@ func readRedisMemory(ctx context.Context, rc redis.UniversalClient) (used, max i
 }
 
 // readGroupStalls performs the bounded GROUP_STALL reads: for up to
-// maxGroupStallQueues queues with groups (rotating start across sweeps), the
-// group-name SET (1 SMEMBERS each) then the head of each group's ZSET
-// (ZRANGE 0 0 WITHSCORES each, capped at maxGroupsPerQueue). Queues present
-// in the returned map were examined this sweep — including "examined, no
-// members" zero observations, which is what lets findings auto-clear.
-// Returns the number of Redis commands issued.
+// maxGroupStallQueues queues with groups (rotating start across sweeps), a
+// bounded sample of the group-name SET (1 SRANDMEMBER key maxGroupsPerQueue
+// each) then the head of each sampled group's ZSET (ZRANGE 0 0 WITHSCORES
+// each). Queues present in the returned map were examined this sweep —
+// including "examined, no members" zero observations, which is what lets
+// findings auto-clear. Returns the number of Redis commands issued.
+//
+// The sample is SRANDMEMBER, not SMEMBERS (#52.6): the detector only needs
+// SOME group's head, and a queue with 100k aggregation groups used to return
+// every name on every sweep. SRANDMEMBER also rotates the observed groups
+// across sweeps for free, so a stalled group is found within a few ticks
+// instead of only when it sorts into the first 20 names.
 func (e *Engine) readGroupStalls(ctx context.Context, snaps map[string]*QueueSnapshot) (map[string]groupStallObs, int, error) {
 	var grouped []string
 	for q, s := range snaps {
@@ -930,7 +1018,7 @@ func (e *Engine) readGroupStalls(ctx context.Context, snaps map[string]*QueueSna
 	pipe := e.rc.Pipeline()
 	memberCmds := make([]*redis.StringSliceCmd, len(picked))
 	for i, q := range picked {
-		memberCmds[i] = pipe.SMembers(ctx, allGroupsKey(q))
+		memberCmds[i] = pipe.SRandMemberN(ctx, allGroupsKey(q), maxGroupsPerQueue)
 		reads++
 	}
 	if _, err := pipe.Exec(ctx); err != nil && err != redis.Nil {
@@ -948,10 +1036,9 @@ func (e *Engine) readGroupStalls(ctx context.Context, snaps map[string]*QueueSna
 		if err != nil {
 			continue
 		}
+		// SRANDMEMBER already bounds the count; sort for a deterministic
+		// command order in the pipeline.
 		sort.Strings(groups)
-		if len(groups) > maxGroupsPerQueue {
-			groups = groups[:maxGroupsPerQueue]
-		}
 		for _, g := range groups {
 			heads = append(heads, headCmd{q: q, g: g, cmd: pipe2.ZRangeWithScores(ctx, groupKey(q, g), 0, 0)})
 			reads++
@@ -1173,9 +1260,41 @@ func (e *Engine) Read(ctx context.Context) (*ReadResult, error) {
 	}
 	fleet, queues, err := readCache(ctx, e.rc, e.cfg.BatchSize)
 	if err != nil {
+		// The shared cache expired (no replica publishes — a Redis write
+		// outage, or every sweeper is down). Serve the last snapshot this
+		// process read, labeled stale and carrying its ORIGINAL RefreshedAt,
+		// instead of a 503 (#36). ErrNotReady stands only while this process
+		// has never read one.
+		if errors.Is(err, ErrNotReady) {
+			if stale := e.staleCache(); stale != nil {
+				return stale, nil
+			}
+		}
 		return nil, err
 	}
-	return &ReadResult{Fleet: fleet, Queues: queues, Source: SourceCache}, nil
+	res := &ReadResult{Fleet: fleet, Queues: queues, Source: SourceCache}
+	e.rememberCache(res)
+	return res, nil
+}
+
+// rememberCache keeps the last successful shared-cache read for the stale
+// fallback above.
+func (e *Engine) rememberCache(res *ReadResult) {
+	e.cacheMu.Lock()
+	e.lastCache = res
+	e.cacheMu.Unlock()
+}
+
+// staleCache returns a copy of the last successful cache read, labeled
+// SourceStaleCache. nil when this process has never read the cache.
+func (e *Engine) staleCache() *ReadResult {
+	e.cacheMu.RLock()
+	last := e.lastCache
+	e.cacheMu.RUnlock()
+	if last == nil {
+		return nil
+	}
+	return &ReadResult{Fleet: last.Fleet, Queues: last.Queues, Source: SourceStaleCache}
 }
 
 // ReadAttention returns the current attention report, mirroring Read's
@@ -1188,7 +1307,25 @@ func (e *Engine) ReadAttention(ctx context.Context) (*AttentionReport, error) {
 		time.Since(fleet.RefreshedAt) <= e.localStaleAfter() {
 		return rep, nil
 	}
-	return readAttentionCache(ctx, e.rc)
+	rep, err := readAttentionCache(ctx, e.rc)
+	if err != nil {
+		// Same staleness rule as Read: a cache expiry degrades to the last
+		// report this process read (its UpdatedAt shows the age), never a
+		// 503 once one was read (#36).
+		if errors.Is(err, ErrNotReady) {
+			e.cacheMu.RLock()
+			last := e.lastAttnRep
+			e.cacheMu.RUnlock()
+			if last != nil {
+				return last, nil
+			}
+		}
+		return nil, err
+	}
+	e.cacheMu.Lock()
+	e.lastAttnRep = rep
+	e.cacheMu.Unlock()
+	return rep, nil
 }
 
 // localStaleAfter bounds how old the in-process copy may be before reads
@@ -1201,4 +1338,72 @@ func (e *Engine) localStaleAfter() time.Duration {
 		d = 15 * time.Second
 	}
 	return d
+}
+
+// ----------------------------------------------------------------------------
+// Sweep-error log rate limiting (#36).
+// ----------------------------------------------------------------------------
+
+// errorLimiter collapses a repeating error into one line per minute. A Redis
+// incident used to print one line per subsystem per tick — 121 lines over 90s
+// in the reviewer's repro. The limiter logs the FIRST occurrence of a
+// message, then at most one line per minute while the same message repeats,
+// then one recovery line when the subsystem succeeds again.
+type errorLimiter struct {
+	now time.Time
+	mu  sync.Mutex
+	// state per subsystem: the last message logged and when.
+	last    map[string]string
+	lastLog map[string]time.Time
+	count   map[string]int
+	clock   func() time.Time
+}
+
+// errorLogInterval is how often a repeating identical error is logged again.
+const errorLogInterval = time.Minute
+
+func newErrorLimiter(clock func() time.Time) *errorLimiter {
+	if clock == nil {
+		clock = time.Now
+	}
+	return &errorLimiter{
+		last:    make(map[string]string),
+		lastLog: make(map[string]time.Time),
+		count:   make(map[string]int),
+		clock:   clock,
+	}
+}
+
+// observe records one outcome of a subsystem and reports the line to log.
+// ok=false means "say nothing": either the subsystem is healthy and was
+// healthy before, or the identical error was logged less than
+// errorLogInterval ago.
+func (l *errorLimiter) observe(subsystem string, err error) (string, bool) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	now := l.clock()
+	if err == nil {
+		prev, had := l.last[subsystem]
+		if !had {
+			return "", false
+		}
+		n := l.count[subsystem]
+		delete(l.last, subsystem)
+		delete(l.lastLog, subsystem)
+		delete(l.count, subsystem)
+		return fmt.Sprintf("%s recovered after %d failures (last: %s)", subsystem, n, prev), true
+	}
+	msg := err.Error()
+	l.count[subsystem]++
+	if prev, had := l.last[subsystem]; had && prev == msg {
+		if now.Sub(l.lastLog[subsystem]) < errorLogInterval {
+			return "", false
+		}
+		l.lastLog[subsystem] = now
+		return fmt.Sprintf("%s failing: %s (%d times)", subsystem, msg, l.count[subsystem]), true
+	}
+	l.last[subsystem] = msg
+	l.lastLog[subsystem] = now
+	l.count[subsystem] = 1
+	return fmt.Sprintf("%s failed: %s", subsystem, msg), true
 }

@@ -79,6 +79,24 @@ func (m *memoryStore) get() (*FleetSnapshot, []*QueueSnapshot) {
 	return m.fleet, out
 }
 
+// addWriteCmds folds writes issued after the publish into the last sweep's
+// accounting (the auxiliary fenced batches run after e.mem.replace so a write
+// failure cannot cost the tick its numbers).
+func (m *memoryStore) addWriteCmds(n int) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.lastSweep.WriteCmds += n
+}
+
+// addSweepCmds folds post-publish reads and writes into the last sweep's
+// accounting.
+func (m *memoryStore) addSweepCmds(reads, writes int) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.lastSweep.ReadCmds += reads
+	m.lastSweep.WriteCmds += writes
+}
+
 func (m *memoryStore) sweepStats() SweepStats {
 	m.mu.RLock()
 	defer m.mu.RUnlock()

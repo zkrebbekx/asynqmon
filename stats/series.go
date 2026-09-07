@@ -157,6 +157,32 @@ var (
 	rollupRing = ringSpec{name: "r", period: SeriesRollupPeriodSec, slots: SeriesRollupSlots, ttl: 60 * 24 * time.Hour}
 )
 
+const (
+	// serverSeriesTTL caps the TTL of a SERVER-scope ring. A server scope is
+	// host:pid, and in Kubernetes the host is the pod name, so every pod
+	// incarnation mints its own keys. Under the rollup ring's 60d TTL a
+	// daily redeploy of 5 pods left about 1.8 MB of dead keys resident
+	// (#52.3). Seven days keep a redeployed pod's capacity history readable
+	// without carrying two months of corpses. The cap never LENGTHENS a
+	// TTL: the hot ring keeps its own 6h.
+	serverSeriesTTL = 7 * 24 * time.Hour
+
+	// serverGoneAfter is how long a server scope must be absent from
+	// Servers() before the sweep UNLINKs its ring keys. One day is far
+	// beyond any rolling restart, and the keys are derived from the tracked
+	// scope set — the sweep never SCANs (#52.3).
+	serverGoneAfter = 24 * time.Hour
+)
+
+// ttlFor returns the TTL of one ring key: the ring's own TTL, capped at
+// serverSeriesTTL for server-scope keys.
+func (r ringSpec) ttlFor(keyScope string) time.Duration {
+	if strings.HasPrefix(keyScope, "s:") && r.ttl > serverSeriesTTL {
+		return serverSeriesTTL
+	}
+	return r.ttl
+}
+
 func (r ringSpec) byteLen() int { return seriesHeaderLen + r.slots*seriesSlotBytes }
 
 // ----------------------------------------------------------------------------
@@ -182,6 +208,38 @@ func seriesKeyScopeServer(id string) string   { return "s:" + id }
 
 func seriesKey(ring ringSpec, keyScope, metric string) string {
 	return seriesKeyPrefix + ring.name + ":" + keyScope + ":" + metric
+}
+
+// seriesKeyScope extracts the scope segment of a series key
+// ("fleet", "q:<name>", "s:<host:pid>"). ok=false when the key does not have
+// the series layout. The scope may itself contain colons (a server scope is
+// host:pid), so the parse takes the FIRST segment as the ring name and the
+// LAST as the metric.
+func seriesKeyScope(key string) (string, bool) {
+	rest, ok := strings.CutPrefix(key, seriesKeyPrefix)
+	if !ok {
+		return "", false
+	}
+	_, rest, ok = strings.Cut(rest, ":")
+	if !ok {
+		return "", false
+	}
+	i := strings.LastIndex(rest, ":")
+	if i <= 0 {
+		return "", false
+	}
+	return rest[:i], true
+}
+
+// serverScopeOf returns the server id of a server-scope key, or ok=false for
+// fleet and queue scopes.
+func serverScopeOf(key string) (string, bool) {
+	scope, ok := seriesKeyScope(key)
+	if !ok {
+		return "", false
+	}
+	id, ok := strings.CutPrefix(scope, "s:")
+	return id, ok
 }
 
 // serverScopeID is the stable-ish identity of one server process for the
@@ -428,6 +486,15 @@ type flushOp struct {
 	value  uint32
 }
 
+// ttl is the key's expiry: the ring's TTL, capped for server-scope keys.
+func (f flushOp) ttl() time.Duration {
+	scope, ok := seriesKeyScope(f.key)
+	if !ok {
+		return f.spec.ttl
+	}
+	return f.spec.ttlFor(scope)
+}
+
 type seriesSampler struct {
 	rc           redis.UniversalClient
 	queueCeiling int
@@ -449,6 +516,12 @@ type seriesSampler struct {
 	ttlAt    map[string]time.Time    // redis key → when TTL was last set
 	prev     map[string]counterPrev  // qname → previous daily counters
 	sinceSet bool                    // asynqmon:series:since SETNX done
+
+	// serverSeen is when each server scope (host:pid) was last reported by
+	// Servers(). Scopes absent for serverGoneAfter have their ring keys
+	// UNLINKed and are forgotten — the sweep derives the key names from this
+	// map, so no SCAN is needed (#52.3).
+	serverSeen map[string]time.Time
 }
 
 func newSeriesSampler(rc redis.UniversalClient, queueCeiling, flushCap int) *seriesSampler {
@@ -463,6 +536,7 @@ func newSeriesSampler(rc redis.UniversalClient, queueCeiling, flushCap int) *ser
 		headers:      make(map[string]seriesHeader),
 		ttlAt:        make(map[string]time.Time),
 		prev:         make(map[string]counterPrev),
+		serverSeen:   make(map[string]time.Time),
 	}
 }
 
@@ -509,6 +583,10 @@ type seriesTick struct {
 	tier      int
 	fleetSize int
 	hot       map[string]bool
+	// servers holds the scope id (host:pid) of every server asynq reports
+	// this tick. The sampler expires the ring keys of scopes that stay
+	// absent (§5.8 retention, #52.3).
+	servers map[string]bool
 }
 
 // buildSamples assembles the sweep's full sample set: fleet always, servers
@@ -674,6 +752,11 @@ func (s *seriesSampler) sample(ctx context.Context, now time.Time, snaps map[str
 	deltas := s.computeDeltas(now, snaps, universe, finals)
 	samples := s.buildSamples(snaps, deltas, fleet, servers, tick)
 
+	// Expire the ring keys of servers that have been gone for a day (#52.3).
+	// The key names come from the tracked scope set and the server metric
+	// catalog, so this costs no SCAN — one UNLINK per dead key, once.
+	expireCmds := s.expireGoneServers(now, tick.servers)
+
 	var flushes []flushOp
 	seen := make(map[string]struct{}, len(samples)*2)
 	unix := now.Unix()
@@ -714,9 +797,26 @@ func (s *seriesSampler) sample(ctx context.Context, now time.Time, snaps map[str
 		flushes = append(flushes, flushOp{key: key, spec: a.spec, period: a.period, value: clampSeriesValue(a.value)})
 		delete(s.acc, key)
 	}
+
+	// Prune the two remaining per-key maps (#52.4): headers and ttlAt used to
+	// grow by 4 entries per server incarnation for the life of the holder
+	// process. A key that was not fed this tick and whose scope is a server
+	// no longer in Servers() will never be written again.
+	s.pruneKeyMaps(seen, tick.servers)
 	sort.Slice(flushes, func(i, j int) bool { return flushes[i].key < flushes[j].key })
 	s.pending = append(s.pending, flushes...)
 	if len(s.pending) == 0 {
+		if len(expireCmds) == 0 {
+			return reads, writes, nil
+		}
+		writes += len(expireCmds)
+		ok, err := fence.Exec(ctx, token, expireCmds)
+		if err != nil {
+			return reads, writes, fmt.Errorf("expiring gone server series: %w", err)
+		}
+		if !ok {
+			return reads, writes, ErrSuperseded
+		}
 		return reads, writes, nil
 	}
 
@@ -755,6 +855,23 @@ func (s *seriesSampler) sample(ctx context.Context, now time.Time, snaps map[str
 	batch := s.pending[:drain]
 	s.pending = append(make([]flushOp, 0, len(s.pending)-drain), s.pending[drain:]...)
 
+	n, w, err := s.writeBatch(ctx, now, batch, expireCmds, fence, token)
+	reads += n
+	writes += w
+	return reads, writes, err
+}
+
+// writeBatch probes the persisted headers of unknown keys, then applies one
+// fenced batch: extra commands first (server-key expiry), then the SETRANGEs
+// of every completed slot. Returns the Redis command counts.
+//
+// Fence-guarded (§5.13): these writes used to go through a plain pipeline
+// guarded only by the in-process header cache, so a stalled ex-holder waking
+// after a failover could rewind a ring's header (hiding the new holder's
+// freshest slots) and stomp real slots with gap sentinels computed from its
+// stale cache. The fence CAS rejects a superseded holder before any of that
+// lands.
+func (s *seriesSampler) writeBatch(ctx context.Context, now time.Time, batch []flushOp, extra []leasefence.Cmd, fence *leasefence.Fence, token int64) (reads, writes int, err error) {
 	// Probe persisted headers for keys we have not seen this holder session:
 	// the init-vs-update decision and the FIRST period must reflect what a
 	// previous holder already wrote.
@@ -780,13 +897,8 @@ func (s *seriesSampler) sample(ctx context.Context, now time.Time, snaps map[str
 		}
 	}
 
-	// Fence-guarded (§5.13): these writes used to go through a plain
-	// pipeline guarded only by the in-process header cache, so a stalled
-	// ex-holder waking after a failover could rewind a ring's header
-	// (hiding the new holder's freshest slots) and stomp real slots with
-	// gap sentinels computed from its stale cache. The fence CAS rejects a
-	// superseded holder before any of that lands.
-	var cmds []leasefence.Cmd
+	cmds := extra
+	writes += len(extra)
 	for _, f := range batch {
 		h := s.headers[f.key]
 		switch {
@@ -795,7 +907,7 @@ func (s *seriesSampler) sample(ctx context.Context, now time.Time, snaps map[str
 			cmds = append(cmds, leasefence.Cmd{"SETRANGE", f.key, "0", string(buildSeriesInit(f.spec, f.period, f.value))})
 			writes++
 			s.headers[f.key] = seriesHeader{ok: true, first: f.period, last: f.period}
-			cmds = append(cmds, leasefence.Cmd{"PEXPIRE", f.key, f.spec.ttl.Milliseconds()})
+			cmds = append(cmds, leasefence.Cmd{"PEXPIRE", f.key, f.ttl().Milliseconds()})
 			writes++
 			s.ttlAt[f.key] = now
 		case f.period <= h.last:
@@ -811,8 +923,8 @@ func (s *seriesSampler) sample(ctx context.Context, now time.Time, snaps map[str
 			cmds = append(cmds, leasefence.Cmd{"SETRANGE", f.key, strconv.FormatInt(seriesSlotOffset(seriesSlot(f.period, f.spec.slots)), 10), string(encodeSlotValue(f.value))})
 			writes += 2
 			s.headers[f.key] = seriesHeader{ok: true, first: h.first, last: f.period}
-			if now.Sub(s.ttlAt[f.key]) > f.spec.ttl/4 {
-				cmds = append(cmds, leasefence.Cmd{"PEXPIRE", f.key, f.spec.ttl.Milliseconds()})
+			if now.Sub(s.ttlAt[f.key]) > f.ttl()/4 {
+				cmds = append(cmds, leasefence.Cmd{"PEXPIRE", f.key, f.ttl().Milliseconds()})
 				writes++
 				s.ttlAt[f.key] = now
 			}
@@ -834,6 +946,99 @@ func (s *seriesSampler) sample(ctx context.Context, now time.Time, snaps map[str
 		return reads, writes, ErrSuperseded
 	}
 	return reads, writes, nil
+}
+
+// flushAll writes every queued slot AND every partial accumulator through the
+// fence. Engine.Stop calls it while the lease is still held (#28): without
+// it a SIGTERM dropped the current 30s hot slot and the current 1h rollup
+// slot of every metric, plus any slots still waiting in the flush queue.
+// The flush cap does not apply — this is the last write of the process.
+func (s *seriesSampler) flushAll(ctx context.Context, now time.Time, fence *leasefence.Fence, token int64) error {
+	batch := s.pending
+	for key, a := range s.acc {
+		batch = append(batch, flushOp{key: key, spec: a.spec, period: a.period, value: clampSeriesValue(a.value)})
+		delete(s.acc, key)
+	}
+	s.pending = nil
+	if len(batch) == 0 {
+		return nil
+	}
+	sort.Slice(batch, func(i, j int) bool {
+		if batch[i].key != batch[j].key {
+			return batch[i].key < batch[j].key
+		}
+		return batch[i].period < batch[j].period
+	})
+	_, _, err := s.writeBatch(ctx, now, batch, nil, fence, token)
+	return err
+}
+
+// pruneKeyMaps drops headers/ttlAt entries that were not fed this tick and
+// whose scope is a server absent from the live server set (#52.4). Fleet and
+// queue scopes are left alone: a cold queue is not fed on most ticks and its
+// header cache must survive to keep the init-vs-update decision correct.
+func (s *seriesSampler) pruneKeyMaps(seen map[string]struct{}, servers map[string]bool) {
+	prune := func(key string) bool {
+		if _, ok := seen[key]; ok {
+			return false
+		}
+		id, ok := serverScopeOf(key)
+		return ok && !servers[id]
+	}
+	for key := range s.headers {
+		if prune(key) {
+			delete(s.headers, key)
+			delete(s.ttlAt, key)
+		}
+	}
+	for key := range s.ttlAt {
+		if prune(key) {
+			delete(s.ttlAt, key)
+		}
+	}
+}
+
+// expireGoneServers records this tick's live server scopes and returns the
+// UNLINK commands for the ring keys of scopes absent for serverGoneAfter
+// (#52.3). Scopes are forgotten once their keys are unlinked, so each dead
+// server costs exactly one round of UNLINKs.
+func (s *seriesSampler) expireGoneServers(now time.Time, servers map[string]bool) []leasefence.Cmd {
+	for id := range servers {
+		s.serverSeen[id] = now
+	}
+	if len(s.serverSeen) == 0 {
+		return nil
+	}
+	var gone []string
+	for id, seen := range s.serverSeen {
+		if !servers[id] && now.Sub(seen) > serverGoneAfter {
+			gone = append(gone, id)
+		}
+	}
+	if len(gone) == 0 {
+		return nil
+	}
+	sort.Strings(gone)
+	metrics := make([]string, 0, len(serverMetrics))
+	for m := range serverMetrics {
+		metrics = append(metrics, m)
+	}
+	sort.Strings(metrics)
+	cmds := make([]leasefence.Cmd, 0, len(gone)*len(metrics)*2)
+	for _, id := range gone {
+		scope := seriesKeyScopeServer(id)
+		for _, ring := range []ringSpec{hotRing, rollupRing} {
+			for _, m := range metrics {
+				key := seriesKey(ring, scope, m)
+				cmds = append(cmds, leasefence.Cmd{"UNLINK", key})
+				delete(s.headers, key)
+				delete(s.ttlAt, key)
+				delete(s.acc, key)
+			}
+		}
+		delete(s.serverSeen, id)
+	}
+	return cmds
 }
 
 // ----------------------------------------------------------------------------
