@@ -1257,7 +1257,7 @@ func aggregateFleet(snaps map[string]*QueueSnapshot, servers, workersTotal, work
 type ReadResult struct {
 	Fleet  *FleetSnapshot
 	Queues []*QueueSnapshot
-	Source string // SourceLocal or SourceCache
+	Source string // SourceLocal, SourceCache, or SourceStaleCache
 }
 
 // Read returns the current snapshots. The in-process copy is preferred (zero

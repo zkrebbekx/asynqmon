@@ -46,8 +46,10 @@ type fleetCoverage struct {
 	RefreshedPct5m float64 `json:"refreshed_pct_5m"`
 	// UpdatedAt is when the fleet aggregate was last swept (RFC3339).
 	UpdatedAt string `json:"updated_at"`
-	// Source is "local" (in-process, sweeping replica) or "cache" (shared
-	// Redis cache).
+	// Source is "local" (in-process copy on the replica holding the
+	// sweeper lease), "cache" (the shared Redis cache), or "stale-cache"
+	// (this replica's last cache read, served with its original
+	// updated_at while the shared cache is gone).
 	Source string `json:"source"`
 
 	// Phase-12 governor stamp (additive; §3.1 tile stamps + §3.12 health):

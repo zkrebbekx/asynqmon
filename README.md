@@ -15,13 +15,73 @@ Please make sure the version compatibility with the Asynq package you are using.
 
 | Asynq version  | WebUI (asynqmon) version |
 | -------------- | ------------------------ |
-| 0.24.x         | 0.8.x (this fork)        |
+| 0.24.x - 0.26.x | 0.8.x (this fork)       |
 | 0.23.x         | 0.7.x                    |
 | 0.22.x         | 0.6.x                    |
 | 0.20.x, 0.21.x | 0.5.x                    |
 | 0.19.x         | 0.4.x                    |
 | 0.18.x         | 0.2.x, 0.3.x             |
 | 0.16.x, 0.17.x | 0.1.x                    |
+
+## Requirements
+
+| Component | Requirement |
+| --- | --- |
+| Redis | 6.2 or later, single instance or Sentinel. Redis Cluster runs the read-only console only (see below). |
+| asynq | 0.24.x - 0.26.x |
+| Go (build from source) | the version in `go.mod` (1.26) |
+| Node (build from source) | 22 or later |
+
+**Why Redis 6.2.** The console needs four commands: `ZMSCORE` (task search
+and AQL), `XADD` (the audit log), `MEMORY USAGE` and `HSTRLEN` (the Hygiene
+storage report). `ZMSCORE` arrived in Redis 6.2 and sets the floor; the other
+three are older. The binary runs `INFO server` once at startup, logs
+`redis: server version X`, and prints a `WARNING` when the server is below
+6.2.
+
+**Redis ACL.** This fork writes its own keys under the `asynqmon:` prefix,
+even in `--read-only` mode, and it publishes on one pub/sub channel. A Redis
+user that only reads cannot run it: the background roles take a `SET NX PX`
+lease, so a read-only user never acquires one and `/api/fleet/*` answers 503
+forever with `acquiring sweeper lease: NOPERM` in the log.
+
+The minimum user for a full console:
+
+```
+ACL SETUSER asynqmon on >CHANGEME \
+  ~asynq:* ~asynqmon:* \
+  &asynqmon:events:jobs &asynq:cancel \
+  +@read +@write +@keyspace +@scripting +@transaction +@connection \
+  +@pubsub +info +memory|usage
+```
+
+On Redis 7.0 or later a read-only deployment can keep the queue data
+read-only and still let the console own its own keys:
+
+```
+ACL SETUSER asynqmon on >CHANGEME \
+  %R~asynq:* %RW~asynqmon:* \
+  &asynqmon:events:jobs &asynq:cancel \
+  +@read +@write +@keyspace +@scripting +@transaction +@connection \
+  +@pubsub +info +memory|usage
+```
+
+Pass the user with `--redis-username` / `REDIS_USERNAME` and the password
+with `--redis-password` / `REDIS_PASSWORD`.
+
+**Redis Cluster.** `--redis-cluster-nodes` connects, and the read-only
+console works, but the write features do not: the fenced Lua batches call
+`redis.call` on keys that the script never declares in `KEYS`, which Redis
+Cluster rejects with `CROSSSLOT` or "Script attempted to access a non local
+key in a cluster node". The binary therefore forces `--disable-stats`,
+`--disable-error-index`, `--disable-hygiene` and `--disable-jobs` on when
+`--redis-cluster-nodes` is set, and logs that once at startup. The Overview,
+Errors, Hygiene and Operations screens are unavailable in that mode.
+
+**Upgrading.** Read [docs/UPGRADING.md](docs/UPGRADING.md) before you move a
+deployment from upstream `hibiken/asynqmon` 0.7.2 to this fork. It lists the
+keys the fork adds to your Redis, their TTLs, the replica semantics, and the
+rollback recipe.
 
 ## Install the binary
 
@@ -54,7 +114,7 @@ docker pull ghcr.io/zkrebbekx/asynqmon:0.8.0
 
 ### Building from source
 
-To build Asynqmon from source code, make sure you have Go installed ([download](https://golang.org/dl/)). Version `1.21` or higher is required. You also need [Node.js](https://nodejs.org/) version `20` or higher (with `npm`) installed in order to build the frontend assets.
+To build Asynqmon from source code, make sure you have Go installed ([download](https://golang.org/dl/)). The version in `go.mod` (`1.26`) or higher is required. You also need [Node.js](https://nodejs.org/) version `22` or higher (with `npm`) installed in order to build the frontend assets.
 
 Download the source code of this repository and then run:
 
@@ -121,30 +181,47 @@ _Note_: Use `--redis-url` to specify address, db-number, and password with one f
 | Flag                              | Env                       | Description                                                                                                                  | Default          |
 | --------------------------------- | ------------------------- | ---------------------------------------------------------------------------------------------------------------------------- | ---------------- |
 | `--port`(int)                     | `PORT`                    | port number to use for web ui server                                                                                         | 8080             |
-| `--redis-url`(string)            | `REDIS_URL`               | URL to redis or sentinel server. See [godoc](https://pkg.go.dev/github.com/hibiken/asynq#ParseRedisURI) for supported format | ""               |
-| `--redis-addr`(string)            | `REDIS_ADDR`              | address of redis server to connect to                                                                                        | "127.0.0.1:6379" |
+| `--redis-url`(string)            | `REDIS_URL`               | URL to redis or sentinel server. See [godoc](https://pkg.go.dev/github.com/hibiken/asynq#ParseRedisURI) for supported format | ""               || `--redis-addr`(string)            | `REDIS_ADDR`              | address of redis server to connect to                                                                                        | "127.0.0.1:6379" |
 | `--redis-db`(int)                 | `REDIS_DB`                | redis database number                                                                                                        | 0                |
 | `--redis-password`(string)        | `REDIS_PASSWORD`          | password to use when connecting to redis server                                                                              | ""               |
 | `--redis-username`(string)        | `REDIS_USERNAME`          | redis ACL username sent alongside `--redis-password` in single, cluster, and sentinel modes (plain redis AUTH username, distinct from any cloud-IAM `--redis-user` identity) | ""               |
 | `--redis-sentinel-password`(string) | `REDIS_SENTINEL_PASSWORD` | password to authenticate to the sentinel nodes themselves; the redis servers behind them use `--redis-password`            | ""               |
-| `--redis-cluster-nodes`(string)   | `REDIS_CLUSTER_NODES`     | comma separated list of host:port addresses of cluster nodes                                                                 | ""               |
+| `--redis-cluster-nodes`(string)   | `REDIS_CLUSTER_NODES`     | comma separated list of host:port addresses of cluster nodes. Setting it forces `--disable-stats`, `--disable-error-index`, `--disable-hygiene` and `--disable-jobs` on — see [Requirements](#requirements) | ""               |
 | `--redis-tls`(string)             | `REDIS_TLS`               | server name for TLS validation used when connecting to redis server                                                          | ""               |
 | `--redis-insecure-tls`(bool)      | `REDIS_INSECURE_TLS`      | disable TLS certificate host checks                                                                                          | false            |
-| `--enable-metrics-exporter`(bool) | `ENABLE_METRICS_EXPORTER` | enable prometheus metrics exporter to expose queue metrics                                                                   | false            |
-| `--prometheus-addr`(string)       | `PROMETHEUS_ADDR`         | address of prometheus server to query time series                                                                            | ""               |
-| `--prometheus-basic-auth`(string) | `PROMETHEUS_BASIC_AUTH`   | `user:password` basic-auth credentials sent with every query to `--prometheus-addr` (prefer the env var to keep the secret out of argv) | ""               |
-| `--read-only`(bool)               | `READ_ONLY`               | use web UI in read-only mode                                                                                                 | false            |
+| `--redis-timeout`(duration)       | `REDIS_TIMEOUT`           | dial, read, and write timeout of every redis connection. Keep it at or below the 2s `/healthz` budget so a hung Redis answers 503 instead of hanging the probe | 2s               |
 | `--max-payload-length`(int)       | `MAX_PAYLOAD_LENGTH`      | maximum number of utf8 characters printed in the payload cell in the Web UI (list rows)                                      | 200              |
 | `--max-result-length`(int)        | `MAX_RESULT_LENGTH`       | maximum number of utf8 characters printed in the result cell in the Web UI (list rows)                                       | 200              |
 | `--max-detail-payload-length`(int) | `MAX_DETAIL_PAYLOAD_LENGTH` | safety cap (utf8 chars) on the formatted payload/result served by the task DETAIL endpoint — the task drawer shows the full payload up to this cap while list cells stay capped by `--max-payload-length` (upstream [#301](https://github.com/hibiken/asynqmon/issues/301)); 0 = unlimited | 262144           |
+| `--max-concurrent-scans`(int)     | `MAX_CONCURRENT_SCANS`    | maximum number of task scans (`GET /api/tasks`, `/api/task_metadata`, `/api/task_aggregate`, `POST /api/tasks:batch_filtered`) this process runs at once; further scans get 429 | 4                |
+| `--max-scan-ceiling`(int)         | `MAX_SCAN_CEILING`        | largest `max_scan` a task-scan request can ask for; larger values clamp to it                                                | 20000            |
+| `--max-sse-connections`(int)      | `MAX_SSE_CONNECTIONS`     | maximum concurrent `/api/fleet/events` streams per replica; extra subscribers get 503 with `Retry-After` (negative = unlimited) | 256              |
+| `--enable-metrics-exporter`(bool) | `ENABLE_METRICS_EXPORTER` | enable prometheus metrics exporter to expose queue metrics                                                                   | false            |
+| `--prometheus-addr`(string)       | `PROMETHEUS_ADDR`         | address of prometheus server to query time series                                                                            | ""               |
+| `--prometheus-basic-auth`(string) | `PROMETHEUS_BASIC_AUTH`   | `user:password` basic-auth credentials sent with every query to `--prometheus-addr` (prefer the env var to keep the secret out of argv) | ""               |
+| `--read-only`(bool)               | `READ_ONLY`               | use web UI in read-only mode. The background writers (stats sweeper, error index, hygiene generator) keep running and keep writing `asynqmon:*` keys; only the bulk-job runner is off | false            |
 | `--enable-enqueue`(bool)          | `ENABLE_ENQUEUE`          | enable creating tasks from the web UI (`POST /api/queues/{qname}/tasks`, powers clone-and-edit and the Schedulers screen's Run-now, upstream [#337](https://github.com/hibiken/asynqmon/issues/337)); always excluded in read-only mode | false            |
 | `--correlation-keys`(string)      | `CORRELATION_KEYS`        | comma separated list of payload keys the task drawer's Flow view recognizes as correlation ids, in priority order ([details](#flow-view--correlation-keys)) | "trace_id,correlation_id,request_id" |
 | `--cors-allowed-origins`(string)  | `CORS_ALLOWED_ORIGINS`    | comma separated list of origins allowed to make cross-origin requests (empty = same-origin only; cross-origin mutations are rejected) | ""               |
 | `--stats-interval`(duration)      | `STATS_INTERVAL`          | interval between background fleet stats sweeps (powers the Overview, Queues directory, sparklines and attention findings)     | 5s               |
 | `--disable-stats`(bool)           | `DISABLE_STATS`           | disable the background stats sweeper and the `/api/fleet` endpoints; the console degrades to the classic per-queue views      | false            |
+| `--disable-error-index`(bool)     | `DISABLE_ERROR_INDEX`     | disable this replica's error-signature indexer; `/api/errors` still serves the shared index another replica writes            | false            |
+| `--disable-hygiene`(bool)         | `DISABLE_HYGIENE`         | disable this replica's scheduled hygiene reports; `/api/hygiene` still serves the persisted reports                           | false            |
+| `--disable-jobs`(bool)            | `DISABLE_JOBS`            | disable this replica's bulk-job runner; `/api/jobs` still works and another replica runs the jobs                             | false            |
+| `--job-concurrency`(int)          | `JOB_CONCURRENCY`         | maximum number of bulk jobs this replica works at once                                                                       | 2                |
+| `--hygiene-webhook-url`(string)   | `HYGIENE_WEBHOOK_URL`     | URL that receives a POST of every generated hygiene report (best effort, one attempt)                                        | ""               |
+| `--hygiene-run-in-read-only`(bool) | `HYGIENE_RUN_IN_READ_ONLY` | keep `POST /api/hygiene/{kind}/run` available in `--read-only` mode; by default the route is blocked like every other mutation | false            |
+| `--attention-pending-age-slo`(duration) | `ATTENTION_PENDING_AGE_SLO` | raise a `PENDING_AGE` finding when a queue's oldest pending task has waited longer than this                             | 5m               |
+| `--attention-retry-storm-threshold`(int) | `ATTENTION_RETRY_STORM_THRESHOLD` | raise a `RETRY_STORM` finding when at least this many retries fire within the next 5 minutes                    | 1000             |
+| `--attention-paused-long-after`(duration) | `ATTENTION_PAUSED_LONG_AFTER` | raise a `PAUSED_LONG` finding when a queue has been paused longer than this                                       | 168h (7d)        |
+| `--attention-group-stall-after`(duration) | `ATTENTION_GROUP_STALL_AFTER` | raise a `GROUP_STALL` finding when the oldest member of a group has aggregated longer than this                   | 5m               |
 | `--auth-header`(string)           | `AUTH_HEADER`             | reverse-proxy header resolved as the acting user for the audit log (e.g. `X-Auth-Request-User`) — see [Identity & the audit log](#identity--the-audit-log) | "" |
-| `--trusted-proxies`(string)       | `TRUSTED_PROXIES`         | comma separated CIDRs the auth header is trusted from. **Empty means trusted from any peer** — set this whenever `--auth-header` is set, or any client that can reach the listener can forge the audit actor | "" |
-| `--require-identity`(bool)        | `REQUIRE_IDENTITY`        | refuse mutating requests (403 JSON) that carry no resolvable identity (auth header or basic-auth user). The binary refuses to start with `--require-identity` + `--auth-header` unless `--trusted-proxies` is also set — otherwise a spoofed header would satisfy the requirement | false            |
+| `--trusted-proxies`(string)       | `TRUSTED_PROXIES`         | comma separated CIDRs the auth header is trusted from. **Empty means trusted from any peer**, so the binary refuses to start with `--auth-header` and no `--trusted-proxies` unless `--allow-untrusted-auth-header` is set | "" |
+| `--require-identity`(bool)        | `REQUIRE_IDENTITY`        | refuse mutating requests (403 JSON) that carry no resolvable identity (auth header or trusted basic-auth user)                | false            |
+| `--trust-basic-auth-user`(bool)   | `TRUST_BASIC_AUTH_USER`   | accept the HTTP Basic-Auth username as the acting user for the audit log. asynqmon never verifies the password, so set this only behind a proxy that does | false            |
+| `--allow-untrusted-auth-header`(bool) | `ALLOW_UNTRUSTED_AUTH_HEADER` | start with `--auth-header` set and `--trusted-proxies` empty. The header is then trusted from every peer, which lets any direct client forge the audit actor (insecure) | false            |
+| `--purge-owned-keys`(bool)        | `PURGE_OWNED_KEYS`        | delete every `asynqmon:*` key in the configured redis database, print the counts, and exit. The rollback helper; it never touches `asynq:*` keys — see [docs/UPGRADING.md](docs/UPGRADING.md) | false            |
+| `--version`(bool)                 | —                         | print the asynqmon version and exit                                                                                          | false            |
 
 ### Connecting to Redis
 
@@ -186,6 +263,10 @@ Example:
 $ ./asynqmon --redis-cluster-nodes=localhost:7000,localhost:7001,localhost:7002,localhost:7003,localhost:7004,localhost:7006
 ```
 
+On Redis Cluster the binary forces the background write features off and
+serves the read-only console only. See
+[Requirements](#requirements) for the reason.
+
 ### Health check endpoint
 
 The server exposes `GET /healthz` (outside `/api`, no auth, no side effects)
@@ -198,6 +279,41 @@ budget and answers:
 The bundled Helm chart points its readiness probe at `/healthz`; its liveness
 probe is a TCP check on the HTTP port. An HTTP liveness probe on `/healthz`
 restart-loops the pods during a Redis outage, and a restart cannot fix Redis.
+
+### Limits and error responses
+
+The API bounds every unbounded operation upstream left open. The limits are
+flags (see the table above); these are the defaults and the status codes they
+produce.
+
+| Limit | Default | What happens at the limit |
+| --- | --- | --- |
+| Page size on `/api/queues/{q}/{state}_tasks` | 20, max 1000 | The size clamps. The payload then carries `page_size_applied` with the size actually used. |
+| `max_scan` on a task scan | ceiling 20000 (`--max-scan-ceiling`) | The value clamps to the ceiling. |
+| Concurrent task scans per replica | 4 (`--max-concurrent-scans`) | `429 {"error":"too many concurrent scans"}` |
+| Matches on `POST /api/tasks:batch_filtered` | 2000 | `400` naming `POST /api/jobs`, which previews, audits and throttles a large set as a background job. |
+| Concurrent `/api/fleet/events` streams | 256 (`--max-sse-connections`) | `503` with `Retry-After`. |
+| `POST /api/hygiene/{kind}/run` | one run per kind per 30s | `429`. The route also obeys `--read-only` unless `--hygiene-run-in-read-only` is set. |
+| Enqueue body | 1 MB payload, 64 headers | `400` with a field-specific message. |
+
+Error bodies are JSON (`{"error":"..."}`), never `text/plain`:
+
+- `404` — the queue or the task does not exist.
+- `400` — the request is wrong (an unknown queue name on enqueue, a deadline
+  in the past, a queue that is not empty).
+- `429` — a limit in the table above.
+- `503 {"error":"redis unavailable"}` — Redis did not answer.
+- `500 {"error":"internal error"}` — anything else.
+
+A `5xx` body is deliberately generic. The full error, with the Redis or
+Prometheus address it names, goes to the process log instead of to the
+browser.
+
+**Queue names containing `/`.** asynq allows a `/` in a queue name; the API
+matches a queue name against a single URL path segment, so such a name
+reaches no route, not even percent-encoded. Reads through the fleet endpoints
+still work. The console shows a notice on those queues and disables their
+mutating controls (pause, resume, delete, bulk verbs, per-row actions).
 
 ### Integration with Prometheus
 
@@ -321,6 +437,22 @@ cannot answer is rejected with a caret and the nearest supported alternative
 resumable cursor, or can be handed to a background **count** job that scans
 to completion for an exact number.
 
+Four details are worth knowing:
+
+- `pending_age` needs asynq's `pending_since` record. A task that reached
+  pending through "Run now", "Run all" or a worker shutdown requeue carries
+  no such record, so `pending_age>` skips it. List those tasks with
+  `pending_age=unknown`; the response also counts them as
+  `pending_since_unknown`.
+- Free text that looks like a clause must be quoted. `user=42` is read as a
+  clause on an unknown field `user` and is rejected; write `"user=42"` to
+  search for the text. The same holds for text containing `<`, `>` or `~`.
+- `died>` reads the archived score, so it also matches a task that an
+  operator archived by hand, not only one that exhausted its retries.
+- `meta.KEY=` compares a numeric payload value numerically, so `meta.n=10`
+  matches `10`, `10.0` and `1e1`. The comparison runs in float64, so an
+  integer larger than 2^53 (9007199254740992) cannot be matched exactly.
+
 ### Task drawer: base64 payload decoding
 
 When a task's payload or result carries base64-encoded values — a common
@@ -377,11 +509,20 @@ bar.
 Mutations are attributed in the audit log. Behind a reverse proxy that
 authenticates users, pass the identity header with `--auth-header` (e.g.
 `X-Auth-Request-User`) **and** restrict who may assert it with
-`--trusted-proxies=10.0.0.0/8` — with no CIDRs configured the header is
+`--trusted-proxies=10.0.0.0/8`. With no CIDRs configured the header is
 trusted from every peer, so any client that can reach the listener directly
-could forge the audit actor. `--require-identity` refuses mutations with no
-resolvable identity; without any of this, actions are logged as
-`anonymous@<ip>`.
+could forge the audit actor. The binary therefore **refuses to start** with
+`--auth-header` set and `--trusted-proxies` empty; pass
+`--allow-untrusted-auth-header` to accept that risk deliberately.
+
+asynqmon never verifies an HTTP Basic-Auth password, so a Basic-Auth username
+is not an identity by itself. It becomes the audit actor only when
+`--trust-basic-auth-user` is set, or when the request arrives from a CIDR in
+`--trusted-proxies`. Set `--trust-basic-auth-user` only behind a proxy that
+checks the password.
+
+`--require-identity` refuses mutations with no resolvable identity; without
+any of this, actions are logged as `anonymous@<ip>`.
 
 ### Flow view & correlation keys
 
@@ -455,11 +596,29 @@ worker `host:pid`, and the task's queue/id/type. A small summary hash tracks
 `first_seen`, `total_attempts`, `last_duration_ms` and `total_busy_ms`.
 
 **Bounds.** Records live in asynqmon-owned keys
-(`asynqmon:obs:att:<queue>:<task_id>`), trimmed to the last 30 attempts and
-expiring 7 days after the last write — tune with `observe.WithAttemptCap`,
-`observe.WithTTL` and `observe.WithKeyPrefix`. Writes are best-effort: a
-recording failure never fails or delays the task (dropped writes are counted;
-see `observe.DroppedWrites`).
+(`asynqmon:obs:att:<queue>:<task_id>` and
+`asynqmon:obs:sum:<queue>:<task_id>`), trimmed to the last 30 attempts and
+expiring **24 hours** after the last write. By default the middleware records
+only the `error` and `panic` outcomes, so a healthy fleet writes almost
+nothing. Tune it with `observe.WithOutcomes` (add `observe.OutcomeOK` to
+record successful attempts too), `observe.WithSampling(rate)` (record only a
+fraction of the tasks), `observe.WithAttemptCap`, `observe.WithTTL` and
+`observe.WithKeyPrefix`.
+
+One recorded task costs about 750 bytes in Redis. The footprint is therefore:
+
+```
+recorded_tasks_per_day x TTL_in_days x 750 B
+```
+
+200,000 recorded tasks per day at the default 24h TTL keep about 150 MB
+resident. Recording every outcome of every task of a busy fleet for 7 days,
+which was the old default, keeps about 1 GB. The middleware also increments
+`asynqmon:obs:count:<YYYY-MM-DD>` (48h TTL) so you can read the daily figure
+with one `GET` instead of a `SCAN`.
+
+Writes are best-effort: a recording failure never fails or delays the task
+(dropped writes are counted; see `observe.DroppedWrites`).
 
 **What the dashboard shows.** The task drawer grows an **Attempt history**
 section (per-attempt rows with duration, outcome and worker), and finished
