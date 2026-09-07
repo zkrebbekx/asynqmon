@@ -81,11 +81,22 @@ func (e *errsigTestEnv) newRouter() http.Handler {
 	return muxRouter(Options{}, e.rc, e.insp, nil, nil)
 }
 
+// errsigTestClockAhead steps the indexer's clock past its tail safety lag
+// (2s by default), so every sweep in this file sees the tasks archived
+// immediately before it.
+const errsigTestClockAhead = 5 * time.Second
+
 func (e *errsigTestEnv) newIndexer(t *testing.T) *errsig.Indexer {
 	t.Helper()
+	// Run the indexer on a clock that is one safety lag ahead of the wall
+	// clock. The archived tail deliberately stops short of the current
+	// second (a task archived later in the same second as the cursor would
+	// be lost), so a test that archives and sweeps back to back must step
+	// over that lag instead of sleeping.
 	return errsig.NewIndexer(errsig.Config{
 		RedisClient: e.rc,
 		Inspector:   e.insp,
+		Now:         func() time.Time { return time.Now().Add(errsigTestClockAhead) },
 		Logf:        t.Logf,
 	})
 }
@@ -127,6 +138,29 @@ func (e *errsigTestEnv) runFailingServer(t *testing.T, queues map[string]int, co
 		time.Sleep(100 * time.Millisecond)
 	}
 	srv.Shutdown()
+}
+
+// waitPastArchivedSecond blocks until the wall clock has left the highest
+// died-at second currently in the queue's archived zset, so the next
+// archived task takes a strictly higher score.
+func (e *errsigTestEnv) waitPastArchivedSecond(t *testing.T, qname string) {
+	t.Helper()
+	ctx := context.Background()
+	zs, err := e.rc.ZRangeWithScores(ctx, "asynq:{"+qname+"}:archived", -1, -1).Result()
+	if err != nil {
+		t.Fatalf("reading archived scores: %v", err)
+	}
+	if len(zs) == 0 {
+		return
+	}
+	last := int64(zs[0].Score)
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Unix() <= last {
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for the next second after %d", last)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
 }
 
 func (e *errsigTestEnv) archivedCount(t *testing.T, qname string) int {
@@ -271,6 +305,12 @@ func TestErrSigArchivedTailIndexAndEndpoints(t *testing.T) {
 	errsigGetJSON(t, h, "/api/errors/signatures", &second)
 
 	// Two more real failures land AFTER the cursor: only the delta indexes.
+	// asynq scores the archived zset in whole seconds, so the new failures
+	// must fall in a LATER second than the one the sweeps above parked their
+	// cursor in — a tie whose task id sorts below the cursor id belongs to
+	// the same-second case the tail safety lag covers in production (see
+	// errsig/tailcursor_test.go), not to this delta test.
+	env.waitPastArchivedSecond(t, "esq")
 	for i := 0; i < 2; i++ {
 		msg := fmt.Sprintf("gateway timeout POST https://api-%d.stripe.com/v2/charges", 40+i)
 		if _, err := env.client.Enqueue(asynq.NewTask("errsig:fail", []byte(msg)), asynq.Queue("esq"), asynq.MaxRetry(0)); err != nil {
