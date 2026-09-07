@@ -24,7 +24,10 @@ import (
 // Every Redis-backed test skips when Redis does not answer PING.
 // ****************************************************************************
 
-const lifecycleTestRedisDB = 14
+// DB 2 belongs to this suite alone. The stats package flushes DB 14 and
+// `go test ./...` runs packages in parallel, so a shared DB lets one suite
+// flush another suite's lease keys mid-test.
+const lifecycleTestRedisDB = 2
 
 func lifecycleTestRedisAddr() string {
 	if v := os.Getenv("ASYNQMON_TEST_REDIS_ADDR"); v != "" {

@@ -18,7 +18,9 @@ import (
 // for Redis, and the system views must still be seeded once Redis answers.
 // ****************************************************************************
 
-const handlerLifecycleTestRedisDB = 14
+// DB 3 belongs to this suite alone; see the note in cmd/asynqmon on why the
+// lifecycle suites do not share a DB with the stats package.
+const handlerLifecycleTestRedisDB = 3
 
 func handlerLifecycleRedisAddr() string {
 	if v := os.Getenv("ASYNQMON_TEST_REDIS_ADDR"); v != "" {
