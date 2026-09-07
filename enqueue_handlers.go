@@ -58,7 +58,14 @@ func newEnqueueTaskHandlerFunc(client *asynq.Client, store *jobs.Store, pf Paylo
 			return
 		}
 
-		info, err := client.EnqueueContext(r.Context(), asynq.NewTask(taskType, payload), taskOpts...)
+		// asynq 0.26 carries a header map on the task message. NewTask
+		// creates a task WITHOUT headers, so a clone of a task that has them
+		// must be built with NewTaskWithHeaders or the metadata is dropped.
+		task := asynq.NewTask(taskType, payload)
+		if len(req.Headers) > 0 {
+			task = asynq.NewTaskWithHeaders(taskType, payload, req.Headers)
+		}
+		info, err := client.EnqueueContext(r.Context(), task, taskOpts...)
 		if err != nil {
 			switch {
 			case errors.Is(err, asynq.ErrDuplicateTask):

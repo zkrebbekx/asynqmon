@@ -273,6 +273,12 @@ func newRunSchedulerEntryHandlerFunc(inspector *asynq.Inspector, rc redis.Univer
 		}
 
 		taskOpts, applied, skipped := buildRunNowOptions(data, time.Now())
+		// Task headers (asynq 0.26) cannot ride along: asynq's persisted
+		// scheduler entry stores the spec, the task type, the payload and the
+		// option strings only (internal/base.SchedulerEntry), and
+		// Inspector.SchedulerEntries rebuilds the task with NewTask. A
+		// registered header map lives in the scheduler process alone, so
+		// neither the live entry nor the snapshot can supply it here.
 		info, err := client.EnqueueContext(r.Context(), asynq.NewTask(data.TaskType, data.Payload), taskOpts...)
 		if err != nil {
 			switch {
