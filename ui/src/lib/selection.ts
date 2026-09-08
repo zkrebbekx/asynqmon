@@ -59,8 +59,10 @@ export async function runWithConcurrency<T>(
     for (;;) {
       const i = next++;
       if (i >= items.length) return;
+      const item = items[i];
+      if (item === undefined) continue; // i < items.length, so a hole only
       try {
-        await fn(items[i]);
+        await fn(item);
       } catch (e) {
         if (firstError === undefined) firstError = e;
       }

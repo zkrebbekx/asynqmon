@@ -24,7 +24,8 @@ export function sliceLastSeconds(
 // no samples at all.
 export function lastSample(points: SeriesPoint[]): SeriesPoint | null {
   for (let i = points.length - 1; i >= 0; i--) {
-    if (points[i].v !== null) return points[i];
+    const p = points[i];
+    if (p !== undefined && p.v !== null) return p;
   }
   return null;
 }
@@ -49,23 +50,19 @@ export interface LinearFit {
 // linearFit computes an ordinary least-squares line over the NON-NULL points
 // (x = t seconds, y = v). Needs ≥2 distinct-x samples; returns null otherwise.
 export function linearFit(points: SeriesPoint[]): LinearFit | null {
-  const xs: number[] = [];
-  const ys: number[] = [];
+  const samples: { x: number; y: number }[] = [];
   for (const p of points) {
-    if (p.v !== null) {
-      xs.push(p.t);
-      ys.push(p.v);
-    }
+    if (p.v !== null) samples.push({ x: p.t, y: p.v });
   }
-  const n = xs.length;
+  const n = samples.length;
   if (n < 2) return null;
-  const meanX = xs.reduce((a, b) => a + b, 0) / n;
-  const meanY = ys.reduce((a, b) => a + b, 0) / n;
+  const meanX = samples.reduce((acc, s) => acc + s.x, 0) / n;
+  const meanY = samples.reduce((acc, s) => acc + s.y, 0) / n;
   let sxx = 0;
   let sxy = 0;
-  for (let i = 0; i < n; i++) {
-    sxx += (xs[i] - meanX) * (xs[i] - meanX);
-    sxy += (xs[i] - meanX) * (ys[i] - meanY);
+  for (const s of samples) {
+    sxx += (s.x - meanX) * (s.x - meanX);
+    sxy += (s.x - meanX) * (s.y - meanY);
   }
   if (sxx === 0) return null; // all samples share one instant
   const slope = sxy / sxx;
@@ -119,6 +116,7 @@ export function burnDownProjection(points: SeriesPoint[]): BurnDownProjection | 
   const fit = linearFit(recent);
   if (fit === null) return null;
   const last = recent[recent.length - 1];
+  if (last === undefined) return null;
   const current = last.v as number;
   const slopePerMin = fit.slope * 60;
   if (slopePerMin >= 0) return { slopePerMin, etaMinutes: null, current };

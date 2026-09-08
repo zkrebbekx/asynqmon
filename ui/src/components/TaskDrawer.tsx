@@ -359,12 +359,13 @@ export default function TaskDrawer({ peek, resultList, onClose, onPeek, onPivot 
     const root = panelRef.current;
     if (!root) return;
     const focusables = Array.from(root.querySelectorAll<HTMLElement>(FOCUSABLE));
-    if (focusables.length === 0) {
+    const first = focusables[0];
+    const last = focusables[focusables.length - 1];
+    if (first === undefined || last === undefined) {
+      // The panel holds no focusable element: keep the focus where it is.
       e.preventDefault();
       return;
     }
-    const first = focusables[0];
-    const last = focusables[focusables.length - 1];
     const active = document.activeElement;
     if (e.shiftKey) {
       if (active === first || active === root) {
@@ -470,13 +471,15 @@ export default function TaskDrawer({ peek, resultList, onClose, onPeek, onPivot 
   // Actions re-check the guard (`task` is null unless it matches the peek
   // param) and refetch so the drawer reflects the task's new state.
   const doRun = async () => {
-    if (!task) return;
-    await dispatch(runThunks[state](task.queue, task.id));
+    const thunk = runThunks[state];
+    if (!task || !thunk) return;
+    await dispatch(thunk(task.queue, task.id));
     fetchInfo();
   };
   const doArchive = async () => {
-    if (!task) return;
-    await dispatch(archiveThunks[state](task.queue, task.id));
+    const thunk = archiveThunks[state];
+    if (!task || !thunk) return;
+    await dispatch(thunk(task.queue, task.id));
     fetchInfo();
   };
   const doCancel = async () => {
@@ -485,8 +488,9 @@ export default function TaskDrawer({ peek, resultList, onClose, onPeek, onPivot 
     fetchInfo();
   };
   const doDelete = async () => {
-    if (!task) return;
-    await dispatch(deleteThunks[state](task.queue, task.id));
+    const thunk = deleteThunks[state];
+    if (!task || !thunk) return;
+    await dispatch(thunk(task.queue, task.id));
     onClose();
   };
 

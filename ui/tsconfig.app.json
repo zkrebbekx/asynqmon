@@ -19,6 +19,7 @@
 
     /* Linting */
     "strict": true,
+    "noUncheckedIndexedAccess": true,
     "noFallthroughCasesInSwitch": true,
     "useUnknownInCatchVariables": false
   },

@@ -101,7 +101,7 @@ export default function WorkspaceRail({
 }: Props) {
   const retryView = retryHistogramView(retryHist);
   const waitView = pendingWaitView(waitSample);
-  const maxCluster = clusters.length > 0 ? clusters[0].total : 0;
+  const maxCluster = clusters[0]?.total ?? 0;
 
   return (
     <div className="flex flex-col gap-2.5">
@@ -257,7 +257,10 @@ export default function WorkspaceRail({
               bars={retryView.bars}
               hotIndex={retryView.hotIndex}
               titles={retryView.bars.map(
-                (_, i) => `${retryView.bucketLabel(i)}: ${retryHist!.buckets[i].toLocaleString()} tasks`
+                (_, i) =>
+                  // bars comes from retryHist.buckets, so index i always
+                  // addresses the matching bucket.
+                  `${retryView.bucketLabel(i)}: ${(retryHist?.buckets[i] ?? 0).toLocaleString()} tasks`
               )}
             />
             <Caption>
@@ -289,8 +292,8 @@ export default function WorkspaceRail({
               titles={waitView.buckets.map((b) => `${b.label}: ${b.count} sampled`)}
             />
             <div className="flex justify-between px-3 pt-1 text-[9.5px] text-[var(--fc-ink3)]">
-              <span>{waitView.buckets[0].label}</span>
-              <span>{waitView.buckets[waitView.buckets.length - 1].label}</span>
+              <span>{waitView.buckets[0]?.label ?? ""}</span>
+              <span>{waitView.buckets[waitView.buckets.length - 1]?.label ?? ""}</span>
             </div>
             <Caption>
               {/* §3.3(c): the honesty label travels from the API verbatim. */}

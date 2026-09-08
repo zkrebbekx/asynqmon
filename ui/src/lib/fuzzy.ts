@@ -45,13 +45,17 @@ export function fuzzyMatch(query: string, text: string): FuzzyMatch | null {
       }
       if (found === -1) return null;
       score += 1;
-      if (indices.length > 0 && found === indices[indices.length - 1] + 1) score += 2;
-      if (found === 0 || BOUNDARIES.has(t[found - 1])) score += 1.5;
+      const prevIndex = indices[indices.length - 1];
+      if (prevIndex !== undefined && found === prevIndex + 1) score += 2;
+      const before = t[found - 1];
+      if (found === 0 || (before !== undefined && BOUNDARIES.has(before))) score += 1.5;
       indices.push(found);
       ti = found + 1;
     }
     // Earlier first-match and shorter text rank higher on equal hits.
-    score -= indices[0] * 0.1;
+    // The loop above pushes one index per query char, and q is non-empty
+    // here, so indices[0] always exists.
+    score -= (indices[0] ?? 0) * 0.1;
     score -= text.length * 0.01;
     return { score, indices };
   };

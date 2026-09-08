@@ -55,9 +55,9 @@ export function prefillFromTask(task: TaskInfo): CloneDraft {
 export function headerRowsFromTask(task: TaskInfo): HeaderRow[] {
   const h = task.headers;
   if (!h) return [];
-  return Object.keys(h)
-    .sort()
-    .map((name) => ({ name, value: h[name] }));
+  return Object.entries(h)
+    .map(([name, value]) => ({ name, value }))
+    .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
 }
 
 // isBlankHeaderRow is true for a row the operator added and left untouched.
