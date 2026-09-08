@@ -20,21 +20,38 @@ interface Crumb {
   to?: string;
 }
 
+// matchPath returns the RAW path segment, unlike useParams, which decodes it.
+// Queue names routinely carry a colon ("email:send"), which the path builders
+// percent-encode, so an undecoded label read "email%3Asend" and a link built
+// from it encoded a second time ("email%253Asend"). A malformed sequence makes
+// decodeURIComponent throw, so fall back to the raw segment.
+function decodeSegment(segment: string): string {
+  try {
+    return decodeURIComponent(segment);
+  } catch {
+    return segment;
+  }
+}
+
 function useBreadcrumbs(): Crumb[] {
   const { pathname } = useLocation();
   const p = paths();
 
   const task = matchPath(p.TASK_DETAILS, pathname);
   if (task?.params.qname) {
+    const qname = decodeSegment(task.params.qname);
     return [
       { label: "Queues", to: p.QUEUES },
-      { label: task.params.qname, to: queueDetailsPath(task.params.qname) },
+      { label: qname, to: queueDetailsPath(qname) },
       { label: "task" },
     ];
   }
   const queue = matchPath(p.QUEUE_DETAILS, pathname);
   if (queue?.params.qname) {
-    return [{ label: "Queues", to: p.QUEUES }, { label: queue.params.qname }];
+    return [
+      { label: "Queues", to: p.QUEUES },
+      { label: decodeSegment(queue.params.qname) },
+    ];
   }
 
   const sections: Array<[string, string]> = [

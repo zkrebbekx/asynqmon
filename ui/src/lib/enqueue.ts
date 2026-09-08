@@ -18,6 +18,16 @@ export interface CloneDraft {
   uniqueTtlSeconds: string;
   processInSeconds: string;
   reason: string;
+  // headers is an ordered row list, not a map: the modal must keep a row the
+  // operator is still typing (a blank name, a duplicate name) on screen, and
+  // a map cannot hold either.
+  headers: HeaderRow[];
+}
+
+// HeaderRow is one editable line of the header table.
+export interface HeaderRow {
+  name: string;
+  value: string;
 }
 
 // prefillFromTask maps a source task onto the draft. Only fields asynq
@@ -36,7 +46,32 @@ export function prefillFromTask(task: TaskInfo): CloneDraft {
     uniqueTtlSeconds: "",
     processInSeconds: "",
     reason: "",
+    headers: headerRowsFromTask(task),
   };
+}
+
+// headerRowsFromTask turns the task's header map into ordered rows. It sorts
+// by name so the same task always prefills the same way; a map has no order.
+export function headerRowsFromTask(task: TaskInfo): HeaderRow[] {
+  const h = task.headers;
+  if (!h) return [];
+  return Object.keys(h)
+    .sort()
+    .map((name) => ({ name, value: h[name] }));
+}
+
+// isBlankHeaderRow is true for a row the operator added and left untouched.
+// Such a row is dropped on submit and raises no error: an empty line must not
+// block the form.
+export function isBlankHeaderRow(row: HeaderRow): boolean {
+  return row.name.trim() === "" && row.value === "";
+}
+
+// utf8Bytes counts the bytes the server sees. The server bounds a header name
+// and value in BYTES (Go len on a string), so a multi-byte name must be
+// measured the same way here.
+function utf8Bytes(text: string): number {
+  return new TextEncoder().encode(text).length;
 }
 
 export type PayloadJsonState = "empty" | "valid" | "invalid";
@@ -70,6 +105,14 @@ export const ENQUEUE_BOUNDS = {
   retentionSeconds: 90 * 24 * 60 * 60,
   uniqueTtlSeconds: 30 * 24 * 60 * 60,
   processInSeconds: 365 * 24 * 60 * 60,
+} as const;
+
+// Header bounds mirror validateEnqueueHeaders in enqueue.go. The modal
+// imports these constants; it never repeats the numbers.
+export const HEADER_BOUNDS = {
+  maxEntries: 64,
+  maxNameBytes: 256,
+  maxValueBytes: 4096,
 } as const;
 
 const intField = (
@@ -107,7 +150,55 @@ export function draftErrors(draft: CloneDraft): Record<string, string> {
     const err = intField(value, label, min, b[key]);
     if (err) errs[key] = err;
   }
+  Object.assign(errs, headerErrors(draft.headers));
   return errs;
+}
+
+// headerErrors returns row index -> message under the key "header:<index>",
+// plus the whole-table message under "headers". The keys are distinct so the
+// modal can mark one row red and still show the count error above the table.
+// The checks mirror validateEnqueueHeaders in enqueue.go, with one addition
+// the server cannot make: two rows with the same name collapse into one JSON
+// key, so the operator would silently lose a header.
+export function headerErrors(rows: HeaderRow[]): Record<string, string> {
+  const errs: Record<string, string> = {};
+  const live = rows.filter((r) => !isBlankHeaderRow(r));
+  if (live.length > HEADER_BOUNDS.maxEntries) {
+    errs.headers = `at most ${HEADER_BOUNDS.maxEntries} headers (got ${live.length})`;
+  }
+  const seen = new Set<string>();
+  rows.forEach((row, i) => {
+    if (isBlankHeaderRow(row)) return;
+    const name = row.name.trim();
+    let msg: string | null = null;
+    if (name === "") {
+      msg = "a header name must not be blank";
+    } else if (utf8Bytes(name) > HEADER_BOUNDS.maxNameBytes) {
+      msg = `name exceeds ${HEADER_BOUNDS.maxNameBytes} bytes`;
+    } else if (utf8Bytes(row.value) > HEADER_BOUNDS.maxValueBytes) {
+      msg = `value exceeds ${HEADER_BOUNDS.maxValueBytes} bytes`;
+    } else if (seen.has(name)) {
+      msg = "duplicate header name";
+    }
+    if (name !== "") seen.add(name);
+    if (msg) errs[`header:${i}`] = msg;
+  });
+  return errs;
+}
+
+// headersFromRows collapses the rows into the wire map, dropping blank rows.
+// It returns undefined when nothing survives, so the body omits the field.
+export function headersFromRows(rows: HeaderRow[]): { [name: string]: string } | undefined {
+  const out: { [name: string]: string } = {};
+  let n = 0;
+  for (const row of rows) {
+    if (isBlankHeaderRow(row)) continue;
+    const name = row.name.trim();
+    if (name === "") continue;
+    out[name] = row.value;
+    n++;
+  }
+  return n > 0 ? out : undefined;
 }
 
 // buildEnqueueRequest maps a (valid) draft onto the wire body, omitting
@@ -124,5 +215,7 @@ export function buildEnqueueRequest(draft: CloneDraft): EnqueueTaskRequest {
   if (draft.uniqueTtlSeconds.trim() !== "") req.unique_ttl_seconds = Number(draft.uniqueTtlSeconds);
   if (draft.processInSeconds.trim() !== "") req.process_in_seconds = Number(draft.processInSeconds);
   if (draft.reason.trim() !== "") req.reason = draft.reason.trim();
+  const headers = headersFromRows(draft.headers);
+  if (headers) req.headers = headers;
   return req;
 }

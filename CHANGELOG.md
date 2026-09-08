@@ -129,6 +129,17 @@ guidance for the move is in [docs/UPGRADING.md](docs/UPGRADING.md).
 
 ## [Unreleased]
 
+## [0.9.1] - 2026-09-08
+
+### Added
+
+- (api/ui): Task headers are on the read side, so clone-and-edit keeps them. asynq 0.26 stores a header map on a task, and the enqueue endpoint already accepted one, but nothing reported it back: the task detail, the enqueue response, the scheduler-entry run response and every task list row now carry an optional `headers` object, absent when the task has none. The console's clone modal prefills, edits and submits them, and the drawer shows them read-only. The client enforces the same bounds the server does (64 entries, a 256-byte name, a 4096-byte value) and additionally rejects a duplicate name, which JSON would silently collapse into one key
+
+### Fixed
+
+- (ui): The breadcrumb shows the real queue name. Clicking into a queue whose name contains a colon, such as `email:send`, showed `email%3Asend`. The path builders percent-encode the name so it matches the single-segment route, and `useParams` decodes it again, but the breadcrumb reads the segment with `matchPath`, which returns it raw. The queue link on a task path was also built from the encoded value and encoded a second time
+- (stats/errsig/hygiene): A failing lease acquire no longer floods the log. A Redis user without write permission never acquires a role lease, and each of the three engines logged that failure on every 5-second tick, about 51,000 identical lines per day. Repeated acquire and renewal failures now collapse to one line, then one line per minute with a repeat count, then one line on recovery. The first-occurrence wording is unchanged, so an existing log search still matches
+
 ## [0.9.0] - 2026-09-08
 
 Production-readiness review (tracking issue #57, child issues #27-#56). See

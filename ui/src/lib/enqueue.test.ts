@@ -2,8 +2,11 @@ import { describe, expect, it } from "vitest";
 import { TaskInfo } from "../api";
 import {
   ENQUEUE_BOUNDS,
+  HEADER_BOUNDS,
   buildEnqueueRequest,
   draftErrors,
+  headerRowsFromTask,
+  headersFromRows,
   isLikelyBase64,
   payloadJsonState,
   prefillFromTask,
@@ -153,5 +156,155 @@ describe("buildEnqueueRequest (draft → wire body)", () => {
     expect(req.unique_ttl_seconds).toBe(60);
     expect(req.process_in_seconds).toBe(300);
     expect(req.reason).toBe("re-drain edited payload");
+  });
+});
+
+// ----------------------------------------------------------------------------
+// asynq 0.26 task headers (#44). The read side reports TaskInfo.headers, so a
+// clone must carry them through the draft and back onto the wire body.
+// ----------------------------------------------------------------------------
+
+const taskWithHeaders: TaskInfo = {
+  ...sourceTask,
+  headers: {
+    tenant: "acme",
+    traceparent: "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+  },
+};
+
+describe("headerRowsFromTask (clone prefill)", () => {
+  it("turns the header map into rows sorted by name", () => {
+    expect(headerRowsFromTask(taskWithHeaders)).toEqual([
+      { name: "tenant", value: "acme" },
+      {
+        name: "traceparent",
+        value: "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+      },
+    ]);
+  });
+
+  it("returns no rows when the task has no headers field", () => {
+    expect(headerRowsFromTask(sourceTask)).toEqual([]);
+  });
+
+  it("returns no rows for an empty header map", () => {
+    expect(headerRowsFromTask({ ...sourceTask, headers: {} })).toEqual([]);
+  });
+});
+
+describe("prefillFromTask headers", () => {
+  it("prefills the header rows from the source task", () => {
+    expect(prefillFromTask(taskWithHeaders).headers).toEqual([
+      { name: "tenant", value: "acme" },
+      {
+        name: "traceparent",
+        value: "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+      },
+    ]);
+  });
+
+  it("prefills an empty row list when the task carries no headers", () => {
+    expect(prefillFromTask(sourceTask).headers).toEqual([]);
+  });
+});
+
+describe("header validation (mirrors validateEnqueueHeaders in enqueue.go)", () => {
+  const withRows = (headers: Array<{ name: string; value: string }>) => ({
+    ...prefillFromTask(sourceTask),
+    headers,
+  });
+
+  it("accepts a well-formed row", () => {
+    expect(draftErrors(withRows([{ name: "tenant", value: "acme" }]))).toEqual({});
+  });
+
+  it("ignores a row the operator added and left blank", () => {
+    expect(draftErrors(withRows([{ name: "", value: "" }]))).toEqual({});
+  });
+
+  it("rejects a blank name once the row has a value", () => {
+    expect(draftErrors(withRows([{ name: "  ", value: "acme" }]))["header:0"]).toBe(
+      "a header name must not be blank"
+    );
+  });
+
+  it("rejects a name over the byte cap, counting UTF-8 bytes", () => {
+    // "é" is 2 bytes: 129 characters are 258 bytes, over the 256-byte cap.
+    const name = "é".repeat(129);
+    expect(draftErrors(withRows([{ name, value: "v" }]))["header:0"]).toBe(
+      `name exceeds ${HEADER_BOUNDS.maxNameBytes} bytes`
+    );
+    // One byte under the cap is accepted.
+    expect(draftErrors(withRows([{ name: "a".repeat(256), value: "v" }]))).toEqual({});
+  });
+
+  it("rejects a value over the byte cap", () => {
+    const value = "x".repeat(HEADER_BOUNDS.maxValueBytes + 1);
+    expect(draftErrors(withRows([{ name: "big", value }]))["header:0"]).toBe(
+      `value exceeds ${HEADER_BOUNDS.maxValueBytes} bytes`
+    );
+  });
+
+  it("rejects a duplicate name, which the wire map would silently collapse", () => {
+    const errs = draftErrors(
+      withRows([
+        { name: "tenant", value: "acme" },
+        { name: "tenant", value: "other" },
+      ])
+    );
+    expect(errs["header:0"]).toBeUndefined();
+    expect(errs["header:1"]).toBe("duplicate header name");
+  });
+
+  it("rejects more than the entry cap, reporting the count", () => {
+    const rows = Array.from({ length: HEADER_BOUNDS.maxEntries + 1 }, (_, i) => ({
+      name: `h${i}`,
+      value: "v",
+    }));
+    expect(draftErrors(withRows(rows)).headers).toBe(
+      `at most ${HEADER_BOUNDS.maxEntries} headers (got ${HEADER_BOUNDS.maxEntries + 1})`
+    );
+  });
+
+  it("accepts exactly the entry cap", () => {
+    const rows = Array.from({ length: HEADER_BOUNDS.maxEntries }, (_, i) => ({
+      name: `h${i}`,
+      value: "v",
+    }));
+    expect(draftErrors(withRows(rows))).toEqual({});
+  });
+});
+
+describe("headersFromRows", () => {
+  it("collapses rows into the wire map and trims the names", () => {
+    expect(
+      headersFromRows([
+        { name: " tenant ", value: "acme" },
+        { name: "empty-value", value: "" },
+      ])
+    ).toEqual({ tenant: "acme", "empty-value": "" });
+  });
+
+  it("returns undefined when every row is blank", () => {
+    expect(headersFromRows([{ name: "", value: "" }])).toBeUndefined();
+    expect(headersFromRows([])).toBeUndefined();
+  });
+});
+
+describe("buildEnqueueRequest headers", () => {
+  it("carries the header rows onto the wire body", () => {
+    const req = buildEnqueueRequest(prefillFromTask(taskWithHeaders));
+    expect(req.headers).toEqual({
+      tenant: "acme",
+      traceparent: "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+    });
+  });
+
+  it("omits the field when the draft has no live header row", () => {
+    const req = buildEnqueueRequest({
+      ...prefillFromTask(sourceTask),
+      headers: [{ name: "", value: "" }],
+    });
+    expect(req).not.toHaveProperty("headers");
   });
 });

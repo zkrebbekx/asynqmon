@@ -20,6 +20,7 @@ import (
 	"github.com/redis/go-redis/v9"
 
 	"github.com/zkrebbekx/asynqmon/internal/leasefence"
+	"github.com/zkrebbekx/asynqmon/internal/loglimit"
 	"github.com/zkrebbekx/asynqmon/internal/safego"
 )
 
@@ -247,8 +248,9 @@ type Engine struct {
 	lastCache   *ReadResult
 	lastAttnRep *AttentionReport
 
-	// errLog rate-limits repeated identical sweep-error lines.
-	errLog *errorLimiter
+	// errLog rate-limits repeated identical error lines. Sweep errors and
+	// the lease acquire/renew failures each use their own key.
+	errLog *loglimit.Limiter
 
 	// subs are sweep-completion listeners (the SSE fan-out). Buffered size-1
 	// channels signaled non-blockingly: a slow listener coalesces signals
@@ -370,7 +372,7 @@ func NewEngine(cfg Config) *Engine {
 		series: newSeriesSampler(cfg.RedisClient, cfg.SeriesQueueCeiling, seriesFlushCap),
 		base:   newBaselineRefresher(cfg.RedisClient, baselineCmdCap),
 		fence:  newSweeperFence(cfg.RedisClient),
-		errLog: newErrorLimiter(cfg.Now),
+		errLog: loglimit.New(cfg.Now),
 		subs:   make(map[chan struct{}]struct{}),
 	}
 }
@@ -534,12 +536,30 @@ func (e *Engine) leaseLoop(ctx context.Context) {
 	}
 }
 
+// Log keys and prefixes for the rate-limited lease failures. A Redis ACL
+// user without write permission never acquires the lease, so the acquire
+// fails on every tick forever: three roles at a 5-second tick printed about
+// 51,000 identical lines a day. The limiter keeps the first line verbatim,
+// then prints one line a minute, then one recovery line. The acquire and the
+// renewal use separate keys, so one failure never masks the other.
+const (
+	leaseAcquireLogKey    = "lease-acquire"
+	leaseAcquireLogPrefix = "asynqmon: stats: acquiring sweeper lease"
+	leaseRenewLogKey      = "lease-renew"
+	leaseRenewLogPrefix   = "asynqmon: stats: renewing sweeper lease"
+)
+
 func (e *Engine) leaseTick(ctx context.Context) {
 	if atomic.LoadInt32(&e.holding) == 1 {
 		ok, err := renewLease(ctx, e.fence, e.cfg.InstanceID, e.cfg.LeaseTTL)
+		if err == nil {
+			// The call reached Redis, so the renewal is healthy again. This
+			// clears the failure state and prints the recovery line once.
+			e.errLog.Report(e.logf, leaseRenewLogKey, leaseRenewLogPrefix, nil)
+		}
 		if err != nil || !ok {
 			if err != nil && ctx.Err() == nil {
-				e.logf("asynqmon: stats: renewing sweeper lease: %v", err)
+				e.errLog.Report(e.logf, leaseRenewLogKey, leaseRenewLogPrefix, err)
 			} else if !ok {
 				e.logf("asynqmon: stats: sweeper lease lost; standing by")
 			}
@@ -551,10 +571,13 @@ func (e *Engine) leaseTick(ctx context.Context) {
 	token, err := tryAcquireLease(ctx, e.fence, e.cfg.InstanceID, e.cfg.LeaseTTL)
 	if err != nil {
 		if ctx.Err() == nil {
-			e.logf("asynqmon: stats: acquiring sweeper lease: %v", err)
+			e.errLog.Report(e.logf, leaseAcquireLogKey, leaseAcquireLogPrefix, err)
 		}
 		return
 	}
+	// The acquire reached Redis. Token 0 only means another replica holds
+	// the lease, which is not a failure.
+	e.errLog.Report(e.logf, leaseAcquireLogKey, leaseAcquireLogPrefix, nil)
 	if token > 0 {
 		atomic.StoreInt64(&e.token, token)
 		atomic.StoreInt32(&e.holding, 1)
@@ -593,7 +616,7 @@ func (e *Engine) sweepLoop(ctx context.Context) {
 		// place with their honest (aging) RefreshedAt stamps. Identical
 		// errors are rate-limited (#36): one Redis incident used to print
 		// one line per subsystem per tick.
-		if msg, ok := e.errLog.observe("sweep", err); ok {
+		if msg, ok := e.errLog.Message("sweep", err); ok {
 			e.logf("asynqmon: stats: %s", msg)
 		}
 	}
@@ -897,7 +920,7 @@ func (e *Engine) sweep(ctx context.Context) error {
 	if err := e.writeSchedulerSnapshots(ctx, schedCmds, token); err != nil {
 		if errors.Is(err, ErrSuperseded) {
 			superseded = true
-		} else if msg, ok := e.errLog.observe("schedulers", err); ok {
+		} else if msg, ok := e.errLog.Message("schedulers", err); ok {
 			e.logf("asynqmon: stats: %s", msg)
 		}
 	} else {
@@ -918,7 +941,7 @@ func (e *Engine) sweep(ctx context.Context) error {
 	if serr != nil {
 		if errors.Is(serr, ErrSuperseded) {
 			superseded = true
-		} else if msg, ok := e.errLog.observe("series", serr); ok {
+		} else if msg, ok := e.errLog.Message("series", serr); ok {
 			e.logf("asynqmon: stats: %s", msg)
 		}
 	}
@@ -1349,71 +1372,4 @@ func (e *Engine) localStaleAfter() time.Duration {
 		d = 15 * time.Second
 	}
 	return d
-}
-
-// ----------------------------------------------------------------------------
-// Sweep-error log rate limiting (#36).
-// ----------------------------------------------------------------------------
-
-// errorLimiter collapses a repeating error into one line per minute. A Redis
-// incident used to print one line per subsystem per tick — 121 lines over 90s
-// in the reviewer's repro. The limiter logs the FIRST occurrence of a
-// message, then at most one line per minute while the same message repeats,
-// then one recovery line when the subsystem succeeds again.
-type errorLimiter struct {
-	mu sync.Mutex
-	// state per subsystem: the last message logged and when.
-	last    map[string]string
-	lastLog map[string]time.Time
-	count   map[string]int
-	clock   func() time.Time
-}
-
-// errorLogInterval is how often a repeating identical error is logged again.
-const errorLogInterval = time.Minute
-
-func newErrorLimiter(clock func() time.Time) *errorLimiter {
-	if clock == nil {
-		clock = time.Now
-	}
-	return &errorLimiter{
-		last:    make(map[string]string),
-		lastLog: make(map[string]time.Time),
-		count:   make(map[string]int),
-		clock:   clock,
-	}
-}
-
-// observe records one outcome of a subsystem and reports the line to log.
-// ok=false means "say nothing": either the subsystem is healthy and was
-// healthy before, or the identical error was logged less than
-// errorLogInterval ago.
-func (l *errorLimiter) observe(subsystem string, err error) (string, bool) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	now := l.clock()
-	if err == nil {
-		prev, had := l.last[subsystem]
-		if !had {
-			return "", false
-		}
-		n := l.count[subsystem]
-		delete(l.last, subsystem)
-		delete(l.lastLog, subsystem)
-		delete(l.count, subsystem)
-		return fmt.Sprintf("%s recovered after %d failures (last: %s)", subsystem, n, prev), true
-	}
-	msg := err.Error()
-	l.count[subsystem]++
-	if prev, had := l.last[subsystem]; had && prev == msg {
-		if now.Sub(l.lastLog[subsystem]) < errorLogInterval {
-			return "", false
-		}
-		l.lastLog[subsystem] = now
-		return fmt.Sprintf("%s failing: %s (%d times)", subsystem, msg, l.count[subsystem]), true
-	}
-	l.last[subsystem] = msg
-	l.lastLog[subsystem] = now
-	l.count[subsystem] = 1
-	return fmt.Sprintf("%s failed: %s", subsystem, msg), true
 }

@@ -10,6 +10,7 @@ import * as api from "../api";
 import { TaskInfo } from "../api";
 import {
   CloneDraft,
+  HEADER_BOUNDS,
   buildEnqueueRequest,
   draftErrors,
   payloadJsonState,
@@ -66,6 +67,26 @@ export default function CloneEnqueueModal({ open, sourceTask, onClose, onEnqueue
 
   const errs = useMemo(() => draftErrors(draft), [draft]);
   const jsonState = payloadJsonState(draft.payload);
+
+  // Header row editing. The draft holds an ordered row list, so editing by
+  // index keeps a half-typed or duplicate name on screen (see lib/enqueue.ts).
+  const setHeader = useCallback(
+    (index: number, field: "name" | "value", value: string) =>
+      setDraft((d) => ({
+        ...d,
+        headers: d.headers.map((row, i) => (i === index ? { ...row, [field]: value } : row)),
+      })),
+    []
+  );
+  const addHeader = useCallback(
+    () => setDraft((d) => ({ ...d, headers: [...d.headers, { name: "", value: "" }] })),
+    []
+  );
+  const removeHeader = useCallback(
+    (index: number) =>
+      setDraft((d) => ({ ...d, headers: d.headers.filter((_, i) => i !== index) })),
+    []
+  );
 
   const submit = async () => {
     if (busy || Object.keys(errs).length > 0) return;
@@ -221,10 +242,83 @@ export default function CloneEnqueueModal({ open, sourceTask, onClose, onEnqueue
             </div>
           </div>
 
+          {/* Task headers (asynq 0.26). Prefilled from the source task so a
+              clone keeps its trace context instead of silently dropping it. */}
+          <div>
+            <div className="mb-1 flex items-center justify-between">
+              <FieldLabel>headers</FieldLabel>
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={addHeader}
+                className="h-6 px-2 text-[10.5px]"
+              >
+                + add header
+              </Button>
+            </div>
+            {draft.headers.length === 0 ? (
+              <div className="text-[10.5px] text-[var(--fc-ink3)]">
+                no headers — the task is enqueued without any
+              </div>
+            ) : (
+              <div className="space-y-1">
+                {draft.headers.map((row, i) => (
+                  <div key={i}>
+                    <div className="flex items-center gap-2">
+                      <Input
+                        value={row.name}
+                        aria-label={`header ${i + 1} name`}
+                        placeholder="name"
+                        onChange={(e) => setHeader(i, "name", e.target.value)}
+                        className={cn(
+                          "h-8 w-[34%] font-mono text-xs",
+                          errs[`header:${i}`] && "border-[var(--fc-crit)]"
+                        )}
+                      />
+                      <Input
+                        value={row.value}
+                        aria-label={`header ${i + 1} value`}
+                        placeholder="value"
+                        onChange={(e) => setHeader(i, "value", e.target.value)}
+                        className={cn(
+                          "h-8 flex-1 font-mono text-xs",
+                          errs[`header:${i}`] && "border-[var(--fc-crit)]"
+                        )}
+                      />
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        aria-label={`remove header ${i + 1}`}
+                        onClick={() => removeHeader(i)}
+                        className="h-8 px-2 text-[var(--fc-ink3)] hover:text-[var(--fc-crit)]"
+                      >
+                        &times;
+                      </Button>
+                    </div>
+                    {errs[`header:${i}`] && (
+                      <div className="mt-0.5 text-[10.5px] text-[var(--fc-crit)]">
+                        {errs[`header:${i}`]}
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+            {errs.headers ? (
+              <div className="mt-0.5 text-[10.5px] text-[var(--fc-crit)]">{errs.headers}</div>
+            ) : (
+              <div className="mt-1 text-[10.5px] text-[var(--fc-ink3)]">
+                at most {HEADER_BOUNDS.maxEntries} headers; a name is at most{" "}
+                {HEADER_BOUNDS.maxNameBytes} bytes and a value at most{" "}
+                {HEADER_BOUNDS.maxValueBytes} bytes.
+              </div>
+            )}
+          </div>
+
           <div className="text-[10.5px] leading-relaxed text-[var(--fc-ink3)]">
             Prefilled from the source task where asynq stores the value (type, queue, payload,
-            retry, timeout). Retention, uniqueness and schedule are not recoverable from a task
-            record and start blank.
+            retry, timeout, headers). Retention, uniqueness and schedule are not recoverable from a
+            task record and start blank.
           </div>
 
           {error && (

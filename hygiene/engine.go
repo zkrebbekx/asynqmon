@@ -19,6 +19,7 @@ import (
 	"github.com/redis/go-redis/v9"
 
 	"github.com/zkrebbekx/asynqmon/internal/leasefence"
+	"github.com/zkrebbekx/asynqmon/internal/loglimit"
 	"github.com/zkrebbekx/asynqmon/internal/safego"
 	"github.com/zkrebbekx/asynqmon/stats"
 )
@@ -96,6 +97,10 @@ type Engine struct {
 
 	holding int32 // atomic; 1 while this replica holds the scheduler lease
 
+	// errLog rate-limits the repeated lease-failure lines (acquire and
+	// renewal, each under its own key).
+	errLog *loglimit.Limiter
+
 	// fence is the shared lease+fencing-token helper (§5.13, phase 12);
 	// token is minted at acquisition (atomic; 0 while not holding). The
 	// SCHEDULED report persist CASes on it; Run-now writes unfenced.
@@ -148,13 +153,14 @@ func NewEngine(cfg Config) *Engine {
 		hc = &http.Client{Timeout: webhookTimeout}
 	}
 	return &Engine{
-		cfg:   cfg,
-		rc:    cfg.RedisClient,
-		insp:  cfg.Inspector,
-		http:  hc,
-		now:   cfg.Now,
-		logf:  logf,
-		fence: newSchedulerFence(cfg.RedisClient),
+		cfg:    cfg,
+		rc:     cfg.RedisClient,
+		insp:   cfg.Inspector,
+		http:   hc,
+		now:    cfg.Now,
+		logf:   logf,
+		errLog: loglimit.New(cfg.Now),
+		fence:  newSchedulerFence(cfg.RedisClient),
 	}
 }
 
@@ -234,12 +240,30 @@ func (e *Engine) leaseLoop(ctx context.Context) {
 	}
 }
 
+// Log keys and prefixes for the rate-limited lease failures. A Redis ACL
+// user without write permission never acquires the lease, so the acquire
+// fails on every tick forever: three roles at a 5-second tick printed about
+// 51,000 identical lines a day. The limiter keeps the first line verbatim,
+// then prints one line a minute, then one recovery line. The acquire and the
+// renewal use separate keys, so one failure never masks the other.
+const (
+	leaseAcquireLogKey    = "lease-acquire"
+	leaseAcquireLogPrefix = "asynqmon: hygiene: acquiring scheduler lease"
+	leaseRenewLogKey      = "lease-renew"
+	leaseRenewLogPrefix   = "asynqmon: hygiene: renewing scheduler lease"
+)
+
 func (e *Engine) leaseTick(ctx context.Context) {
 	if atomic.LoadInt32(&e.holding) == 1 {
 		ok, err := e.fence.Renew(ctx, e.cfg.InstanceID, e.cfg.LeaseTTL)
+		if err == nil {
+			// The call reached Redis, so the renewal is healthy again. This
+			// clears the failure state and prints the recovery line once.
+			e.errLog.Report(e.logf, leaseRenewLogKey, leaseRenewLogPrefix, nil)
+		}
 		if err != nil || !ok {
 			if err != nil && ctx.Err() == nil {
-				e.logf("asynqmon: hygiene: renewing scheduler lease: %v", err)
+				e.errLog.Report(e.logf, leaseRenewLogKey, leaseRenewLogPrefix, err)
 			} else if !ok {
 				e.logf("asynqmon: hygiene: scheduler lease lost; standing by")
 			}
@@ -251,10 +275,13 @@ func (e *Engine) leaseTick(ctx context.Context) {
 	token, err := e.fence.Acquire(ctx, e.cfg.InstanceID, e.cfg.LeaseTTL)
 	if err != nil {
 		if ctx.Err() == nil {
-			e.logf("asynqmon: hygiene: acquiring scheduler lease: %v", err)
+			e.errLog.Report(e.logf, leaseAcquireLogKey, leaseAcquireLogPrefix, err)
 		}
 		return
 	}
+	// The acquire reached Redis. Token 0 only means another replica holds
+	// the lease, which is not a failure.
+	e.errLog.Report(e.logf, leaseAcquireLogKey, leaseAcquireLogPrefix, nil)
 	if token > 0 {
 		atomic.StoreInt64(&e.token, token)
 		atomic.StoreInt32(&e.holding, 1)
