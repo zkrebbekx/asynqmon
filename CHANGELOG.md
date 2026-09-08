@@ -129,11 +129,18 @@ guidance for the move is in [docs/UPGRADING.md](docs/UPGRADING.md).
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-09-08
+
 Production-readiness review (tracking issue #57, child issues #27-#56). See
 [docs/UPGRADING.md](docs/UPGRADING.md) before you move a deployment from
 upstream 0.7.2, and
 [Breaking and API changes since upstream 0.7.2](#breaking-and-api-changes-since-upstream-072)
 for the API differences.
+
+This is a minor release, not a patch, because the module path changed to
+`github.com/zkrebbekx/asynqmon`. An embedder who used a `replace` directive
+against the upstream path must import the new path instead. The binary and
+the container image need no import change.
 
 ### Added
 
