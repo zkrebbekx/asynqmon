@@ -151,7 +151,11 @@ function parseClauses(q: string): Clause[] {
   for (const token of tokens) {
     const m = CLAUSE_RE.exec(token);
     if (!m) continue; // bare words (e.g. `past_due`) carry no console mapping
-    clauses.push({ key: m[1], op: m[2], value: m[3].replace(/^"|"$/g, "") });
+    // The three groups are mandatory in CLAUSE_RE, so a match always fills
+    // them; the check keeps the types honest.
+    const [, key, op, value] = m;
+    if (key === undefined || op === undefined || value === undefined) continue;
+    clauses.push({ key, op, value: value.replace(/^"|"$/g, "") });
   }
   return clauses;
 }
@@ -184,9 +188,10 @@ export function attentionTarget(suggestedQuery: string): AttentionTarget {
     const queueClauses = clauses.filter((c) => c.key === "queue" && c.op === "=");
     const extras = clauses.filter((c) => c.key !== "queue" && c.key !== "state");
     const representable = new Set(["pending_age", "next_run", "group"]);
+    const queueClause = queueClauses.length === 1 ? queueClauses[0] : undefined;
     if (
-      queueClauses.length === 1 &&
-      queueClauses[0].value !== "" &&
+      queueClause !== undefined &&
+      queueClause.value !== "" &&
       (FOCUS_STATES as readonly string[]).includes(stateClause.value) &&
       extras.every((c) => representable.has(c.key))
     ) {
@@ -194,7 +199,7 @@ export function attentionTarget(suggestedQuery: string): AttentionTarget {
       params.set("focus", stateClause.value);
       return {
         kind: "workspace",
-        queue: queueClauses[0].value,
+        queue: queueClause.value,
         search: `?${params.toString()}`,
       };
     }

@@ -203,7 +203,7 @@ export default function TasksGlobalView() {
   const [typeaheadOpen, setTypeaheadOpen] = useState(false);
   const queuePrefix = useMemo(() => {
     const m = /(?:^|\s)queue=(\S*)$/.exec(searchInput);
-    return m ? m[1] : null;
+    return m?.[1] ?? null;
   }, [searchInput]);
   const queueSuggestions = useMemo(() => {
     if (queuePrefix === null) return [];
@@ -658,7 +658,7 @@ export default function TasksGlobalView() {
   };
 
   // Which bulk actions are valid for the current state.
-  const bulkActions = bulkCaps[view.state].map((action) => ({
+  const bulkActions = (bulkCaps[view.state] ?? []).map((action) => ({
     action,
     label: action.charAt(0).toUpperCase() + action.slice(1),
   }));
@@ -685,6 +685,8 @@ export default function TasksGlobalView() {
     for (let i = 0; i < a.length; i++) {
       const x = a[i];
       const y = b[i];
+      // Both arrays have the same length here, so both rows exist.
+      if (x === undefined || y === undefined) return false;
       if (
         x.id !== y.id ||
         x.queue !== y.queue ||
@@ -738,7 +740,10 @@ export default function TasksGlobalView() {
     const b = Math.max(selectAnchor.current, idx);
     setSelected((prev) => {
       const next = new Set(prev);
-      for (let i = a; i <= b && i < rows.length; i++) next.add(rowKey(rows[i]));
+      for (let i = a; i <= b && i < rows.length; i++) {
+        const row = rows[i];
+        if (row !== undefined) next.add(rowKey(row));
+      }
       return next;
     });
   };

@@ -377,8 +377,12 @@ export default function QueuesDirectoryView() {
   const dirRowsEqual = useCallback((a: FleetQueueRow[], b: FleetQueueRow[]) => {
     if (a.length !== b.length) return false;
     for (let i = 0; i < a.length; i++) {
-      const { refreshed_at: _x, ...x } = a[i];
-      const { refreshed_at: _y, ...y } = b[i];
+      const rowA = a[i];
+      const rowB = b[i];
+      // Both arrays have the same length here, so both rows exist.
+      if (rowA === undefined || rowB === undefined) return false;
+      const { refreshed_at: _x, ...x } = rowA;
+      const { refreshed_at: _y, ...y } = rowB;
       if (JSON.stringify(x) !== JSON.stringify(y)) return false;
     }
     return true;
