@@ -84,8 +84,8 @@ export function filterSchedulerRows(rows: SchedulerRow[], filter: string): Sched
 // handled explicitly so default-queue entries deep-link instead of dropping.
 export function queueFromOptions(options: string[] | undefined | null): string {
   for (const o of options ?? []) {
-    const m = o.match(/^Queue\("?([^")]+)"?\)$/);
-    if (m) return m[1];
+    const name = o.match(/^Queue\("?([^")]+)"?\)$/)?.[1];
+    if (name !== undefined) return name;
   }
   return "default";
 }
@@ -100,9 +100,16 @@ export function parseGoDuration(s: string): number | null {
   const re = /(\d+(?:\.\d+)?)(ms|h|m|s)/g;
   let total = 0;
   let matchedLen = 0;
-  const unit: Record<string, number> = { h: 3600, m: 60, s: 1, ms: 0.001 };
+  const unit: Record<string, number | undefined> = { h: 3600, m: 60, s: 1, ms: 0.001 };
   for (const m of trimmed.matchAll(re)) {
-    total += parseFloat(m[1]) * unit[m[2]];
+    const amount = m[1];
+    const suffix = m[2];
+    // The regex matches only the four units in `unit`, so both groups and
+    // the lookup always resolve. The checks keep the types honest.
+    if (amount === undefined || suffix === undefined) return null;
+    const secondsPerUnit = unit[suffix];
+    if (secondsPerUnit === undefined) return null;
+    total += parseFloat(amount) * secondsPerUnit;
     matchedLen += m[0].length;
   }
   if (matchedLen !== trimmed.length) return null; // leftovers = not a duration
@@ -113,8 +120,8 @@ export function parseGoDuration(s: string): number | null {
 // 0 when absent (asynq's default: completions are deleted immediately).
 export function retentionSecondsFromOptions(options: string[] | undefined | null): number {
   for (const o of options ?? []) {
-    const m = o.match(/^Retention\(([^)]+)\)$/);
-    if (m) return parseGoDuration(m[1]) ?? 0;
+    const spec = o.match(/^Retention\(([^)]+)\)$/)?.[1];
+    if (spec !== undefined) return parseGoDuration(spec) ?? 0;
   }
   return 0;
 }

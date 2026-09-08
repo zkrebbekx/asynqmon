@@ -203,12 +203,12 @@ export function retryFireWithin(
   horizonSeconds: number
 ): number {
   if (!hist || hist.bucket_seconds <= 0) return 0;
-  const n = Math.min(
-    hist.buckets.length,
-    Math.ceil(horizonSeconds / hist.bucket_seconds)
+  const n = Math.max(
+    0,
+    Math.min(hist.buckets.length, Math.ceil(horizonSeconds / hist.bucket_seconds))
   );
   let sum = hist.past_due;
-  for (let i = 0; i < n; i++) sum += hist.buckets[i];
+  for (const bucket of hist.buckets.slice(0, n)) sum += bucket;
   return sum;
 }
 
@@ -497,14 +497,16 @@ export interface WaitBucket {
 // bucketWaitsMs folds sampled waits into the fixed buckets. Negative or
 // non-finite samples are dropped (never guessed into a bucket).
 export function bucketWaitsMs(waitsMs: number[]): WaitBucket[] {
-  const counts = new Array(WAIT_BUCKET_BOUNDS_MS.length + 1).fill(0);
+  // One counter per label; WAIT_BUCKET_LABELS has one more entry than
+  // WAIT_BUCKET_BOUNDS_MS (the overflow bucket).
+  const counts: number[] = WAIT_BUCKET_LABELS.map(() => 0);
   for (const w of waitsMs) {
     if (!Number.isFinite(w) || w < 0) continue;
-    let i = WAIT_BUCKET_BOUNDS_MS.findIndex((b) => w < b);
-    if (i === -1) i = counts.length - 1;
-    counts[i]++;
+    const found = WAIT_BUCKET_BOUNDS_MS.findIndex((b) => w < b);
+    const i = found === -1 ? counts.length - 1 : found;
+    counts[i] = (counts[i] ?? 0) + 1;
   }
-  return counts.map((count, i) => ({ label: WAIT_BUCKET_LABELS[i], count }));
+  return WAIT_BUCKET_LABELS.map((label, i) => ({ label, count: counts[i] ?? 0 }));
 }
 
 // pendingWaitView: render model for the sampled pending-wait histogram.

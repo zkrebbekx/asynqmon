@@ -82,7 +82,8 @@ export default function WorkspaceHealthStrip({
   const [consumersOpen, setConsumersOpen] = useState(false);
 
   const count = (state: string): number | null =>
-    counts?.[state] ?? (fleetRow ? (fleetRow as unknown as Record<string, number>)[state] : null);
+    counts?.[state] ??
+    (fleetRow ? ((fleetRow as unknown as Record<string, number>)[state] ?? null) : null);
 
   const oldestMs = fleetRow?.oldest_pending_age_ms ?? null;
   const tone = ageTone(oldestMs);

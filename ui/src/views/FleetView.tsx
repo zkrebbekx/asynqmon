@@ -85,6 +85,8 @@ function useFleetSeries(findings: AttentionFinding[] | undefined) {
     const specs: SeriesSpec[] = [...KPI_SPECS];
     for (const ref of findingKey === "" ? [] : findingKey.split(",")) {
       const [scope, metric] = ref.split("|");
+      // findingKey joins "<scope>|<metric>" pairs, so both halves exist.
+      if (scope === undefined || metric === undefined) continue;
       specs.push({ scope, metric, window: "3h", points: SPARK_POINTS });
     }
     try {
@@ -395,7 +397,7 @@ function FailurePulse({
                 }
               />
               <div className="mt-1 flex justify-between text-[10px] text-[var(--fc-ink3)]">
-                <span>{pulse.points.length > 0 ? hourFmt(pulse.points[0].t) : ""}</span>
+                <span>{pulse.points[0] ? hourFmt(pulse.points[0].t) : ""}</span>
                 <span>
                   {markers.length > 0 &&
                     `${markers.length} deploy marker${markers.length > 1 ? "s" : ""} · `}

@@ -94,13 +94,15 @@ function areaPaths(pts: (XY | null)[], baselineY: number): string[] {
   const paths: string[] = [];
   let seg: XY[] = [];
   const flush = () => {
-    if (seg.length < 2) {
+    const first = seg[0];
+    const last = seg[seg.length - 1];
+    if (first === undefined || last === undefined || seg.length < 2) {
       seg = [];
       return;
     }
-    let d = `M${seg[0].x.toFixed(2)} ${baselineY.toFixed(2)}`;
+    let d = `M${first.x.toFixed(2)} ${baselineY.toFixed(2)}`;
     for (const p of seg) d += `L${p.x.toFixed(2)} ${p.y.toFixed(2)}`;
-    d += `L${seg[seg.length - 1].x.toFixed(2)} ${baselineY.toFixed(2)}Z`;
+    d += `L${last.x.toFixed(2)} ${baselineY.toFixed(2)}Z`;
     paths.push(d);
     seg = [];
   };
@@ -236,8 +238,8 @@ export function RingBars({
   let max = 1;
   for (const p of points) if (p.v !== null && p.v > max) max = p.v;
 
-  const startSec = points.length > 0 ? points[0].t : 0;
-  const endSec = points.length > 0 ? points[points.length - 1].t : 1;
+  const startSec = points[0]?.t ?? 0;
+  const endSec = points[points.length - 1]?.t ?? 1;
 
   return (
     <svg
@@ -350,9 +352,13 @@ export function BurnDown({
 
   // Domain: observed samples plus the projected zero crossing when draining.
   const samples = points.filter((p) => p.v !== null);
-  const t0 = samples[0].t;
-  const tLast = samples[samples.length - 1].t;
-  const vLast = samples[samples.length - 1].v as number;
+  const firstSample = samples[0];
+  const lastSample = samples[samples.length - 1];
+  // hasAnySample() above proves at least one non-null point exists.
+  if (firstSample === undefined || lastSample === undefined) return null;
+  const t0 = firstSample.t;
+  const tLast = lastSample.t;
+  const vLast = lastSample.v as number;
   const projecting = etaMinutes !== null && etaMinutes > 0 && slopePerMin !== null && slopePerMin < 0;
   const tEnd = projecting ? tLast + etaMinutes * 60 : tLast;
   const spanT = Math.max(tEnd - t0, 1);
