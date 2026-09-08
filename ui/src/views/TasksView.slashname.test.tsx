@@ -1,7 +1,11 @@
-// Queue Workspace × an unaddressable queue name (#49). The API addresses a
-// queue with one path segment, so a name that contains "/" reaches no route,
-// not even escaped as "%2F". The workspace says so and disables every
-// mutating control instead of sending a request to a different queue.
+// Queue Workspace × a queue name that contains "/". asynq puts no
+// restriction on a queue name, so a producer may create "tenant/acme". The
+// server matches on the raw path (mux.Router.UseEncodedPath), so such a
+// queue is fully addressable: the workspace must keep every mutating
+// control and must show no notice.
+//
+// This file replaces TasksView.unaddressable.test.tsx, which asserted the
+// old stopgap (notice shown, controls disabled).
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, waitFor } from "@testing-library/react";
@@ -12,14 +16,11 @@ import * as api from "../api";
 import * as apiFleet from "../api-fleet";
 import TasksView from "./TasksView";
 
-// Mock every api fetcher, but keep the real isAddressableName: it is the
-// pure rule under test, and an automocked version returns undefined, which
-// would report every name as unaddressable.
 vi.mock("../api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../api")>();
   const mocked: Record<string, unknown> = { ...actual };
   for (const [name, value] of Object.entries(actual)) {
-    if (typeof value === "function" && name !== "isAddressableName") {
+    if (typeof value === "function") {
       mocked[name] = vi.fn();
     }
   }
@@ -66,25 +67,22 @@ beforeEach(() => {
   mockApi();
 });
 
-describe("Queue Workspace × unaddressable queue name (#49)", () => {
-  it("shows the notice and hides pause/resume/delete for a name with a slash", async () => {
-    renderWorkspace("team/billing");
-    const notice = await screen.findByRole("status");
-    expect(notice).toHaveTextContent("team/billing");
-    expect(notice).toHaveTextContent(
-      "cannot be addressed by the API; actions are disabled"
-    );
-    expect(screen.queryByRole("button", { name: /pause/i })).toBeNull();
-    expect(screen.queryByRole("button", { name: /resume/i })).toBeNull();
-    expect(screen.queryByRole("button", { name: /delete/i })).toBeNull();
+describe("Queue Workspace × a queue name that contains a slash", () => {
+  it("passes the decoded name to the API and keeps pause/resume", async () => {
+    renderWorkspace("tenant/acme");
+    await waitFor(() => expect(api.taskStateCounts).toHaveBeenCalledWith("tenant/acme"));
+    expect(screen.queryByRole("button", { name: /pause|resume/i })).not.toBeNull();
   });
 
-  it("keeps the controls and shows no notice for an addressable name", async () => {
-    renderWorkspace("critical#x");
-    await waitFor(() => expect(api.taskStateCounts).toHaveBeenCalledWith("critical#x"));
-    expect(screen.queryByRole("status")).toBeNull();
-    expect(
-      screen.queryByRole("button", { name: /pause|resume/i })
-    ).not.toBeNull();
+  it("shows no unaddressable notice", async () => {
+    renderWorkspace("tenant/acme");
+    await waitFor(() => expect(api.taskStateCounts).toHaveBeenCalledWith("tenant/acme"));
+    expect(screen.queryByText(/cannot be addressed by the API/i)).toBeNull();
+  });
+
+  it("keeps the controls for a name with '#', '?' and '%'", async () => {
+    renderWorkspace("a#b?c%d");
+    await waitFor(() => expect(api.taskStateCounts).toHaveBeenCalledWith("a#b?c%d"));
+    expect(screen.queryByRole("button", { name: /pause|resume/i })).not.toBeNull();
   });
 });

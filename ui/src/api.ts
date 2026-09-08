@@ -10,19 +10,12 @@ export const http = axios.create({ timeout: 15_000 });
 // seg escapes one URL path segment. Queue, group and task names are
 // producer-controlled; unescaped, "a#b" is cut at "#" by the URL parser and
 // "a?x" starts a query string, so a request lands on a different queue.
+//
+// encodeURIComponent also escapes "/" as "%2F", which the API needs: asynq
+// allows a queue name such as "tenant/acme". The server matches on the raw
+// path (mux.Router.UseEncodedPath), so "%2F" stays inside one path segment
+// and the server decodes the variable once before the handler reads it.
 export const seg = encodeURIComponent;
-
-// isAddressableName reports whether a queue or group name fits one path
-// segment of the API. The server matches "/queues/{qname}" on the decoded
-// path, so a name that contains "/" never matches a route, not even when
-// escaped as "%2F". Callers show a notice and disable the mutating actions
-// for such a name.
-export function isAddressableName(name: string): boolean {
-  return !name.includes("/");
-}
-
-export const UNADDRESSABLE_NAME_NOTICE =
-  "This queue name contains '/' and cannot be addressed by the API; actions are disabled.";
 
 // In production build, API server is on listening on the same port as
 // the static file server.

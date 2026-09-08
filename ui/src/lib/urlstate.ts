@@ -266,9 +266,7 @@ export interface PeekTarget {
 
 // The peek param is `<queue>/<taskid>`. Task IDs are UUIDs and never contain
 // "/", so splitting on the last slash is safe even for queue names that
-// themselves contain slashes. Note: the parse is exact, but the API cannot
-// address a queue whose name contains "/" (api.ts isAddressableName), so the
-// drawer's fetch for such a queue fails.
+// themselves contain slashes.
 export function parsePeek(raw: string | null): PeekTarget | null {
   if (!raw) return null;
   const i = raw.lastIndexOf("/");

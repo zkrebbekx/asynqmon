@@ -83,12 +83,41 @@ describe("api path-segment encoding (#49)", () => {
   });
 });
 
-describe("isAddressableName", () => {
-  it("accepts every name without a slash", () => {
-    expect(api.isAddressableName("a#b?c%d")).toBe(true);
-    expect(api.isAddressableName("critical")).toBe(true);
+// The server matches on the raw path (mux.Router.UseEncodedPath), so a queue
+// name that contains "/" is addressable: the client must send "%2F" and must
+// never send a bare "/".
+describe("a queue name that contains a slash", () => {
+  const SLASH = "tenant/acme";
+  const SLASH_ENC = "tenant%2Facme";
+
+  beforeEach(() => {
+    window.ROOT_PATH = "";
+    httpSpy.mockClear();
   });
-  it("rejects a name that contains a slash", () => {
-    expect(api.isAddressableName("team/billing")).toBe(false);
+
+  it("keeps the name in one path segment on the read routes", async () => {
+    await api.getQueue(SLASH);
+    expect(lastUrl()).toBe(`${base()}/queues/${SLASH_ENC}`);
+    await api.listPendingTasks(SLASH, { page: 1, size: 20 });
+    expect(lastUrl()).toBe(`${base()}/queues/${SLASH_ENC}/pending_tasks?page=1&size=20`);
+  });
+
+  it("keeps the name in one path segment on the mutate routes", async () => {
+    await api.pauseQueue(SLASH);
+    expect(lastUrl()).toBe(`${base()}/queues/${SLASH_ENC}:pause`);
+    await api.resumeQueue(SLASH);
+    expect(lastUrl()).toBe(`${base()}/queues/${SLASH_ENC}:resume`);
+    await api.archivePendingTask(SLASH, "t1");
+    expect(lastUrl()).toBe(`${base()}/queues/${SLASH_ENC}/pending_tasks/t1:archive`);
+    await api.batchDeletePendingTasks(SLASH, ["t1", "t2"]);
+    expect(lastUrl()).toBe(`${base()}/queues/${SLASH_ENC}/pending_tasks:batch_delete`);
+    await api.deleteQueue(SLASH);
+    expect(lastUrl()).toBe(`${base()}/queues/${SLASH_ENC}`);
+  });
+
+  it("never emits a bare slash inside the queue segment", async () => {
+    await api.getQueue(SLASH);
+    const seg = lastUrl().slice(`${base()}/queues/`.length);
+    expect(seg.includes("/")).toBe(false);
   });
 });
