@@ -19,6 +19,7 @@ import (
 	"github.com/redis/go-redis/v9"
 
 	"github.com/zkrebbekx/asynqmon/internal/leasefence"
+	"github.com/zkrebbekx/asynqmon/internal/loglimit"
 	"github.com/zkrebbekx/asynqmon/internal/safego"
 )
 
@@ -125,6 +126,10 @@ type Indexer struct {
 
 	kick    chan struct{}
 	holding int32
+
+	// errLog rate-limits the repeated lease-failure lines (acquire and
+	// renewal, each under its own key).
+	errLog *loglimit.Limiter
 
 	// fence is the shared lease+fencing-token helper (§5.13, phase 12);
 	// token is the fencing token minted at acquisition (atomic; 0 while not
@@ -257,6 +262,7 @@ func NewIndexer(cfg Config) *Indexer {
 		rc:        cfg.RedisClient,
 		insp:      cfg.Inspector,
 		logf:      logf,
+		errLog:    loglimit.New(cfg.Now),
 		kick:      make(chan struct{}, 1),
 		fence:     newIndexerFence(cfg.RedisClient),
 		failedByQ: make(map[string]int64),
@@ -339,12 +345,30 @@ func (ix *Indexer) leaseLoop(ctx context.Context) {
 	}
 }
 
+// Log keys and prefixes for the rate-limited lease failures. A Redis ACL
+// user without write permission never acquires the lease, so the acquire
+// fails on every tick forever: three roles at a 5-second tick printed about
+// 51,000 identical lines a day. The limiter keeps the first line verbatim,
+// then prints one line a minute, then one recovery line. The acquire and the
+// renewal use separate keys, so one failure never masks the other.
+const (
+	leaseAcquireLogKey    = "lease-acquire"
+	leaseAcquireLogPrefix = "asynqmon: errsig: acquiring indexer lease"
+	leaseRenewLogKey      = "lease-renew"
+	leaseRenewLogPrefix   = "asynqmon: errsig: renewing indexer lease"
+)
+
 func (ix *Indexer) leaseTick(ctx context.Context) {
 	if atomic.LoadInt32(&ix.holding) == 1 {
 		ok, err := ix.fence.Renew(ctx, ix.cfg.InstanceID, ix.cfg.LeaseTTL)
+		if err == nil {
+			// The call reached Redis, so the renewal is healthy again. This
+			// clears the failure state and prints the recovery line once.
+			ix.errLog.Report(ix.logf, leaseRenewLogKey, leaseRenewLogPrefix, nil)
+		}
 		if err != nil || !ok {
 			if err != nil && ctx.Err() == nil {
-				ix.logf("asynqmon: errsig: renewing indexer lease: %v", err)
+				ix.errLog.Report(ix.logf, leaseRenewLogKey, leaseRenewLogPrefix, err)
 			} else if !ok {
 				ix.logf("asynqmon: errsig: indexer lease lost; standing by")
 			}
@@ -356,10 +380,13 @@ func (ix *Indexer) leaseTick(ctx context.Context) {
 	token, err := ix.fence.Acquire(ctx, ix.cfg.InstanceID, ix.cfg.LeaseTTL)
 	if err != nil {
 		if ctx.Err() == nil {
-			ix.logf("asynqmon: errsig: acquiring indexer lease: %v", err)
+			ix.errLog.Report(ix.logf, leaseAcquireLogKey, leaseAcquireLogPrefix, err)
 		}
 		return
 	}
+	// The acquire reached Redis. Token 0 only means another replica holds
+	// the lease, which is not a failure.
+	ix.errLog.Report(ix.logf, leaseAcquireLogKey, leaseAcquireLogPrefix, nil)
 	if token > 0 {
 		atomic.StoreInt64(&ix.token, token)
 		atomic.StoreInt32(&ix.holding, 1)

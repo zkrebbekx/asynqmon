@@ -3,7 +3,6 @@ package stats
 import (
 	"context"
 	"errors"
-	"fmt"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -193,64 +192,6 @@ func TestStopFlushesSeries(t *testing.T) {
 			h := decodeSeriesHeader([]byte(raw))
 			So(h.ok, ShouldBeTrue)
 			So(decodeSeriesPoint([]byte(raw), h, hotRing, h.last), ShouldNotBeNil)
-		})
-	})
-}
-
-func TestErrorLimiter(t *testing.T) {
-	Convey("Given the sweep-error log limiter", t, func() {
-		now := time.Date(2026, 9, 7, 12, 0, 0, 0, time.UTC)
-		l := newErrorLimiter(func() time.Time { return now })
-		boom := errors.New("OOM command not allowed")
-
-		Convey("When the same error repeats within a minute", func() {
-			first, ok1 := l.observe("sweep", boom)
-			now = now.Add(30 * time.Second)
-			_, ok2 := l.observe("sweep", boom)
-			now = now.Add(1 * time.Second)
-			_, ok3 := l.observe("sweep", boom)
-
-			Convey("Then only the first occurrence is logged", func() {
-				So(ok1, ShouldBeTrue)
-				So(first, ShouldContainSubstring, "OOM command not allowed")
-				So(ok2, ShouldBeFalse)
-				So(ok3, ShouldBeFalse)
-			})
-
-			Convey("And the next line comes after a minute, with the count", func() {
-				now = now.Add(time.Minute)
-				msg, ok := l.observe("sweep", boom)
-				So(ok, ShouldBeTrue)
-				So(msg, ShouldContainSubstring, "4 times")
-			})
-
-			Convey("And a recovery is logged exactly once", func() {
-				msg, ok := l.observe("sweep", nil)
-				So(ok, ShouldBeTrue)
-				So(msg, ShouldContainSubstring, "recovered")
-				_, ok = l.observe("sweep", nil)
-				So(ok, ShouldBeFalse)
-			})
-		})
-
-		Convey("When a different error arrives", func() {
-			l.observe("sweep", boom)
-			msg, ok := l.observe("sweep", fmt.Errorf("connection refused"))
-
-			Convey("Then it is logged immediately, not rate-limited", func() {
-				So(ok, ShouldBeTrue)
-				So(msg, ShouldContainSubstring, "connection refused")
-			})
-		})
-
-		Convey("When two subsystems fail", func() {
-			_, ok1 := l.observe("series", boom)
-			_, ok2 := l.observe("schedulers", boom)
-
-			Convey("Then each subsystem gets its own first line", func() {
-				So(ok1, ShouldBeTrue)
-				So(ok2, ShouldBeTrue)
-			})
 		})
 	})
 }
