@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -444,7 +445,22 @@ func (h *HTTPHandler) RootPath() string {
 var staticContents embed.FS
 
 func muxRouter(opts Options, rc redis.UniversalClient, inspector *asynq.Inspector, statsEngine *stats.Engine, eventsBroker *fleetEventsBroker) *mux.Router {
-	router := mux.NewRouter().PathPrefix(opts.RootPath).Subrouter()
+	// UseEncodedPath makes mux match every route against the RAW request
+	// path instead of the decoded one. asynq puts no restriction on a queue
+	// name, so a producer may create "tenant/acme". The console sends that
+	// name percent-encoded ("/api/queues/tenant%2Facme"); on the decoded
+	// path the "%2F" becomes a real "/" and the single-segment route
+	// "/queues/{qname}" never matches. On the raw path it matches, and
+	// decodePathVars below turns the variable back into "tenant/acme".
+	//
+	// UseEncodedPath must be called BEFORE any route or subrouter exists:
+	// mux copies the router configuration into each route at creation time.
+	router := mux.NewRouter().UseEncodedPath().PathPrefix(opts.RootPath).Subrouter()
+
+	// decodePathVars is the ONE place that decodes a path variable. Register
+	// it on the outermost router so it runs before every handler, including
+	// the markViewed wrapper below, which reads {qname} itself.
+	router.Use(decodePathVars)
 
 	var payloadFmt PayloadFormatter = DefaultPayloadFormatter
 	if opts.PayloadFormatter != nil {
@@ -885,6 +901,40 @@ func (s *statusRecorder) is2xx() bool {
 		code = http.StatusOK
 	}
 	return code >= 200 && code < 300
+}
+
+// decodePathVars turns the percent-encoded path variables that
+// mux.Router.UseEncodedPath hands to a handler back into their literal
+// values.
+//
+// The router matches on the raw path so that a name containing "/" fits one
+// path segment (see muxRouter). The cost is that mux.Vars then returns the
+// ENCODED text of every variable: {qname}, {gname}, {task_id}, {job_id},
+// {view_id}, {stable_key}, {entry_id}, {sig} and {kind}. This middleware
+// decodes each one exactly once, in place, before any handler runs, so no
+// handler calls url.PathUnescape itself and no value is decoded twice.
+//
+// The console percent-encodes every path segment already (ui/src/api.ts
+// "seg"), so this middleware is the exact inverse of the client.
+//
+// mux.Vars returns the map that mux stores in the request context, and mux
+// builds a fresh map per request, so writing to it here is safe.
+func decodePathVars(h http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		vars := mux.Vars(r)
+		for name, encoded := range vars {
+			decoded, err := url.PathUnescape(encoded)
+			if err != nil {
+				// net/http rejects a malformed escape before the router
+				// sees it, so this is defence in depth, not a live path.
+				writeErrorMsg(w, http.StatusBadRequest,
+					fmt.Sprintf("invalid percent-encoding in path segment %q", name))
+				return
+			}
+			vars[name] = decoded
+		}
+		h.ServeHTTP(w, r)
+	})
 }
 
 // restrictToReadOnly is a middleware function to restrict users to perform only GET requests.
