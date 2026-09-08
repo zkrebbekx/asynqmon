@@ -367,6 +367,83 @@ func TestEnqueueTaskHeaders(t *testing.T) {
 	})
 }
 
+// TestTaskDetailReportsHeaders pins the READ side of the asynq 0.26 header
+// map: GET /api/queues/{qname}/tasks/{task_id} must report the headers the
+// task carries, and it must omit the field for a task without headers. The
+// clone-and-edit modal reads this endpoint, so a missing field silently
+// drops the source task's headers.
+func TestTaskDetailReportsHeaders(t *testing.T) {
+	env := newEnqueueTestEnv(t)
+	router := env.newRouter(Options{EnableEnqueue: true})
+
+	headers := map[string]string{
+		"traceparent": "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+		"tenant":      "acme",
+	}
+	var created taskInfo
+	wc := doJSON(t, router, "POST", enqueueURL("emails"), map[string]interface{}{
+		"type": "email:send", "payload": `{"to":"ops@example.com"}`, "headers": headers,
+	}, &created)
+
+	var plain taskInfo
+	wp := doJSON(t, router, "POST", enqueueURL("emails"), map[string]interface{}{
+		"type": "email:digest", "payload": "{}",
+	}, &plain)
+
+	// Read both tasks back through the detail endpoint the drawer uses.
+	var withHeaders taskInfo
+	wgh := doJSON(t, router, "GET", "/api/queues/emails/tasks/"+created.ID, nil, &withHeaders)
+
+	var withoutHeaders taskInfo
+	wgp := doJSON(t, router, "GET", "/api/queues/emails/tasks/"+plain.ID, nil, &withoutHeaders)
+	plainBody := wgp.Body.String()
+
+	// The pending list shares the baseTask shape, so it carries them too.
+	var pending struct {
+		Tasks []struct {
+			ID      string            `json:"id"`
+			Headers map[string]string `json:"headers"`
+		} `json:"tasks"`
+	}
+	wl := doJSON(t, router, "GET", "/api/queues/emails/pending_tasks", nil, &pending)
+	listed := map[string]map[string]string{}
+	for _, p := range pending.Tasks {
+		listed[p.ID] = p.Headers
+	}
+
+	Convey("Given a task enqueued with headers and one enqueued without (#44 read side)", t, func() {
+		So(wc.Code, ShouldEqual, http.StatusCreated)
+		So(wp.Code, ShouldEqual, http.StatusCreated)
+
+		Convey("When the enqueue response is read", func() {
+			Convey("Then it already echoes the headers back", func() {
+				So(created.Headers, ShouldResemble, headers)
+			})
+		})
+		Convey("When the task detail endpoint is called for the task with headers", func() {
+			Convey("Then it answers 200 and reports every header", func() {
+				So(wgh.Code, ShouldEqual, http.StatusOK)
+				So(withHeaders.ID, ShouldEqual, created.ID)
+				So(withHeaders.Headers, ShouldResemble, headers)
+			})
+		})
+		Convey("When the task detail endpoint is called for the task without headers", func() {
+			Convey("Then the JSON body omits the headers field entirely", func() {
+				So(wgp.Code, ShouldEqual, http.StatusOK)
+				So(withoutHeaders.Headers, ShouldBeEmpty)
+				So(plainBody, ShouldNotContainSubstring, `"headers"`)
+			})
+		})
+		Convey("When the pending task list is read", func() {
+			Convey("Then the listed task carries its headers and the other omits them", func() {
+				So(wl.Code, ShouldEqual, http.StatusOK)
+				So(listed[created.ID], ShouldResemble, headers)
+				So(listed[plain.ID], ShouldBeEmpty)
+			})
+		})
+	})
+}
+
 func TestEnqueueValidationAndConflicts(t *testing.T) {
 	env := newEnqueueTestEnv(t)
 	router := env.newRouter(Options{EnableEnqueue: true})
