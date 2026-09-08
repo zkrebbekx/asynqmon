@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useSelector } from "react-redux";
 import {
   AlertCircle, Archive, Check, ChevronLeft, ChevronRight, Copy, CopyPlus, Play, Trash2, X,
@@ -296,6 +296,16 @@ export default function TaskDrawer({ peek, resultList, onClose, onPeek, onPivot 
     [task, correlationKeys]
   );
   const metaPairs = useMemo(() => (task ? parseMetadata(task.payload) : []), [task]);
+  // The asynq 0.26 task headers, read-only, sorted by name so the block does
+  // not reshuffle on a poll. Absent on older backends and on tasks without
+  // headers; the block then renders nothing.
+  const taskHeaders = useMemo<Array<[string, string]>>(() => {
+    const h = task?.headers;
+    if (!h) return [];
+    return Object.keys(h)
+      .sort()
+      .map((name) => [name, h[name]] as [string, string]);
+  }, [task]);
 
   // Prev/next through the current result list, in visible order.
   const idx = resultList.findIndex((t) => t.id === peek.id && t.queue === peek.queue);
@@ -850,6 +860,21 @@ export default function TaskDrawer({ peek, resultList, onClose, onPeek, onPivot 
                     {task.group || "—"}
                   </dd>
                 </dl>
+                {taskHeaders.length > 0 && (
+                  <div className="mt-2.5">
+                    <Stamp className="mb-1 block">headers</Stamp>
+                    <dl className="grid grid-cols-[130px_1fr] gap-x-3 gap-y-1 text-xs">
+                      {taskHeaders.map(([name, value]) => (
+                        <Fragment key={name}>
+                          <dt className="truncate font-mono text-[var(--fc-ink3)]" title={name}>
+                            {name}
+                          </dt>
+                          <dd className="break-all font-mono">{value}</dd>
+                        </Fragment>
+                      ))}
+                    </dl>
+                  </div>
+                )}
                 {metaPairs.length > 0 && (
                   <div className="mt-2.5">
                     <Stamp className="mr-1.5">metadata · pivots:</Stamp>

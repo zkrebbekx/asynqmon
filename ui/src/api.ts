@@ -391,6 +391,10 @@ export interface TaskInfo {
   result: string;
   ttl_seconds: number;
   is_orphaned: boolean; // Only applies to task.state == 'active'
+  // The asynq 0.26 per-task header map (trace context and other producer
+  // metadata). The server omits the field when the task carries no headers,
+  // and older backends never send it, so treat absent as "none".
+  headers?: { [name: string]: string };
 }
 
 export interface ServerInfo {
@@ -688,6 +692,10 @@ export interface EnqueueTaskRequest {
   process_in_seconds?: number;
   // Optional free text recorded on the audit entry.
   reason?: string;
+  // The asynq 0.26 per-task header map. The server bounds it at 64 entries,
+  // a name of 256 bytes and a value of 4096 bytes, and it rejects a blank
+  // name. Omit the field to enqueue a task without headers.
+  headers?: { [name: string]: string };
 }
 
 export async function enqueueTask(
