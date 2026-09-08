@@ -195,6 +195,10 @@ type taskInfo struct {
 	// TTL is the number of seconds the task has left to be retained in the queue.
 	// This is calculated by (CompletedAt + ResultTTL) - Now.
 	TTL int64 `json:"ttl_seconds"`
+	// Headers is the asynq 0.26 per-task header map (trace context and other
+	// metadata the producer attached). The field is omitted when the task
+	// carries no headers, so the common case adds no bytes to a list payload.
+	Headers map[string]string `json:"headers,omitempty"`
 }
 
 // taskTTL calculates TTL for the given task.
@@ -231,6 +235,7 @@ func toTaskInfo(info *asynq.TaskInfo, pf PayloadFormatter, rf ResultFormatter) *
 		CompletedAt:   formatTimeInRFC3339(info.CompletedAt),
 		Result:        rf.FormatResult(info.Type, info.Result),
 		TTL:           int64(taskTTL(info).Seconds()),
+		Headers:       info.Headers,
 	}
 }
 
@@ -242,6 +247,10 @@ type baseTask struct {
 	MaxRetry  int    `json:"max_retry"`
 	Retried   int    `json:"retried"`
 	LastError string `json:"error_message"`
+	// Headers is the asynq 0.26 per-task header map. The field is omitted
+	// when the task carries no headers, so a list of header-free tasks keeps
+	// its current size on the wire.
+	Headers map[string]string `json:"headers,omitempty"`
 }
 
 type activeTask struct {
@@ -273,6 +282,7 @@ func toActiveTask(ti *asynq.TaskInfo, pf PayloadFormatter) *activeTask {
 		MaxRetry:  ti.MaxRetry,
 		Retried:   ti.Retried,
 		LastError: ti.LastErr,
+		Headers:   ti.Headers,
 	}
 	return &activeTask{baseTask: base, IsOrphaned: ti.IsOrphaned}
 }
@@ -303,6 +313,7 @@ func toPendingTask(ti *asynq.TaskInfo, pf PayloadFormatter) *pendingTask {
 		MaxRetry:  ti.MaxRetry,
 		Retried:   ti.Retried,
 		LastError: ti.LastErr,
+		Headers:   ti.Headers,
 	}
 	return &pendingTask{
 		baseTask: base,
@@ -331,6 +342,7 @@ func toAggregatingTask(ti *asynq.TaskInfo, pf PayloadFormatter) *aggregatingTask
 		MaxRetry:  ti.MaxRetry,
 		Retried:   ti.Retried,
 		LastError: ti.LastErr,
+		Headers:   ti.Headers,
 	}
 	return &aggregatingTask{
 		baseTask: base,
@@ -360,6 +372,7 @@ func toScheduledTask(ti *asynq.TaskInfo, pf PayloadFormatter) *scheduledTask {
 		MaxRetry:  ti.MaxRetry,
 		Retried:   ti.Retried,
 		LastError: ti.LastErr,
+		Headers:   ti.Headers,
 	}
 	return &scheduledTask{
 		baseTask:      base,
@@ -389,6 +402,7 @@ func toRetryTask(ti *asynq.TaskInfo, pf PayloadFormatter) *retryTask {
 		MaxRetry:  ti.MaxRetry,
 		Retried:   ti.Retried,
 		LastError: ti.LastErr,
+		Headers:   ti.Headers,
 	}
 	return &retryTask{
 		baseTask:      base,
@@ -418,6 +432,7 @@ func toArchivedTask(ti *asynq.TaskInfo, pf PayloadFormatter) *archivedTask {
 		MaxRetry:  ti.MaxRetry,
 		Retried:   ti.Retried,
 		LastError: ti.LastErr,
+		Headers:   ti.Headers,
 	}
 	return &archivedTask{
 		baseTask:     base,
@@ -450,6 +465,7 @@ func toCompletedTask(ti *asynq.TaskInfo, pf PayloadFormatter, rf ResultFormatter
 		MaxRetry:  ti.MaxRetry,
 		Retried:   ti.Retried,
 		LastError: ti.LastErr,
+		Headers:   ti.Headers,
 	}
 	return &completedTask{
 		baseTask:    base,
