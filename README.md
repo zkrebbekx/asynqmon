@@ -107,7 +107,7 @@ To pull the Docker image:
 docker pull ghcr.io/zkrebbekx/asynqmon
 
 # Or pin a released version (recommended)
-docker pull ghcr.io/zkrebbekx/asynqmon:0.9.0
+docker pull ghcr.io/zkrebbekx/asynqmon:0.9.1
 ```
 
 (The upstream `hibiken/asynqmon` image does not include this fork's console.)
@@ -159,7 +159,7 @@ To use the defaults, simply run and open http://localhost:8080.
 docker run --rm \
     --name asynqmon \
     -p 8080:8080 \
-    ghcr.io/zkrebbekx/asynqmon:0.9.0
+    ghcr.io/zkrebbekx/asynqmon:0.9.1
 ```
 
 By default, Asynqmon web server listens on port `8080` and connects to a Redis server running on `127.0.0.1:6379`.
@@ -171,7 +171,7 @@ To see all available flags, run:
 ./asynqmon --help
 
 # with a docker image
-docker run ghcr.io/zkrebbekx/asynqmon:0.9.0 --help
+docker run ghcr.io/zkrebbekx/asynqmon:0.9.1 --help
 ```
 
 Here's the available flags:
@@ -345,14 +345,14 @@ query. The credentials are never logged.
 docker run --rm \
     --name asynqmon \
     -p 3000:3000 \
-    ghcr.io/zkrebbekx/asynqmon:0.9.0 --port=3000 --redis-addr=host.docker.internal:6380
+    ghcr.io/zkrebbekx/asynqmon:0.9.1 --port=3000 --redis-addr=host.docker.internal:6380
 
 # with Docker (connect to a Redis server running in the Docker container)
 docker run --rm \
     --name asynqmon \
     --network dev-network \
     -p 8080:8080 \
-    ghcr.io/zkrebbekx/asynqmon:0.9.0 --redis-addr=dev-redis:6379
+    ghcr.io/zkrebbekx/asynqmon:0.9.1 --redis-addr=dev-redis:6379
 ```
 
 Next, go to [localhost:8080](http://localhost:8080). The **Overview** landing
