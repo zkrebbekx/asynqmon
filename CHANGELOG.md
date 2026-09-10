@@ -129,6 +129,23 @@ guidance for the move is in [docs/UPGRADING.md](docs/UPGRADING.md).
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-09-10
+
+### Added
+
+- (api/ui): A queue whose name contains a slash is now addressable. asynq puts no restriction on a queue name, so a producer may create `tenant/acme`. Every API route carries the queue as one path segment, and gorilla/mux matched the decoded request path, where `%2F` is a real `/`. `GET /api/queues/tenant%2Facme` therefore matched no route and fell through to the SPA fallback: the console could list such a queue but never manage it. The router now calls `UseEncodedPath` and matches the raw path, so `%2F` stays inside one segment
+- (ui): Component tests for `BulkJobModal`, the bulk-mutation confirm screen. The suite drives the modal through the delete gate, the preview meter, the mandatory reason, the throttle choice, the typed confirmation above 1,000 candidates, the execute handoff and the live meter. The behaviour of the component does not change
+
+### Changed
+
+- (ui): The console no longer disables its mutating controls for a queue whose name contains a slash. That stopgap existed because the API could not address such a queue. The API now can, so `isAddressableName` and the notice it drove are gone from the queue workspace, the global tasks view, the selection verbs and the pause, resume and delete guards
+- (ui): The TypeScript build enables `noUncheckedIndexedAccess`, and all 58 resulting errors are fixed by a guard, a default or a restructure. No fix adds a non-null assertion, an `any` or a cast
+
+### Security
+
+- (ui): `vitest` moves from 4.1.9 to 4.1.11, which pulls `@vitest/mocker` 4.1.11. Below that version `@vitest/mocker` registers the target path of a redirect mock without checking it against the file-serving allowlist of the dev server, so a crafted request can read an arbitrary file. GHSA-82fw-gwwq-j7x9 / CVE-2026-84373, moderate, development scope
+- (ui): Seven npm advisories clear, five of them high. `react-router` and `react-router-dom` move to 7.18.3 (RSC-mode CSRF bypass; this console does not use RSC mode). `query-string` moves to 9.5.1 and `decode-uri-component` to 0.5.0 (denial of service on a malformed percent sequence). `nanoid`, `postcss` and `undici` move to 3.3.18, 8.5.28 and 7.29.1
+
 ## [0.9.1] - 2026-09-08
 
 ### Added
