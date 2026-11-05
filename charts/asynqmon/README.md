@@ -92,7 +92,9 @@ replicas over zones or nodes. Keep `pdb.enabled=false` with a single replica:
 ## Probes
 
 Readiness calls `GET /healthz`, which PINGs Redis with a 2s budget and answers
-`200` or `503`. `readinessProbe.timeoutSeconds` is 4 so the kubelet waits
+`200` or `503`. When `rootPath` is set the probe path becomes
+`<rootPath>/healthz`, because that is where the process serves it.
+`readinessProbe.timeoutSeconds` is 4 so the kubelet waits
 longer than that budget; a shorter timeout makes readiness flap on any Redis
 stall. Liveness is a TCP check on the HTTP port, on purpose: an HTTP liveness
 probe on `/healthz` restart-loops the pods during a Redis outage, and a
@@ -158,6 +160,7 @@ The container always receives `--port=8080`; change the published port with
 | Key | Flag | Description | Default |
 | --- | --- | --- | --- |
 | `readOnly` | `--read-only` | Read-only Web UI | `false` |
+| `rootPath` | `--root-path` | URL prefix for the UI, API, and `/healthz` (e.g. `/asynqmon`). Empty serves at `/`. The ingress path must match and must not rewrite the prefix away. `/metrics` stays at `/metrics` | `""` |
 | `enableEnqueue` | `--enable-enqueue` | Allow creating tasks from the Web UI | `false` |
 | `purgeOwnedKeys` | `--purge-owned-keys` | Let maintenance actions delete keys asynqmon owns | `false` |
 | `auth.header` | `--auth-header` | Reverse-proxy header resolved as the acting user | `""` |

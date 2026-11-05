@@ -99,4 +99,7 @@ then fails at run time. Every message names the value to change.
 {{- if and .Values.pdb.enabled .Values.pdb.maxUnavailable .Values.pdb.minAvailable -}}
 {{- fail "Set either pdb.minAvailable or pdb.maxUnavailable, not both. Clear pdb.minAvailable to use pdb.maxUnavailable." -}}
 {{- end -}}
+{{- if and .Values.rootPath (not (hasPrefix "/" .Values.rootPath)) -}}
+{{- fail "rootPath must start with a slash (e.g. /asynqmon)." -}}
+{{- end -}}
 {{- end -}}
