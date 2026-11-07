@@ -29,7 +29,7 @@ RUN npm ci && npm run build
 # Building a backend.
 #
 
-FROM --platform=$BUILDPLATFORM golang:1.26.8-alpine@sha256:ce864e7223ac17b1775e6fd0b4c0db580c2eb50e7953a427916379e4b92a1628 AS backend
+FROM --platform=$BUILDPLATFORM golang:1.26.10-alpine@sha256:87c65a688975c0b1d4585d204874c45ca78354670e3a5f11368c5a492303d696 AS backend
 
 # CA bundle for the final scratch image: the binary dials TLS Redis
 # (--redis-tls / rediss:// URLs) and HTTPS Prometheus (--prometheus-addr),

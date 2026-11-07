@@ -5,7 +5,7 @@ can run them before you open a pull request.
 
 ## Prerequisites
 
-- Go, at the version in `go.mod` (`go 1.26.0`, `toolchain go1.26.8`).
+- Go, at the version in `go.mod` (`go 1.26.0`, `toolchain go1.26.10`).
 - Node 22 and npm, for the Web UI.
 - A local Redis, for the integration tests.
 - Helm, if you change the chart.
