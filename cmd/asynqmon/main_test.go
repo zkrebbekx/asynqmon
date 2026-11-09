@@ -601,6 +601,12 @@ func TestRootPath(t *testing.T) {
 	onlySlashErr := validateConfig(onlySlash)
 	query := &Config{RootPath: "/asynqmon?x=1"}
 	queryErr := validateConfig(query)
+	brace := &Config{RootPath: "/mon{x}"}
+	braceErr := validateConfig(brace)
+	double := &Config{RootPath: "/asynqmon//"}
+	doubleErr := validateConfig(double)
+	dotdot := &Config{RootPath: "/a/../b"}
+	dotdotErr := validateConfig(dotdot)
 
 	opts := buildOptions(slash, asynq.RedisClientOpt{Addr: "127.0.0.1:6379"})
 
@@ -639,6 +645,11 @@ func TestRootPath(t *testing.T) {
 				So(empty.RootPath, ShouldBeEmpty)
 				So(onlySlashErr, ShouldBeNil)
 				So(onlySlash.RootPath, ShouldBeEmpty)
+			})
+			Convey("Then a mux pattern, a double slash, and a dot segment are refused", func() {
+				So(braceErr, ShouldNotBeNil)
+				So(doubleErr, ShouldNotBeNil)
+				So(dotdotErr, ShouldNotBeNil)
 			})
 		})
 	})

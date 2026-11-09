@@ -1,6 +1,7 @@
 package asynqmon
 
 import (
+	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -265,6 +266,52 @@ func TestSecurityHeadersOnSPAAndAPI(t *testing.T) {
 			Convey("Then each response gets a fresh nonce", func() {
 				So(nonceOf(secondRec), ShouldNotBeEmpty)
 				So(nonceOf(secondRec), ShouldNotEqual, nonceOf(indexRec))
+			})
+		})
+	})
+}
+
+func TestUIAssetsRootPathBoundary(t *testing.T) {
+	Convey("Given the UI handler under RootPath /asynqmon", t, func() {
+		h := &uiAssetsHandler{
+			rootPath:      "/asynqmon",
+			contents:      staticContents,
+			staticDirPath: "ui/build",
+			indexFileName: "index.html",
+		}
+		serve := func(p string) *httptest.ResponseRecorder {
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, p, nil))
+			return rec
+		}
+
+		Convey("When the bare prefix is requested", func() {
+			rec := serve("/asynqmon")
+			Convey("Then the index page is served", func() {
+				So(rec.Code, ShouldEqual, http.StatusOK)
+				So(rec.Header().Get("Content-Type"), ShouldContainSubstring, "text/html")
+			})
+		})
+		Convey("When an asset under the prefix is requested", func() {
+			Convey("Then the asset is served", func() {
+				So(serve("/asynqmon/favicon.svg").Code, ShouldEqual, http.StatusOK)
+			})
+		})
+		Convey("When a path only shares the prefix text", func() {
+			Convey("Then it is refused, not served the index", func() {
+				So(serve("/asynqmonx/api/queues").Code, ShouldEqual, http.StatusBadRequest)
+			})
+		})
+		Convey("When a path climbs out of the prefix", func() {
+			Convey("Then it is refused", func() {
+				So(serve("/asynqmon/../etc/passwd").Code, ShouldEqual, http.StatusBadRequest)
+			})
+		})
+		Convey("When an unknown API path is under the prefix", func() {
+			rec := serve("/asynqmon/api/nope")
+			Convey("Then the response is a JSON 404", func() {
+				So(rec.Code, ShouldEqual, http.StatusNotFound)
+				So(rec.Header().Get("Content-Type"), ShouldContainSubstring, "application/json")
 			})
 		})
 	})

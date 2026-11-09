@@ -102,4 +102,7 @@ then fails at run time. Every message names the value to change.
 {{- if and .Values.rootPath (not (hasPrefix "/" .Values.rootPath)) -}}
 {{- fail "rootPath must start with a slash (e.g. /asynqmon)." -}}
 {{- end -}}
+{{- if and .Values.rootPath (not (regexMatch "^(/[A-Za-z0-9._~-]+)*/?$" .Values.rootPath)) -}}
+{{- fail "rootPath must be a plain URL path prefix such as /asynqmon: letters, digits, '-', '_', '.', '~', and single '/' separators." -}}
+{{- end -}}
 {{- end -}}

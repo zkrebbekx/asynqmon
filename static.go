@@ -116,8 +116,10 @@ func (h *uiAssetsHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		urlPath = "/"
 	}
 
-	// Get the path relative to the root path.
-	if !strings.HasPrefix(urlPath, h.rootPath) {
+	// Get the path relative to the root path. Match whole segments only:
+	// "/asynqmonx" is not under "/asynqmon". With an empty root path every
+	// cleaned path starts with "/", so the check always passes.
+	if urlPath != h.rootPath && !strings.HasPrefix(urlPath, h.rootPath+"/") {
 		http.Error(w, "unexpected path prefix", http.StatusBadRequest)
 		return
 	}
