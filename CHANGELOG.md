@@ -5,17 +5,6 @@ All notable changes to this project will be documented in this file.
 The format is based on ["Keep a Changelog"](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## Unreleased
-
-### Added
-
-- (cmd): `--root-path` / `ROOT_PATH` — serve the UI, API, and `/healthz` under a URL prefix for reverse-proxy deployments (upstream hibiken/asynqmon#259, #308)
-- (helm): `rootPath` value wires the flag and moves readiness to `<rootPath>/healthz`
-
-### Fixed
-
-- (pkg): SPA static handler resolves URL paths with `path.Clean` instead of `filepath.Abs` so sub-path serving works on Windows
-
 ## Breaking and API changes since upstream 0.7.2
 
 This fork's HTTP API is a superset of upstream `hibiken/asynqmon` 0.7.2, but
@@ -138,7 +127,19 @@ guidance for the move is in [docs/UPGRADING.md](docs/UPGRADING.md).
     outcomes and keeps records for 24 hours, not 7 days. Records written
     under the old defaults expire on their own.
 
-## [Unreleased]
+## [0.11.0] - 2026-11-09
+
+### Added
+
+- (cmd): `--root-path` / `ROOT_PATH` — serve the UI, API, and `/healthz` under a URL prefix for reverse-proxy deployments (upstream hibiken/asynqmon#259, #308)
+- (helm): `rootPath` value wires the flag and moves readiness to `<rootPath>/healthz`
+- (helm): The chart refuses a `rootPath` that the binary refuses: a missing leading slash, `//`, or a character outside letters, digits, `-`, `_`, `.` and `~`
+
+### Fixed
+
+- (pkg): SPA static handler resolves URL paths with `path.Clean` instead of `filepath.Abs` so sub-path serving works on Windows
+- (cmd): `--root-path` refuses `{...}`, `//` and dot segments. `mux.PathPrefix` reads `{x}` as a route variable, so `--root-path=/mon{x}` served `/monANY/`
+- (pkg): The static handler matches the root path on whole segments. Under `/asynqmon`, `GET /asynqmonx/api/queues` returned the SPA index with a 200. It now returns 400
 
 ### Security
 
