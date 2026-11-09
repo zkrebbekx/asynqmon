@@ -140,6 +140,12 @@ guidance for the move is in [docs/UPGRADING.md](docs/UPGRADING.md).
 
 ## [Unreleased]
 
+### Security
+
+- (build): The Go toolchain moves from 1.26.8 to 1.26.10, in `go.mod` and in the Dockerfile builder image. Twelve standard-library advisories clear in `crypto/tls`, `crypto/x509`, `html/template`, `net/http` and `net/textproto` (GO-2026-6599, -6600, -6603, -6605, -6607, -6608, -6610, -6611, -6612, -6613, -6617, -6809). govulncheck reached them from the HTTP handlers, so CI failed on every pull request. The `crypto/x509` fix is only in 1.26.10
+- (ui): `decode-uri-component` moves from 0.5.0 to 0.5.1. Version 0.5.0 replaces a run of percent-encoded sequences in quadratic time, so a crafted URL query can stall the console tab. GHSA-qr28-fpjm-wq7f, high
+- (ui): Nineteen npm advisories clear, ten of them high. `axios` moves to 1.21.0 (3), `vite` to 8.3.6 (6), `vitest` and `@vitest/mocker` to 4.1.12 (2), `undici` to 7.30.2 (5), `follow-redirects` to 1.16.2 (3) and `source-map-js` to 1.2.2 (1). `vite`, `vitest` and `source-map-js` are development scope. The embedded UI build is regenerated
+
 ## [0.10.0] - 2026-09-10
 
 ### Added
