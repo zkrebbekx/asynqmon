@@ -513,22 +513,33 @@ func validateConfig(cfg *Config) error {
 }
 
 // normalizeRootPath trims --root-path into the form Options.RootPath
-// accepts. Empty stays empty (serve at /). "/" becomes empty after the
-// trailing-slash trim, matching the library. Anything else must start
-// with "/" and contain no query, fragment, or whitespace: New panics on
-// a missing slash, so the binary rejects it here.
+// accepts. Empty and "/" both serve at /. Anything else must start with
+// "/", contain only unreserved URL characters, and already be clean (no
+// "//", "/./" or "/../"). mux.PathPrefix reads "{...}" as a route
+// variable, so the binary refuses it here instead of matching any segment.
 func normalizeRootPath(raw string) (string, error) {
 	s := strings.TrimSpace(raw)
+	if s != "" && !strings.HasPrefix(s, "/") {
+		return "", fmt.Errorf("--root-path %q must start with a slash", raw)
+	}
+	s = strings.TrimSuffix(s, "/")
 	if s == "" {
 		return "", nil
 	}
-	if strings.ContainsAny(s, "?# \t\r\n") {
-		return "", fmt.Errorf("--root-path %q must be a URL path prefix (e.g. /asynqmon)", raw)
+	if s == "/" || path.Clean(s) != s || strings.IndexFunc(s, invalidRootPathRune) >= 0 {
+		return "", fmt.Errorf("--root-path %q must be a plain URL path prefix such as /asynqmon: letters, digits, '-', '_', '.', '~', and single '/' separators", raw)
 	}
-	if !strings.HasPrefix(s, "/") {
-		return "", fmt.Errorf("--root-path %q must start with a slash", raw)
+	return s, nil
+}
+
+// invalidRootPathRune reports a character outside the RFC 3986 unreserved
+// set plus "/".
+func invalidRootPathRune(r rune) bool {
+	switch {
+	case 'a' <= r && r <= 'z', 'A' <= r && r <= 'Z', '0' <= r && r <= '9':
+		return false
 	}
-	return strings.TrimRight(s, "/"), nil
+	return !strings.ContainsRune("/-._~", r)
 }
 
 // runPurge implements --purge-owned-keys: it deletes every asynqmon:* key in
