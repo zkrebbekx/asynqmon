@@ -11,6 +11,7 @@ import (
 	"html/template"
 	"io/fs"
 	"net/http"
+	"path"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -107,36 +108,40 @@ type uiAssetsHandler struct {
 func (h *uiAssetsHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	SetSecurityHeaders(w.Header())
 
-	// Get the absolute path to prevent directory traversal.
-	path, err := filepath.Abs(r.URL.Path)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
+	// URL paths stay slash-separated. filepath.Abs would turn "/asynqmon"
+	// into "C:\asynqmon" on Windows and the prefix check would miss.
+	// path.Clean also collapses ".." so a request cannot escape the root.
+	urlPath := path.Clean(r.URL.Path)
+	if !strings.HasPrefix(urlPath, "/") {
+		urlPath = "/"
 	}
 
-	// Get the path relative to the root path.
-	if !strings.HasPrefix(path, h.rootPath) {
+	// Get the path relative to the root path. Match whole segments only:
+	// "/asynqmonx" is not under "/asynqmon". With an empty root path every
+	// cleaned path starts with "/", so the check always passes.
+	if urlPath != h.rootPath && !strings.HasPrefix(urlPath, h.rootPath+"/") {
 		http.Error(w, "unexpected path prefix", http.StatusBadRequest)
 		return
 	}
-	path = strings.TrimPrefix(path, h.rootPath)
+	urlPath = strings.TrimPrefix(urlPath, h.rootPath)
 
 	// Unmatched API routes must return a JSON 404, not the SPA index page —
 	// otherwise the frontend gets HTML with a 200 and fails with a cryptic
 	// JSON parse error.
-	if path == "/api" || strings.HasPrefix(path, "/api/") {
+	if urlPath == "/api" || strings.HasPrefix(urlPath, "/api/") {
 		writeErrorMsg(w, http.StatusNotFound, "api endpoint not found")
 		return
 	}
 
-	if code, err := h.serveFile(w, r, path); err != nil {
+	if code, err := h.serveFile(w, r, urlPath); err != nil {
 		http.Error(w, err.Error(), code)
 		return
 	}
 }
 
 func (h *uiAssetsHandler) indexFilePath() string {
-	return filepath.Join(h.staticDirPath, h.indexFileName)
+	// embed.FS names use forward slashes, including on Windows.
+	return path.Join(h.staticDirPath, h.indexFileName)
 }
 
 func (h *uiAssetsHandler) indexTemplate() (*template.Template, error) {
@@ -207,20 +212,22 @@ func stampScriptNonce(page []byte, nonce string) []byte {
 // Missing extension-less paths are SPA routes and get the index file; missing
 // paths with a file extension (e.g. a stale content-hashed chunk after a
 // redeploy) get a 404 so browsers don't try to execute HTML as a JS module.
-func (h *uiAssetsHandler) serveFile(w http.ResponseWriter, r *http.Request, path string) (code int, err error) {
-	if path == "/" || path == "" {
+func (h *uiAssetsHandler) serveFile(w http.ResponseWriter, r *http.Request, urlPath string) (code int, err error) {
+	if urlPath == "/" || urlPath == "" {
 		if err := h.renderIndexFile(w); err != nil {
 			return http.StatusInternalServerError, err
 		}
 		return http.StatusOK, nil
 	}
-	assetPath := filepath.Join(h.staticDirPath, path)
+	// path.Join, not filepath.Join: on Windows a leading "/" is an absolute
+	// path and filepath.Join would drop the "ui/build" prefix.
+	assetPath := path.Join(h.staticDirPath, urlPath)
 	contents, err := h.contents.ReadFile(assetPath)
 	if err != nil {
 		var pathErr *fs.PathError
 		if errors.As(err, &pathErr) {
-			if filepath.Ext(path) != "" {
-				return http.StatusNotFound, fmt.Errorf("file not found: %s", path)
+			if filepath.Ext(urlPath) != "" {
+				return http.StatusNotFound, fmt.Errorf("file not found: %s", urlPath)
 			}
 			if err := h.renderIndexFile(w); err != nil {
 				return http.StatusInternalServerError, err
@@ -240,7 +247,7 @@ func (h *uiAssetsHandler) serveFile(w http.ResponseWriter, r *http.Request, path
 	w.Header().Set("Content-Type", ct)
 
 	// Vite emits content-hashed filenames under /assets; they can be cached forever.
-	if strings.HasPrefix(path, "/assets/") {
+	if strings.HasPrefix(urlPath, "/assets/") {
 		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
 	}
 

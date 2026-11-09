@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"path"
 	"strconv"
 	"strings"
 	"syscall"
@@ -84,6 +85,11 @@ type Config struct {
 	ReadOnly         bool
 	MaxPayloadLength int
 	MaxResultLength  int
+
+	// RootPath is the URL prefix for the UI, API, and /healthz when the
+	// process sits behind a reverse proxy (e.g. /asynqmon). Empty serves
+	// at /. /metrics stays on the process root either way.
+	RootPath string
 
 	// MaxDetailPayloadLength caps the formatted payload/result served by the
 	// task DETAIL endpoint (GET /api/queues/{qname}/tasks/{task_id}) in utf8
@@ -197,6 +203,7 @@ func parseFlags(progname string, args []string) (cfg *Config, output string, err
 	flags.StringVar(&conf.PrometheusServerAddr, "prometheus-addr", getEnvDefaultString("PROMETHEUS_ADDR", ""), "address of prometheus server to query time series")
 	flags.StringVar(&conf.PrometheusBasicAuth, "prometheus-basic-auth", getEnvDefaultString("PROMETHEUS_BASIC_AUTH", ""), "user:password basic-auth credentials sent with every query to --prometheus-addr (upstream #248); prefer the env var to keep the secret out of argv")
 	flags.BoolVar(&conf.ReadOnly, "read-only", getEnvOrDefaultBool("READ_ONLY", false), "restrict to read-only mode")
+	flags.StringVar(&conf.RootPath, "root-path", getEnvDefaultString("ROOT_PATH", ""), "URL prefix for the UI, API, and /healthz when served behind a reverse proxy (e.g. /asynqmon); empty serves at /")
 	flags.DurationVar(&conf.StatsInterval, "stats-interval", getEnvOrDefaultDuration("STATS_INTERVAL", 5*time.Second), "interval between stats sweeps (e.g. 5s, 30s)")
 	flags.BoolVar(&conf.DisableStats, "disable-stats", getEnvOrDefaultBool("DISABLE_STATS", false), "disable the background fleet stats sweeper and /api/fleet endpoints")
 	flags.DurationVar(&conf.AttentionGroupStallAfter, "attention-group-stall-after", getEnvOrDefaultDuration("ATTENTION_GROUP_STALL_AFTER", 5*time.Minute), "raise a GROUP_STALL finding when the oldest member of a group has aggregated longer than this")
@@ -410,6 +417,7 @@ func buildOptions(cfg *Config, redisConnOpt asynq.RedisConnOpt) asynqmon.Options
 		// Passed through verbatim and never logged.
 		PrometheusBasicAuth:          cfg.PrometheusBasicAuth,
 		ReadOnly:                     cfg.ReadOnly,
+		RootPath:                     cfg.RootPath,
 		Version:                      version,
 		StatsInterval:                cfg.StatsInterval,
 		StatsDisabled:                cfg.DisableStats,
@@ -497,7 +505,42 @@ func validateConfig(cfg *Config) error {
 	if _, err := parseTrustedProxyCIDRs(splitList(cfg.TrustedProxies)); err != nil {
 		return err
 	}
+	root, err := normalizeRootPath(cfg.RootPath)
+	if err != nil {
+		return err
+	}
+	cfg.RootPath = root
 	return nil
+}
+
+// normalizeRootPath trims --root-path into the form Options.RootPath
+// accepts. Empty and "/" both serve at /. Anything else must start with
+// "/", contain only unreserved URL characters, and already be clean (no
+// "//", "/./" or "/../"). mux.PathPrefix reads "{...}" as a route
+// variable, so the binary refuses it here instead of matching any segment.
+func normalizeRootPath(raw string) (string, error) {
+	s := strings.TrimSpace(raw)
+	if s != "" && !strings.HasPrefix(s, "/") {
+		return "", fmt.Errorf("--root-path %q must start with a slash", raw)
+	}
+	s = strings.TrimSuffix(s, "/")
+	if s == "" {
+		return "", nil
+	}
+	if s == "/" || path.Clean(s) != s || strings.IndexFunc(s, invalidRootPathRune) >= 0 {
+		return "", fmt.Errorf("--root-path %q must be a plain URL path prefix such as /asynqmon: letters, digits, '-', '_', '.', '~', and single '/' separators", raw)
+	}
+	return s, nil
+}
+
+// invalidRootPathRune reports a character outside the RFC 3986 unreserved
+// set plus "/".
+func invalidRootPathRune(r rune) bool {
+	switch {
+	case 'a' <= r && r <= 'z', 'A' <= r && r <= 'Z', '0' <= r && r <= '9':
+		return false
+	}
+	return !strings.ContainsRune("/-._~", r)
 }
 
 // runPurge implements --purge-owned-keys: it deletes every asynqmon:* key in

@@ -181,6 +181,7 @@ _Note_: Use `--redis-url` to specify address, db-number, and password with one f
 | Flag                              | Env                       | Description                                                                                                                  | Default          |
 | --------------------------------- | ------------------------- | ---------------------------------------------------------------------------------------------------------------------------- | ---------------- |
 | `--port`(int)                     | `PORT`                    | port number to use for web ui server                                                                                         | 8080             |
+| `--root-path`(string)             | `ROOT_PATH`               | URL prefix for the UI, API, and `/healthz` when served behind a reverse proxy (e.g. `/asynqmon`). Empty serves at `/`. `/metrics` stays at the process root. See [Running behind a subpath](#running-behind-a-subpath) | ""               |
 | `--redis-url`(string)            | `REDIS_URL`               | URL to redis or sentinel server. See [godoc](https://pkg.go.dev/github.com/hibiken/asynq#ParseRedisURI) for supported format | ""               || `--redis-addr`(string)            | `REDIS_ADDR`              | address of redis server to connect to                                                                                        | "127.0.0.1:6379" |
 | `--redis-db`(int)                 | `REDIS_DB`                | redis database number                                                                                                        | 0                |
 | `--redis-password`(string)        | `REDIS_PASSWORD`          | password to use when connecting to redis server                                                                              | ""               |
@@ -222,6 +223,37 @@ _Note_: Use `--redis-url` to specify address, db-number, and password with one f
 | `--allow-untrusted-auth-header`(bool) | `ALLOW_UNTRUSTED_AUTH_HEADER` | start with `--auth-header` set and `--trusted-proxies` empty. The header is then trusted from every peer, which lets any direct client forge the audit actor (insecure) | false            |
 | `--purge-owned-keys`(bool)        | `PURGE_OWNED_KEYS`        | delete every `asynqmon:*` key in the configured redis database, print the counts, and exit. The rollback helper; it never touches `asynq:*` keys — see [docs/UPGRADING.md](docs/UPGRADING.md) | false            |
 | `--version`(bool)                 | —                         | print the asynqmon version and exit                                                                                          | false            |
+
+### Running behind a subpath
+
+`--root-path` (or `ROOT_PATH`) makes the UI, the API, and `/healthz` live under that prefix, so a reverse proxy can forward the public URL unchanged. Leave it empty to serve at `/`.
+
+```bash
+./asynqmon --redis-addr=127.0.0.1:6379 --root-path=/asynqmon
+```
+
+Open `http://localhost:8080/asynqmon/`. The page, `/asynqmon/api/...` (including the SSE stream `/asynqmon/api/fleet/events`), and `GET /asynqmon/healthz` are all under that prefix. `GET /metrics` stays at `/metrics` on the process, outside the prefix.
+
+The proxy must pass the prefix through. A `proxy_pass` with a trailing slash strips it, and the process then looks for routes that are no longer there:
+
+```nginx
+location = /asynqmon {
+    return 301 /asynqmon/;
+}
+
+location ^~ /asynqmon/ {
+    proxy_pass http://asynqmon:8080;
+    proxy_http_version 1.1;
+    proxy_set_header Host $http_host;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_buffering off;
+    proxy_read_timeout 3600s;
+}
+```
+
+`location /asynqmon/` does not match `/asynqmon` without the slash, so the redirect above is required. `proxy_buffering off` keeps the fleet event stream from sitting in the proxy. Do not rewrite the HTML: the index page already emits asset and API URLs with the prefix.
+
+The value must start with `/`. A trailing slash is removed, and `/` alone is the same as empty. Login is still the proxy's job. `--trust-basic-auth-user` only records the Basic-Auth username in the audit log; asynqmon never checks the password.
 
 ### Connecting to Redis
 

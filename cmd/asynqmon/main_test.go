@@ -498,6 +498,7 @@ func TestBuildOptionsCarriesEveryFlag(t *testing.T) {
 		AttentionRetryStormThreshold: 250,
 		AttentionPausedLongAfter:     48 * time.Hour,
 		AttentionGroupStallAfter:     3 * time.Minute,
+		RootPath:                     "/asynqmon",
 	}
 	opts := buildOptions(cfg, asynq.RedisClientOpt{Addr: cfg.RedisAddr})
 
@@ -527,6 +528,7 @@ func TestBuildOptionsCarriesEveryFlag(t *testing.T) {
 				So(opts.RequireIdentity, ShouldBeTrue)
 				So(opts.EnableEnqueue, ShouldBeTrue)
 				So(opts.CorrelationKeys, ShouldResemble, []string{"job_id", "trace_id"})
+				So(opts.RootPath, ShouldEqual, "/asynqmon")
 			})
 		})
 	})
@@ -574,6 +576,80 @@ func TestRedisPasswordAppliesAfterURL(t *testing.T) {
 				opt, ok := sentinel.(asynq.RedisFailoverClientOpt)
 				So(ok, ShouldBeTrue)
 				So(opt.Password, ShouldEqual, "s3cret")
+			})
+		})
+	})
+}
+
+// --root-path / ROOT_PATH is the URL prefix for the UI, API, and /healthz.
+// The flag wins over the env var. validateConfig trims a trailing slash
+// and refuses a value the library would panic on.
+func TestRootPath(t *testing.T) {
+	flagCfg, flagOut, flagErr := parseFlags("asynqmon", []string{"--root-path", "/asynqmon/"})
+
+	t.Setenv("ROOT_PATH", "/monitoring")
+	envCfg, envOut, envErr := parseFlags("asynqmon", []string{})
+	bothCfg, bothOut, bothErr := parseFlags("asynqmon", []string{"--root-path", "/asynqmon"})
+
+	bare := &Config{RootPath: "asynqmon"}
+	bareErr := validateConfig(bare)
+	slash := &Config{RootPath: "  /asynqmon/ "}
+	slashErr := validateConfig(slash)
+	empty := &Config{}
+	emptyErr := validateConfig(empty)
+	onlySlash := &Config{RootPath: "/"}
+	onlySlashErr := validateConfig(onlySlash)
+	query := &Config{RootPath: "/asynqmon?x=1"}
+	queryErr := validateConfig(query)
+	brace := &Config{RootPath: "/mon{x}"}
+	braceErr := validateConfig(brace)
+	double := &Config{RootPath: "/asynqmon//"}
+	doubleErr := validateConfig(double)
+	dotdot := &Config{RootPath: "/a/../b"}
+	dotdotErr := validateConfig(dotdot)
+
+	opts := buildOptions(slash, asynq.RedisClientOpt{Addr: "127.0.0.1:6379"})
+
+	Convey("Given the root-path flag", t, func() {
+		Convey("When --root-path is passed", func() {
+			Convey("Then the raw flag value is kept until validation", func() {
+				So(flagErr, ShouldBeNil)
+				So(flagOut, ShouldBeEmpty)
+				So(flagCfg.RootPath, ShouldEqual, "/asynqmon/")
+			})
+		})
+		Convey("When only ROOT_PATH is set", func() {
+			Convey("Then the env value applies", func() {
+				So(envErr, ShouldBeNil)
+				So(envOut, ShouldBeEmpty)
+				So(envCfg.RootPath, ShouldEqual, "/monitoring")
+			})
+		})
+		Convey("When both the flag and the env var are set", func() {
+			Convey("Then the flag wins", func() {
+				So(bothErr, ShouldBeNil)
+				So(bothOut, ShouldBeEmpty)
+				So(bothCfg.RootPath, ShouldEqual, "/asynqmon")
+			})
+		})
+		Convey("When the value is normalized", func() {
+			Convey("Then a trailing slash is removed and a bare name is refused", func() {
+				So(slashErr, ShouldBeNil)
+				So(slash.RootPath, ShouldEqual, "/asynqmon")
+				So(opts.RootPath, ShouldEqual, "/asynqmon")
+				So(bareErr, ShouldNotBeNil)
+				So(queryErr, ShouldNotBeNil)
+			})
+			Convey("Then an empty value and a lone slash both serve at /", func() {
+				So(emptyErr, ShouldBeNil)
+				So(empty.RootPath, ShouldBeEmpty)
+				So(onlySlashErr, ShouldBeNil)
+				So(onlySlash.RootPath, ShouldBeEmpty)
+			})
+			Convey("Then a mux pattern, a double slash, and a dot segment are refused", func() {
+				So(braceErr, ShouldNotBeNil)
+				So(doubleErr, ShouldNotBeNil)
+				So(dotdotErr, ShouldNotBeNil)
 			})
 		})
 	})

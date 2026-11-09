@@ -64,3 +64,4 @@ topologySpreadConstraints:
     labelSelector:
       matchLabels:
         app.kubernetes.io/name: asynqmon
+rootPath: /asynqmon

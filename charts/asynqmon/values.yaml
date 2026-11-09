@@ -41,6 +41,11 @@ redis:
 
 # Run the Web UI in read-only mode.
 readOnly: false
+# URL prefix when the UI is served behind a reverse proxy (e.g. /asynqmon).
+# Empty serves at /. Must start with "/". The ingress path must match and
+# must not rewrite the prefix away. /metrics stays at the process root;
+# readiness moves to <rootPath>/healthz.
+rootPath: ""
 # Allow creating tasks from the Web UI (POST /api/queues/{qname}/tasks).
 # Always excluded in read-only mode.
 enableEnqueue: false

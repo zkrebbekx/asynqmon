@@ -1,5 +1,6 @@
 {{- include "asynqmon.validateValues" . -}}
 {{- $urlFromSecret := include "asynqmon.redisUrlFromSecret" . -}}
+{{- $rootPath := trimSuffix "/" .Values.rootPath -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -62,6 +63,9 @@ spec:
             {{- end }}
             {{- if .Values.readOnly }}
             - "--read-only"
+            {{- end }}
+            {{- if $rootPath }}
+            - "--root-path={{ $rootPath }}"
             {{- end }}
             {{- if .Values.enableEnqueue }}
             - "--enable-enqueue"
@@ -233,7 +237,20 @@ spec:
           {{- end }}
           {{- with .Values.readinessProbe }}
           readinessProbe:
+            {{- if and $rootPath .httpGet }}
+            {{- $rest := omit . "httpGet" }}
+            {{- if $rest }}
+            {{- toYaml $rest | nindent 12 }}
+            {{- end }}
+            httpGet:
+              {{- $httpGet := omit .httpGet "path" }}
+              {{- if $httpGet }}
+              {{- toYaml $httpGet | nindent 14 }}
+              {{- end }}
+              path: {{ printf "%s/healthz" $rootPath | quote }}
+            {{- else }}
             {{- toYaml . | nindent 12 }}
+            {{- end }}
           {{- end }}
           {{- with .Values.securityContext }}
           securityContext:

@@ -111,6 +111,10 @@ render "maxUnavailable form of the PDB" \
   --set pdb.minAvailable=null --set pdb.maxUnavailable=1
 contains "maxUnavailable: 1"
 
+render "UI under a root path" --set rootPath=/asynqmon/
+contains '"--root-path=/asynqmon"'
+contains 'path: "/asynqmon/healthz"'
+
 echo
 echo "== rejected combinations"
 render_must_fail "redis.url with redis.password" "mutually exclusive" \
@@ -121,6 +125,12 @@ render_must_fail "existingSecretUrlKey without existingSecret" "needs redis.exis
   --set redis.existingSecretUrlKey=url
 render_must_fail "serviceMonitor without the exporter" "enableExporter" \
   --set serviceMonitor.enabled=true
+render_must_fail "rootPath without a leading slash" "must start with a slash" \
+  --set rootPath=asynqmon
+render_must_fail "rootPath with a double slash" "plain URL path prefix" \
+  --set rootPath=/asynqmon//
+render_must_fail "rootPath with a mux pattern" "plain URL path prefix" \
+  --set-string 'rootPath=/mon{x}'
 
 echo
 echo "== flag parity between the chart and its README"
